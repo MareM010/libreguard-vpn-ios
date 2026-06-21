@@ -6,60 +6,87 @@
 //
 
 import SwiftUI
+import SwiftData
+import CoreImage.CIFilterBuiltins
 
 struct ContentView: View {
-    @State private var authScreen: AuthScreen = .login
+    @EnvironmentObject private var app: AppModel
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab: MainTab = .home
     @State private var overlayScreen: OverlayScreen?
-    @State private var registeredEmail = ""
     @State private var isDarkMode = false
 
     var body: some View {
+        let isUITestLoginMode = ProcessInfo.processInfo.environment["UITEST_FORCE_LOGIN"] == "1"
         ZStack {
             Theme.background.ignoresSafeArea()
 
-            switch authScreen {
-            case .login:
+            if isUITestLoginMode {
                 LoginView(
-                    onLogin: { authScreen = .authenticated },
-                    onRegister: { authScreen = .register },
-                    onForgotPassword: { authScreen = .forgotPassword }
+                    onRegister: app.showRegister,
+                    onForgotPassword: app.showForgotPassword
                 )
-            case .register:
-                RegisterView(
-                    onRegister: { email in
-                        registeredEmail = email
-                        authScreen = .emailConfirmation
-                    },
-                    onLogin: { authScreen = .login }
-                )
-            case .emailConfirmation:
-                EmailConfirmationView(
-                    email: registeredEmail,
-                    onConfirmed: { authScreen = .authenticated },
-                    onBack: { authScreen = .register }
-                )
-            case .forgotPassword:
-                ForgotPasswordView(onBack: { authScreen = .login })
-            case .authenticated:
-                MainAppView(
-                    selectedTab: $selectedTab,
-                    overlayScreen: $overlayScreen,
-                    isDarkMode: $isDarkMode,
-                    onSignOut: { authScreen = .login }
-                )
+            } else {
+                switch app.route {
+                case .launching:
+                    LoginView(
+                        onRegister: app.showRegister,
+                        onForgotPassword: app.showForgotPassword
+                    )
+                    .overlay(alignment: .top) {
+                        ProgressView("Restoring your secure session…")
+                            .tint(Theme.primary)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .padding(.top, 18)
+                            .allowsHitTesting(false)
+                    }
+                case .login:
+                    LoginView(
+                        onRegister: app.showRegister,
+                        onForgotPassword: app.showForgotPassword
+                    )
+                case .register:
+                    RegisterView(onLogin: { app.showLogin() })
+                case let .emailConfirmation(pending):
+                    EmailConfirmationView(
+                        pending: pending,
+                        onBack: app.showRegister
+                    )
+                case .forgotPassword:
+                    ForgotPasswordView(onBack: { app.showLogin() })
+                case let .twoFactor(challenge):
+                    TwoFactorLoginView(challenge: challenge, onBack: { app.showLogin(prefill: challenge.email) })
+                case .authenticated:
+                    MainAppView(
+                        selectedTab: $selectedTab,
+                        overlayScreen: $overlayScreen,
+                        isDarkMode: $isDarkMode,
+                        onSignOut: { Task { await app.signOut() } }
+                    )
+                }
             }
         }
         .preferredColorScheme(isDarkMode ? .dark : .light)
+        .task { await app.start() }
+        .sheet(item: $app.deviceLimitContext) { context in
+            DeviceLimitView(context: context)
+                .presentationDetents([.medium, .large])
+        }
+        .alert(item: $app.presentedError) { error in
+            Alert(
+                title: Text(error.code == "APP_VERSION_BLOCKED" ? "Update Required" : "LibreGuard"),
+                message: Text(([error.message] + error.fieldErrors).joined(separator: "\n")),
+                dismissButton: .default(Text("OK"))
+            )
+        }
+        .onOpenURL { app.handleOpenURL($0) }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active, case .authenticated = app.route else { return }
+            Task { await app.refreshAccountData(showErrors: false) }
+        }
     }
-}
-
-private enum AuthScreen {
-    case login
-    case register
-    case emailConfirmation
-    case forgotPassword
-    case authenticated
 }
 
 private enum MainTab: String, CaseIterable, Identifiable {
@@ -231,12 +258,11 @@ private struct MainAppView: View {
 }
 
 private struct LoginView: View {
+    @EnvironmentObject private var app: AppModel
     @State private var email = ""
     @State private var password = ""
     @State private var showPassword = false
-    @State private var isLoading = false
 
-    let onLogin: () -> Void
     let onRegister: () -> Void
     let onForgotPassword: () -> Void
 
@@ -266,18 +292,20 @@ private struct LoginView: View {
                             .foregroundStyle(Theme.primary)
                     }
 
-                    PrimaryButton(title: isLoading ? "Signing in..." : "Sign In") {
-                        isLoading = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                            isLoading = false
-                            onLogin()
-                        }
+                    PrimaryButton(
+                        title: app.isAuthenticating ? "Signing in..." : "Sign In",
+                        accessibilityIdentifier: "login-sign-in-button"
+                    ) {
+                        Task { await app.login(email: email, password: password) }
                     }
+                    .disabled(app.isAuthenticating)
                 }
 
                 DividerWithText(text: "Or continue with")
 
-                Button(action: onLogin) {
+                Button {
+                    Task { await app.loginWithGoogle() }
+                } label: {
                     HStack(spacing: 12) {
                         GoogleGlyph()
                         Text("Sign in with Google")
@@ -289,6 +317,8 @@ private struct LoginView: View {
                     .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
                 }
                 .buttonStyle(.plain)
+                .disabled(app.isAuthenticating)
+                .accessibilityIdentifier("google-sign-in-button")
 
                 HStack(spacing: 4) {
                     Text("New here?")
@@ -296,6 +326,7 @@ private struct LoginView: View {
                     Button("Create an account", action: onRegister)
                         .foregroundStyle(Theme.primary)
                         .fontWeight(.semibold)
+                        .accessibilityIdentifier("create-account-button")
                 }
                 .padding(.top, 8)
             }
@@ -304,10 +335,15 @@ private struct LoginView: View {
             .frame(maxWidth: .infinity)
         }
         .background(Theme.background)
+        .accessibilityIdentifier("login-screen")
+        .onAppear {
+            if email.isEmpty { email = app.prefilledEmail }
+        }
     }
 }
 
 private struct RegisterView: View {
+    @EnvironmentObject private var app: AppModel
     @State private var email = ""
     @State private var password = ""
     @State private var confirmPassword = ""
@@ -315,7 +351,6 @@ private struct RegisterView: View {
     @State private var showConfirmPassword = false
     @State private var passwordError = ""
 
-    let onRegister: (String) -> Void
     let onLogin: () -> Void
 
     var body: some View {
@@ -354,7 +389,7 @@ private struct RegisterView: View {
                         .background(Theme.card.opacity(0.7), in: RoundedRectangle(cornerRadius: 14))
                         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border.opacity(0.8)))
 
-                    PrimaryButton(title: "Create Account") {
+                    PrimaryButton(title: app.isAuthenticating ? "Creating Account..." : "Create Account") {
                         guard password.count >= 8 else {
                             passwordError = "Password must be at least 8 characters"
                             return
@@ -363,8 +398,10 @@ private struct RegisterView: View {
                             passwordError = "Passwords do not match"
                             return
                         }
-                        onRegister(email.isEmpty ? "you@example.com" : email)
+                        passwordError = ""
+                        Task { await app.register(email: email, password: password, confirmation: confirmPassword) }
                     }
+                    .disabled(app.isAuthenticating)
                 }
 
                 HStack(spacing: 4) {
@@ -384,8 +421,11 @@ private struct RegisterView: View {
 }
 
 private struct EmailConfirmationView: View {
-    let email: String
-    let onConfirmed: () -> Void
+    @EnvironmentObject private var app: AppModel
+    @State private var resendSeconds = 0
+    @State private var isChecking = false
+
+    let pending: PendingRegistration
     let onBack: () -> Void
 
     var body: some View {
@@ -394,13 +434,27 @@ private struct EmailConfirmationView: View {
             VStack(spacing: 8) {
                 Text("Confirm Your Email")
                     .font(.system(size: 30, weight: .semibold))
-                Text("We sent a confirmation link to \(email.isEmpty ? "you@example.com" : email).")
+                Text("We sent a confirmation link to \(pending.email).")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
-            PrimaryButton(title: "Continue") {
-                onConfirmed()
+            PrimaryButton(title: isChecking ? "Checking..." : "I've Confirmed My Email") {
+                Task {
+                    isChecking = true
+                    _ = await app.checkConfirmation(pending, showErrors: true)
+                    isChecking = false
+                }
             }
+            .disabled(isChecking)
+            Button(resendSeconds > 0 ? "Resend in \(resendSeconds)s" : "Resend confirmation email") {
+                Task {
+                    if await app.resendConfirmation(email: pending.email) {
+                        resendSeconds = 60
+                    }
+                }
+            }
+            .disabled(resendSeconds > 0)
+            .foregroundStyle(Theme.primary)
             Button("Back", action: onBack)
                 .foregroundStyle(Theme.primary)
         }
@@ -408,6 +462,150 @@ private struct EmailConfirmationView: View {
         .frame(maxWidth: 480)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
+        .task(id: pending.userId) {
+            while !Task.isCancelled {
+                if await app.checkConfirmation(pending) { return }
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
+        .task(id: resendSeconds) {
+            guard resendSeconds > 0 else { return }
+            try? await Task.sleep(for: .seconds(1))
+            if resendSeconds > 0 { resendSeconds -= 1 }
+        }
+    }
+}
+
+private struct TwoFactorLoginView: View {
+    @EnvironmentObject private var app: AppModel
+    @State private var code = ""
+    @State private var useRecoveryCode = false
+
+    let challenge: TwoFactorChallenge
+    let onBack: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                LibreGuardLogo(size: 88)
+                VStack(spacing: 8) {
+                    Text("Two-Factor Authentication")
+                        .font(.system(size: 28, weight: .semibold))
+                    Text(useRecoveryCode
+                         ? "Enter one of your LibreGuard recovery codes."
+                         : "Enter the six-digit code from your authenticator app.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+
+                FormField(
+                    label: useRecoveryCode ? "Recovery Code" : "Authentication Code",
+                    text: $code,
+                    icon: useRecoveryCode ? "key" : "number",
+                    placeholder: useRecoveryCode ? "xxxx-xxxx" : "123456"
+                )
+
+                PrimaryButton(title: app.isAuthenticating ? "Verifying..." : "Verify") {
+                    Task { await app.verifyTwoFactor(challenge, code: code, recovery: useRecoveryCode) }
+                }
+                .disabled(app.isAuthenticating)
+
+                Button(useRecoveryCode ? "Use authenticator code" : "Use a recovery code") {
+                    code = ""
+                    useRecoveryCode.toggle()
+                }
+                .foregroundStyle(Theme.primary)
+
+                Button("Back to Sign In", action: onBack)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(24)
+            .frame(maxWidth: 480)
+            .frame(maxWidth: .infinity)
+        }
+        .background(Theme.background)
+    }
+}
+
+private struct DeviceLimitView: View {
+    @EnvironmentObject private var app: AppModel
+    @Environment(\.openURL) private var openURL
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedDeviceID: Int?
+
+    let context: DeviceLimitContext
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Your \(context.response.planType) plan allows \(context.response.maxDevices) active device(s). Select one to remove before signing in here.")
+                    .foregroundStyle(.secondary)
+
+                ScrollView {
+                    VStack(spacing: 10) {
+                        ForEach(context.response.devices) { device in
+                            Button {
+                                selectedDeviceID = device.id
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: selectedDeviceID == device.id ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(selectedDeviceID == device.id ? Theme.primary : .secondary)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(device.displayName).font(.subheadline.weight(.semibold))
+                                        Text(deviceMetadata(device))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                }
+                                .padding(14)
+                                .background(Theme.card, in: RoundedRectangle(cornerRadius: 14))
+                                .overlay(RoundedRectangle(cornerRadius: 14).stroke(selectedDeviceID == device.id ? Theme.primary : Theme.border))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                if context.canRemoveInApp {
+                    PrimaryButton(title: removalButtonTitle) {
+                        guard let selectedDeviceID,
+                              let device = context.response.devices.first(where: { $0.id == selectedDeviceID }) else { return }
+                        Task { await app.removeDeviceAndRetry(device, context: context) }
+                    }
+                    .disabled(selectedDeviceID == nil || app.isAuthenticating || app.retryAfterSeconds > 0)
+                } else {
+                    Text("This account uses two-factor authentication. The current backend cannot authorize password-based device removal during this login step.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.destructive)
+                    PrimaryButton(title: "Manage Devices on Web") {
+                        openURL(URL(string: "https://management.libreguard.net/Account/Manage/Devices")!)
+                    }
+                }
+            }
+            .padding(20)
+            .navigationTitle("Device Limit Reached")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        app.deviceLimitContext = nil
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private func deviceMetadata(_ device: AccountDevice) -> String {
+        var parts: [String] = []
+        if let version = device.appVersion { parts.append("App \(version)") }
+        if let lastSeenAt = device.lastSeenAt { parts.append("Seen \(lastSeenAt.formatted(.relative(presentation: .named)))") }
+        return parts.isEmpty ? "Active device" : parts.joined(separator: " • ")
+    }
+
+    private var removalButtonTitle: String {
+        if app.retryAfterSeconds > 0 { return "Try again in \(app.retryAfterSeconds)s" }
+        return app.isAuthenticating ? "Removing..." : "Remove Device and Continue"
     }
 }
 
@@ -438,13 +636,11 @@ private struct ForgotPasswordView: View {
 }
 
 private struct DashboardView: View {
+    @EnvironmentObject private var app: AppModel
     @State private var status: ConnectionStatus = .disconnected
     @State private var showNetworkWarning = true
     @State private var pulse = false
     let onUpgrade: () -> Void
-
-    private let monthlyData = 2847.0
-    private let monthlyLimit = 5120.0
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -475,12 +671,17 @@ private struct DashboardView: View {
                 .padding(.bottom, 150)
             }
 
-            MonthlyUsageCard(monthlyData: monthlyData, monthlyLimit: monthlyLimit)
+            MonthlyUsageCard(quota: app.usageQuota)
                 .padding(.horizontal, 24)
                 .padding(.bottom, 12)
                 .background(.ultraThinMaterial.opacity(0.86))
         }
         .background(Theme.background)
+        .task {
+            if app.usageQuota == nil || app.subscription == nil {
+                await app.refreshAccountData(showErrors: false)
+            }
+        }
     }
 
     private var header: some View {
@@ -492,7 +693,7 @@ private struct DashboardView: View {
                         .font(.system(size: 24, weight: .semibold, design: .rounded))
                 }
                 Spacer()
-                Text("Free Plan")
+                Text("\(app.subscription?.plan ?? "—") Plan")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
@@ -598,14 +799,12 @@ private struct DashboardView: View {
 }
 
 private struct ServerListView: View {
+    @EnvironmentObject private var app: AppModel
     @State private var query = ""
-    @State private var selectedServerID = "1"
-    @State private var favorites: Set<String> = []
+    @State private var selectedServerID: Int?
+    @State private var favorites: Set<Int> = []
     @State private var protocolName = "IKEv2/IPSec"
-    @State private var refreshing = false
     let onUpgrade: () -> Void
-
-    private let servers = ServerLocation.samples
 
     var body: some View {
         VStack(spacing: 0) {
@@ -640,17 +839,17 @@ private struct ServerListView: View {
                     .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
 
                     Button {
-                        refreshing = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { refreshing = false }
+                        app.refreshServers()
                     } label: {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 19, weight: .semibold))
-                            .rotationEffect(.degrees(refreshing ? 360 : 0))
+                            .rotationEffect(.degrees(app.isRefreshingServers ? 360 : 0))
                             .frame(width: 48, height: 48)
                             .background(Theme.primary, in: RoundedRectangle(cornerRadius: 14))
                             .foregroundStyle(.white)
                     }
-                    .animation(.linear(duration: 0.7), value: refreshing)
+                    .disabled(app.isRefreshingServers)
+                    .animation(.linear(duration: 0.7), value: app.isRefreshingServers)
                 }
             }
             .padding(24)
@@ -658,6 +857,14 @@ private struct ServerListView: View {
 
             ScrollView(showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 18) {
+                    if app.servers.isEmpty && app.isRefreshingServers {
+                        ProgressView("Refreshing healthy servers…")
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 40)
+                    } else if groupedServers.isEmpty {
+                        ContentUnavailableView("No Servers Found", systemImage: "network.slash", description: Text("Try a different search or refresh the list."))
+                    }
+
                     ForEach(groupedServers, id: \.country) { group in
                         VStack(alignment: .leading, spacing: 10) {
                             HStack(spacing: 8) {
@@ -680,7 +887,15 @@ private struct ServerListView: View {
                                         server: server,
                                         isSelected: selectedServerID == server.id,
                                         isFavorite: favorites.contains(server.id),
-                                        onSelect: { selectedServerID = server.id },
+                                        latency: app.serverLatencies[server.id],
+                                        onSelect: {
+                                            if server.pricingTier.caseInsensitiveCompare("Premium") == .orderedSame,
+                                               app.subscription?.isPro != true {
+                                                onUpgrade()
+                                            } else {
+                                                selectedServerID = server.id
+                                            }
+                                        },
                                         onFavorite: {
                                             if favorites.contains(server.id) {
                                                 favorites.remove(server.id)
@@ -699,29 +914,40 @@ private struct ServerListView: View {
             }
         }
         .background(Theme.background)
-    }
-
-    private var filteredServers: [ServerLocation] {
-        guard !query.isEmpty else { return servers }
-        return servers.filter {
-            $0.country.localizedCaseInsensitiveContains(query) ||
-            $0.city.localizedCaseInsensitiveContains(query) ||
-            $0.name.localizedCaseInsensitiveContains(query)
+        .task {
+            if app.servers.isEmpty { app.refreshServers() }
         }
     }
 
-    private var groupedServers: [(country: String, code: String, servers: [ServerLocation])] {
+    private var filteredServers: [VPNServer] {
+        guard !query.isEmpty else { return app.servers }
+        return app.servers.filter {
+            $0.country.localizedCaseInsensitiveContains(query) ||
+            ($0.city?.localizedCaseInsensitiveContains(query) ?? false) ||
+            $0.serverName.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var groupedServers: [(country: String, code: String, servers: [VPNServer])] {
         let countries = Dictionary(grouping: filteredServers, by: \.country)
         return countries.keys.sorted().compactMap { country in
             guard let list = countries[country] else { return nil }
-            return (country, list.first?.code ?? "--", list)
+            return (country, countryCode(country), list)
         }
+    }
+
+    private func countryCode(_ country: String) -> String {
+        Locale.Region.isoRegions.first {
+            Locale(identifier: "en_US").localizedString(forRegionCode: $0.identifier) == country
+        }?.identifier ?? String(country.prefix(2)).uppercased()
     }
 }
 
 private struct StatisticsView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \LocalConnectionRecord.connectedAt, order: .reverse) private var records: [LocalConnectionRecord]
     @State private var timeRange = "This Week"
-    private let days = DailyUsage.samples
+    @State private var confirmClear = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -739,76 +965,85 @@ private struct StatisticsView: View {
                 VStack(spacing: 20) {
                     SegmentedPicker(selection: $timeRange, options: ["This Week", "This Month"])
 
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 14) {
-                        SummaryCard(icon: "waveform.path.ecg", value: "8.72 GB", label: "Total Data", color: Theme.primary)
-                        SummaryCard(icon: "clock", value: "17h 9m", label: "Connected", color: Theme.statusConnected)
-                        SummaryCard(icon: "arrow.down", value: "8.75 GB", label: "Downloaded", color: Theme.blueBar)
-                        SummaryCard(icon: "arrow.up", value: "2.05 GB", label: "Uploaded", color: Theme.purpleBar)
-                    }
-
-                    CardContainer {
-                        VStack(alignment: .leading, spacing: 18) {
-                            HStack {
-                                Text("Daily Usage")
-                                    .font(.headline)
-                                Spacer()
-                                HStack(spacing: 10) {
-                                    LegendDot(color: Theme.blueBar, text: "Download")
-                                    LegendDot(color: Theme.purpleBar, text: "Upload")
-                                }
-                            }
-
-                            VStack(spacing: 14) {
-                                ForEach(days) { day in
-                                    UsageBar(day: day, maxValue: days.map { $0.download + $0.upload }.max() ?? 1)
-                                }
-                            }
+                    if summary.filtered.isEmpty {
+                        ContentUnavailableView {
+                            Label("No Local Statistics Yet", systemImage: "chart.bar.xaxis")
+                        } description: {
+                            Text("LibreGuard will record sessions here when the VPN tunnel begins supplying real connection and byte metrics.")
                         }
-                    }
+                        .padding(.vertical, 44)
+                    } else {
+                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 14) {
+                            SummaryCard(icon: "waveform.path.ecg", value: ByteCountFormatter.libreGuardString(from: summary.totalBytes), label: "Total Data", color: Theme.primary)
+                            SummaryCard(icon: "clock", value: durationString(summary.connectedDuration), label: "Connected", color: Theme.statusConnected)
+                            SummaryCard(icon: "arrow.down", value: ByteCountFormatter.libreGuardString(from: summary.downloadedBytes), label: "Downloaded", color: Theme.blueBar)
+                            SummaryCard(icon: "arrow.up", value: ByteCountFormatter.libreGuardString(from: summary.uploadedBytes), label: "Uploaded", color: Theme.purpleBar)
+                        }
 
-                    CardContainer {
-                        VStack(alignment: .leading, spacing: 14) {
-                            Label("Recent Connections", systemImage: "calendar")
-                                .font(.headline)
-                                .foregroundStyle(.primary)
-
-                            ForEach(ConnectionHistory.samples) { item in
+                        CardContainer {
+                            VStack(alignment: .leading, spacing: 18) {
                                 HStack {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(item.location)
-                                            .font(.subheadline.weight(.semibold))
-                                        Text(item.time)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
+                                    Text("Daily Usage")
+                                        .font(.headline)
                                     Spacer()
-                                    VStack(alignment: .trailing, spacing: 4) {
-                                        Text(item.data)
-                                            .font(.subheadline.weight(.semibold))
-                                        Text(item.duration)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
+                                    HStack(spacing: 10) {
+                                        LegendDot(color: Theme.blueBar, text: "Download")
+                                        LegendDot(color: Theme.purpleBar, text: "Upload")
                                     }
                                 }
-                                if item.id != ConnectionHistory.samples.last?.id {
-                                    Divider()
+
+                                VStack(spacing: 14) {
+                                    ForEach(dailyUsage) { day in
+                                        UsageBar(day: day, maxValue: dailyUsage.map { $0.download + $0.upload }.max() ?? 1)
+                                    }
                                 }
                             }
+                        }
+
+                        CardContainer {
+                            VStack(alignment: .leading, spacing: 14) {
+                                Label("Recent Connections", systemImage: "calendar")
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
+
+                                ForEach(Array(summary.filtered.prefix(10))) { item in
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(item.serverName)
+                                                .font(.subheadline.weight(.semibold))
+                                            Text(item.connectedAt.formatted(date: .abbreviated, time: .shortened))
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        VStack(alignment: .trailing, spacing: 4) {
+                                            Text(ByteCountFormatter.libreGuardString(from: item.downloadedBytes + item.uploadedBytes))
+                                                .font(.subheadline.weight(.semibold))
+                                            Text(durationString(item.duration))
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    if item.id != summary.filtered.prefix(10).last?.id {
+                                        Divider()
+                                    }
+                                }
+                            }
+                        }
+
+                        Button(role: .destructive) { confirmClear = true } label: {
+                            Label("Clear Local Statistics", systemImage: "trash")
+                                .frame(maxWidth: .infinity)
+                                .padding(14)
+                                .background(Theme.destructive.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
                         }
                     }
 
                     CardContainer {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Label("Insights", systemImage: "chart.line.uptrend.xyaxis")
-                                .font(.headline)
-                                .foregroundStyle(Theme.primary)
-                            Text("Your daily average is 1.25 GB")
-                            Text("Most active day: Thursday")
-                            Text("Peak usage time: Evening (6-10 PM)")
-                        }
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        Label("Statistics are stored only on this device and are never shared.", systemImage: "lock.shield")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 .padding(.horizontal, 24)
@@ -816,15 +1051,52 @@ private struct StatisticsView: View {
             }
         }
         .background(Theme.background)
+        .confirmationDialog("Clear all local statistics?", isPresented: $confirmClear, titleVisibility: .visible) {
+            Button("Clear Statistics", role: .destructive) {
+                try? SwiftDataStatisticsRecorder(context: modelContext).clear()
+            }
+        } message: {
+            Text("This cannot be undone. No data will be removed from the LibreGuard account because these statistics never leave this device.")
+        }
+    }
+
+    private var summary: LocalStatisticsSummary {
+        LocalStatisticsSummary(records: records, interval: selectedInterval)
+    }
+
+    private var selectedInterval: DateInterval {
+        let component: Calendar.Component = timeRange == "This Week" ? .weekOfYear : .month
+        return Calendar.current.dateInterval(of: component, for: Date())
+            ?? DateInterval(start: .distantPast, end: .distantFuture)
+    }
+
+    private var dailyUsage: [DailyUsage] {
+        let grouped = Dictionary(grouping: summary.filtered) { Calendar.current.startOfDay(for: $0.connectedAt) }
+        return grouped.keys.sorted().map { day in
+            let values = grouped[day] ?? []
+            return DailyUsage(
+                date: day.formatted(.dateTime.weekday(.abbreviated)),
+                upload: Double(values.reduce(0) { $0 + $1.uploadedBytes }),
+                download: Double(values.reduce(0) { $0 + $1.downloadedBytes })
+            )
+        }
+    }
+
+    private func durationString(_ duration: TimeInterval) -> String {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = duration >= 3600 ? [.hour, .minute] : [.minute, .second]
+        formatter.unitsStyle = .abbreviated
+        return formatter.string(from: duration) ?? "0m"
     }
 }
 
 private struct SettingsView: View {
+    @EnvironmentObject private var app: AppModel
     @Binding var isDarkMode: Bool
     @State private var autoConnect = true
     @State private var killSwitch = false
     @State private var splitTunneling = false
-    @State private var twoFactorAuth = false
+    @State private var showTwoFactorManagement = false
     @State private var threatProtection = true
     @State private var notifications = true
 
@@ -846,10 +1118,18 @@ private struct SettingsView: View {
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 22) {
-                    UpgradeCard(action: onUpgrade)
+                    if app.subscription?.isPro != true {
+                        UpgradeCard(action: onUpgrade)
+                    }
 
                     SettingsSection(title: "Security") {
-                        ToggleRow(icon: "iphone", title: "Two-Factor Authentication", subtitle: "Add extra layer of security", isOn: $twoFactorAuth)
+                        NavigationRow(
+                            icon: "iphone",
+                            title: "Two-Factor Authentication",
+                            subtitle: app.twoFactorStatus?.is2faEnabled == true
+                                ? "Enabled • \(app.twoFactorStatus?.recoveryCodesLeft ?? 0) recovery codes"
+                                : "Not enabled"
+                        ) { showTwoFactorManagement = true }
                         ToggleRow(icon: "shield.checkered", title: "Threat Protection", subtitle: "Block ads, trackers & malware", isOn: $threatProtection)
                     }
 
@@ -902,6 +1182,204 @@ private struct SettingsView: View {
             }
         }
         .background(Theme.background)
+        .sheet(isPresented: $showTwoFactorManagement) {
+            TwoFactorManagementView()
+        }
+        .task {
+            if app.twoFactorStatus == nil { await app.refreshAccountData(showErrors: false) }
+        }
+    }
+}
+
+private struct TwoFactorManagementView: View {
+    @EnvironmentObject private var app: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var verificationCode = ""
+    @State private var confirmDisable = false
+    @State private var confirmRegenerate = false
+    @State private var isWorking = false
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 18) {
+                    if app.twoFactorStatus?.is2faEnabled == true {
+                        enabledContent
+                    } else if let setup = app.authenticatorSetup {
+                        setupContent(setup)
+                    } else {
+                        ProgressView("Preparing authenticator setup…")
+                            .padding(.vertical, 60)
+                    }
+
+                    if !app.recoveryCodes.isEmpty {
+                        recoveryCodeCard(app.recoveryCodes)
+                    }
+                }
+                .padding(20)
+            }
+            .navigationTitle("Two-Factor Authentication")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .task {
+            if app.twoFactorStatus == nil { await app.refreshAccountData(showErrors: false) }
+            if app.twoFactorStatus?.is2faEnabled != true && app.authenticatorSetup == nil {
+                await app.loadTwoFactorSetup()
+            }
+        }
+        .onDisappear {
+            app.recoveryCodes = []
+            if app.twoFactorStatus?.is2faEnabled != true { app.authenticatorSetup = nil }
+        }
+        .confirmationDialog("Disable two-factor authentication?", isPresented: $confirmDisable, titleVisibility: .visible) {
+            Button("Disable 2FA", role: .destructive) {
+                Task {
+                    isWorking = true
+                    await app.disableTwoFactor()
+                    isWorking = false
+                }
+            }
+        } message: {
+            Text("Your account will no longer require an authenticator code at login.")
+        }
+        .confirmationDialog("Generate new recovery codes?", isPresented: $confirmRegenerate, titleVisibility: .visible) {
+            Button("Generate New Codes", role: .destructive) {
+                Task {
+                    isWorking = true
+                    _ = await app.generateRecoveryCodes()
+                    isWorking = false
+                }
+            }
+        } message: {
+            Text("All existing recovery codes will stop working.")
+        }
+    }
+
+    private var enabledContent: some View {
+        VStack(spacing: 16) {
+            CardContainer {
+                HStack(spacing: 12) {
+                    IconBox(systemName: "checkmark.shield.fill", color: Theme.statusConnected, background: Theme.statusConnected.opacity(0.12))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Authenticator Enabled").font(.headline)
+                        Text("\(app.twoFactorStatus?.recoveryCodesLeft ?? 0) recovery codes remaining")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+            }
+
+            Button { confirmRegenerate = true } label: {
+                Label("Generate New Recovery Codes", systemImage: "key.horizontal")
+                    .frame(maxWidth: .infinity)
+                    .padding(15)
+                    .background(Theme.card, in: RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
+            }
+            .buttonStyle(.plain)
+            .disabled(isWorking)
+
+            Button(role: .destructive) { confirmDisable = true } label: {
+                Label("Disable Two-Factor Authentication", systemImage: "shield.slash")
+                    .frame(maxWidth: .infinity)
+                    .padding(15)
+                    .background(Theme.destructive.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
+            }
+            .disabled(isWorking)
+        }
+    }
+
+    private func setupContent(_ setup: AuthenticatorSetup) -> some View {
+        VStack(spacing: 18) {
+            CardContainer {
+                VStack(spacing: 14) {
+                    Text("1. Scan this code").font(.headline)
+                    QRCodeView(value: setup.authenticatorUri)
+                        .frame(width: 210, height: 210)
+                    Text("Or enter this key manually")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(setup.sharedKey)
+                        .font(.system(.footnote, design: .monospaced, weight: .semibold))
+                        .textSelection(.enabled)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+            }
+
+            CardContainer {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("2. Verify the six-digit code").font(.headline)
+                    FormField(label: "Authentication Code", text: $verificationCode, icon: "number", placeholder: "123456")
+                    PrimaryButton(title: isWorking ? "Verifying..." : "Enable 2FA") {
+                        Task {
+                            isWorking = true
+                            _ = await app.enableTwoFactor(code: verificationCode)
+                            isWorking = false
+                        }
+                    }
+                    .disabled(isWorking || verificationCode.isEmpty)
+                }
+            }
+        }
+    }
+
+    private func recoveryCodeCard(_ codes: [String]) -> some View {
+        CardContainer {
+            VStack(alignment: .leading, spacing: 14) {
+                Label("Save Your Recovery Codes", systemImage: "exclamationmark.shield")
+                    .font(.headline)
+                    .foregroundStyle(Theme.statusConnecting)
+                Text("These codes are shown once. Store them somewhere safe; LibreGuard does not save them on this device.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(codes, id: \.self) { code in
+                    Text(code)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                HStack {
+                    Button("Copy All") { UIPasteboard.general.string = codes.joined(separator: "\n") }
+                    Spacer()
+                    ShareLink(item: codes.joined(separator: "\n")) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.primary)
+            }
+        }
+    }
+}
+
+private struct QRCodeView: View {
+    let value: String
+
+    var body: some View {
+        if let image = makeImage() {
+            Image(uiImage: image)
+                .interpolation(.none)
+                .resizable()
+                .scaledToFit()
+                .accessibilityLabel("Authenticator QR code")
+        } else {
+            ContentUnavailableView("QR Code Unavailable", systemImage: "qrcode")
+        }
+    }
+
+    private func makeImage() -> UIImage? {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(value.utf8)
+        filter.correctionLevel = "M"
+        guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)) else { return nil }
+        let context = CIContext()
+        guard let cgImage = context.createCGImage(output, from: output.extent) else { return nil }
+        return UIImage(cgImage: cgImage)
     }
 }
 
@@ -1147,6 +1625,7 @@ private struct PasswordField: View {
 private struct PrimaryButton: View {
     let title: String
     var maxWidth: CGFloat? = nil
+    var accessibilityIdentifier: String? = nil
     let action: () -> Void
 
     var body: some View {
@@ -1160,6 +1639,20 @@ private struct PrimaryButton: View {
                 .shadow(color: Theme.primary.opacity(0.22), radius: 12, y: 7)
         }
         .buttonStyle(ScaleButtonStyle())
+        .modifier(AccessibilityIdentifierModifier(identifier: accessibilityIdentifier))
+    }
+}
+
+private struct AccessibilityIdentifierModifier: ViewModifier {
+    let identifier: String?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let identifier {
+            content.accessibilityIdentifier(identifier)
+        } else {
+            content
+        }
     }
 }
 
@@ -1273,10 +1766,7 @@ private struct QuickConnectCard: View {
 }
 
 private struct MonthlyUsageCard: View {
-    let monthlyData: Double
-    let monthlyLimit: Double
-
-    private var percentage: Double { monthlyData / monthlyLimit }
+    let quota: UsageQuota?
 
     var body: some View {
         CardContainer {
@@ -1285,21 +1775,45 @@ private struct MonthlyUsageCard: View {
                     Text("Monthly Data Usage")
                         .font(.caption.weight(.semibold))
                     Spacer()
-                    Text("2.78 / 5 GB")
+                    Text(quotaText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                ProgressBar(progress: percentage, color: Theme.primary, height: 8)
+                ProgressBar(progress: progress, color: quota?.isOverLimit == true ? Theme.destructive : Theme.primary, height: 8)
                 HStack {
-                    Text("55.6% used")
-                        .foregroundStyle(Theme.primary)
+                    Text(usageText)
+                        .foregroundStyle(quota?.isOverLimit == true ? Theme.destructive : Theme.primary)
                     Spacer()
-                    Text("2.22 GB left")
+                    Text(remainingText)
                         .foregroundStyle(.secondary)
                 }
                 .font(.caption.weight(.medium))
             }
         }
+    }
+
+    private var progress: Double {
+        guard let quota, !quota.isUnlimited else { return quota == nil ? 0 : 1 }
+        return quota.usagePercentage / 100
+    }
+
+    private var quotaText: String {
+        guard let quota else { return "Loading…" }
+        return quota.isUnlimited ? "\(quota.formattedUsed) / Unlimited" : "\(quota.formattedUsed) / \(quota.formattedLimit)"
+    }
+
+    private var usageText: String {
+        guard let quota else { return "—" }
+        if quota.isUnlimited { return "Unlimited plan" }
+        return String(format: "%.1f%% used", quota.usagePercentage)
+    }
+
+    private var remainingText: String {
+        guard let quota else { return "—" }
+        if quota.isUnlimited { return "No data limit" }
+        if quota.isOverLimit { return "Limit reached" }
+        if let resetDate = quota.resetDate { return "Resets \(resetDate.formatted(date: .abbreviated, time: .omitted))" }
+        return "\(quota.formattedRemaining) left"
     }
 }
 
@@ -1323,9 +1837,10 @@ private struct StatMini: View {
 }
 
 private struct ServerRow: View {
-    let server: ServerLocation
+    let server: VPNServer
     let isSelected: Bool
     let isFavorite: Bool
+    let latency: Int?
     let onSelect: () -> Void
     let onFavorite: () -> Void
 
@@ -1333,19 +1848,19 @@ private struct ServerRow: View {
         Button(action: onSelect) {
             VStack(spacing: 10) {
                 HStack(spacing: 12) {
-                    Text(server.code)
+                    Text(String(server.country.prefix(2)).uppercased())
                         .font(.caption.weight(.bold))
                         .foregroundStyle(Theme.primary)
                         .frame(width: 34, height: 34)
                         .background(Theme.primary.opacity(0.12), in: Circle())
 
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(server.city)
+                        Text(server.city ?? server.country)
                             .font(.subheadline.weight(.semibold))
                         HStack(spacing: 5) {
-                            Text(server.country)
+                            Text(server.pricingTier)
                             Text("-")
-                            Text(server.name)
+                            Text(server.serverName)
                                 .fontDesign(.monospaced)
                         }
                         .font(.caption)
@@ -1356,8 +1871,8 @@ private struct ServerRow: View {
                     Spacer()
 
                     VStack(alignment: .trailing, spacing: 4) {
-                        Label("\(server.ping)ms", systemImage: "wifi")
-                        Label("\(server.load)%", systemImage: "internaldrive")
+                        Label(latency.map { "\($0)ms" } ?? "—", systemImage: "wifi")
+                        Label(loadLabel, systemImage: "internaldrive")
                     }
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -1373,7 +1888,7 @@ private struct ServerRow: View {
                         .foregroundStyle(isSelected ? Theme.primary : .secondary)
                 }
 
-                ProgressBar(progress: Double(server.load) / 100, color: loadColor(server.load), height: 5)
+                ProgressBar(progress: loadProgress, color: loadColor, height: 5)
             }
             .padding(13)
             .background(isSelected ? Theme.primary.opacity(0.06) : Theme.card, in: RoundedRectangle(cornerRadius: 14))
@@ -1382,7 +1897,18 @@ private struct ServerRow: View {
         .buttonStyle(ScaleButtonStyle())
     }
 
-    private func loadColor(_ load: Int) -> Color {
+    private var loadLabel: String {
+        guard server.loadDataFresh, let load = server.load else { return "Unavailable" }
+        return "\(load)%"
+    }
+
+    private var loadProgress: Double {
+        guard server.loadDataFresh, let load = server.load else { return 0 }
+        return Double(load) / 100
+    }
+
+    private var loadColor: Color {
+        guard server.loadDataFresh, let load = server.load else { return Theme.statusDisconnected }
         if load < 40 { return Theme.statusConnected }
         if load < 70 { return Theme.statusConnecting }
         return Theme.destructive
@@ -1479,7 +2005,7 @@ private struct UsageBar: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 56, alignment: .leading)
                 Spacer()
-                Text(String(format: "%.2f GB", (day.download + day.upload) / 1024))
+                Text(ByteCountFormatter.libreGuardString(from: Int64(day.download + day.upload)))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1615,12 +2141,14 @@ private struct PlanCard: View {
                         Text(title)
                             .font(.headline)
                             .foregroundStyle(highlighted ? Theme.primary : .primary)
-                        Text(price)
-                            .font(.system(size: 28, weight: .semibold))
-                            .foregroundStyle(highlighted ? Theme.primary : .primary)
-                        + Text("/month")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                        HStack(alignment: .firstTextBaseline, spacing: 0) {
+                            Text(price)
+                                .font(.system(size: 28, weight: .semibold))
+                                .foregroundStyle(highlighted ? Theme.primary : .primary)
+                            Text("/month")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     Spacer()
                     Text(badge)
@@ -1768,61 +2296,16 @@ private struct ScaleButtonStyle: ButtonStyle {
     }
 }
 
-private struct ServerLocation: Identifiable {
-    let id: String
-    let country: String
-    let code: String
-    let city: String
-    let name: String
-    let ping: Int
-    let load: Int
-
-    static let samples = [
-        ServerLocation(id: "1", country: "United States", code: "US", city: "New York", name: "US-MULTI-1", ping: 12, load: 45),
-        ServerLocation(id: "2", country: "United States", code: "US", city: "Los Angeles", name: "US-MULTI-20", ping: 28, load: 62),
-        ServerLocation(id: "8", country: "Canada", code: "CA", city: "Toronto", name: "CA-MULTI-2", ping: 22, load: 33),
-        ServerLocation(id: "3", country: "United Kingdom", code: "UK", city: "London", name: "UK-MULTI-5", ping: 45, load: 38),
-        ServerLocation(id: "4", country: "Germany", code: "DE", city: "Frankfurt", name: "DE-MULTI-1", ping: 52, load: 51),
-        ServerLocation(id: "9", country: "France", code: "FR", city: "Paris", name: "FR-MULTI-9", ping: 48, load: 55),
-        ServerLocation(id: "10", country: "Netherlands", code: "NL", city: "Amsterdam", name: "NL-MULTI-4", ping: 41, load: 48),
-        ServerLocation(id: "5", country: "Japan", code: "JP", city: "Tokyo", name: "JP-MULTI-3", ping: 98, load: 29),
-        ServerLocation(id: "6", country: "Singapore", code: "SG", city: "Singapore", name: "SG-MULTI-12", ping: 112, load: 67),
-        ServerLocation(id: "7", country: "Australia", code: "AU", city: "Sydney", name: "AU-MULTI-7", ping: 145, load: 42)
-    ]
-}
-
 private struct DailyUsage: Identifiable {
     let id = UUID()
     let date: String
     let upload: Double
     let download: Double
 
-    static let samples = [
-        DailyUsage(date: "Mon", upload: 245, download: 1240),
-        DailyUsage(date: "Tue", upload: 310, download: 1580),
-        DailyUsage(date: "Wed", upload: 189, download: 890),
-        DailyUsage(date: "Thu", upload: 420, download: 2100),
-        DailyUsage(date: "Fri", upload: 380, download: 1920),
-        DailyUsage(date: "Sat", upload: 156, download: 780),
-        DailyUsage(date: "Today", upload: 98, download: 450)
-    ]
-}
-
-private struct ConnectionHistory: Identifiable {
-    let id = UUID()
-    let location: String
-    let time: String
-    let duration: String
-    let data: String
-
-    static let samples = [
-        ConnectionHistory(location: "New York, US", time: "2 hours ago", duration: "1h 42m", data: "450 MB"),
-        ConnectionHistory(location: "London, UK", time: "Yesterday", duration: "3h 15m", data: "1.2 GB"),
-        ConnectionHistory(location: "Tokyo, JP", time: "2 days ago", duration: "45m", data: "280 MB"),
-        ConnectionHistory(location: "Frankfurt, DE", time: "3 days ago", duration: "2h 08m", data: "890 MB")
-    ]
 }
 
 #Preview {
     ContentView()
+        .environmentObject(AppModel())
+        .modelContainer(for: LocalConnectionRecord.self, inMemory: true)
 }

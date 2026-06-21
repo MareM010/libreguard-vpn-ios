@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		A10000012FE7000000000001 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = A10000032FE7000000000003 /* GoogleSignIn */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		E67858AA2FE6EBD9000CF95E /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A10000012FE7000000000001 /* GoogleSignIn in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +117,7 @@
 			);
 			name = "libreguard-vpn-ios";
 			packageProductDependencies = (
+				A10000032FE7000000000003 /* GoogleSignIn */,
 			);
 			productName = "libreguard-vpn-ios";
 			productReference = E678589C2FE6EBD7000CF95E /* libreguard-vpn-ios.app */;
@@ -195,6 +201,9 @@
 			);
 			mainGroup = E67858932FE6EBD7000CF95E;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A10000022FE7000000000002 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = E678589D2FE6EBD7000CF95E /* Products */;
 			projectDirPath = "";
@@ -396,7 +405,11 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				GOOGLE_IOS_CLIENT_ID = GOOGLE_IOS_CLIENT_ID_NOT_CONFIGURED;
+				GOOGLE_REVERSED_CLIENT_ID = GOOGLE_REVERSED_CLIENT_ID_NOT_CONFIGURED;
+				GOOGLE_SERVER_CLIENT_ID = GOOGLE_SERVER_CLIENT_ID_NOT_CONFIGURED;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -427,7 +440,11 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				GOOGLE_IOS_CLIENT_ID = GOOGLE_IOS_CLIENT_ID_NOT_CONFIGURED;
+				GOOGLE_REVERSED_CLIENT_ID = GOOGLE_REVERSED_CLIENT_ID_NOT_CONFIGURED;
+				GOOGLE_SERVER_CLIENT_ID = GOOGLE_SERVER_CLIENT_ID_NOT_CONFIGURED;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -570,6 +587,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A10000022FE7000000000002 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/google/GoogleSignIn-iOS";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 9.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A10000032FE7000000000003 /* GoogleSignIn */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000022FE7000000000002 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
+			productName = GoogleSignIn;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = E67858942FE6EBD7000CF95E /* Project object */;
 }

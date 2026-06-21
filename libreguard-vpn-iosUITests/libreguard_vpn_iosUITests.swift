@@ -23,14 +23,16 @@ final class libreguard_vpn_iosUITests: XCTestCase {
     }
 
     @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
+    func testLoginScreenPresentsBackendActions() throws {
         let app = XCUIApplication()
+        app.launchArguments.append("--uitesting-reset")
+        app.launchEnvironment["UITEST_FORCE_LOGIN"] = "1"
         app.launch()
 
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
-        // XCUIAutomation Documentation
-        // https://developer.apple.com/documentation/xcuiautomation
+        XCTAssertTrue(app.scrollViews["login-screen"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["login-sign-in-button"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["google-sign-in-button"].exists)
+        XCTAssertTrue(app.buttons["create-account-button"].exists)
     }
 
     @MainActor
