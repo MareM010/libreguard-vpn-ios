@@ -311,6 +311,10 @@ final class AppModel: ObservableObject {
         selectedServerID = server.id
     }
 
+    func deselectServer() {
+        selectedServerID = nil
+    }
+
     func connectSelectedServer() async {
         guard let server = selectedServer ?? bestAccessibleServer(in: servers) else {
             presentedError = APIError(message: "No VPN server is available right now.")

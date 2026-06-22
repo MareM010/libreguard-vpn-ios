@@ -157,6 +157,7 @@ private extension VPNConnectionState {
 }
 
 private struct MainAppView: View {
+    @EnvironmentObject private var app: AppModel
     @Binding var selectedTab: MainTab
     @Binding var overlayScreen: OverlayScreen?
     @Binding var isDarkMode: Bool
@@ -170,7 +171,13 @@ private struct MainAppView: View {
                     case .home:
                         DashboardView(onUpgrade: { overlayScreen = .upgrade })
                     case .servers:
-                        ServerListView(onUpgrade: { overlayScreen = .upgrade })
+                        ServerListView(
+                            onUpgrade: { overlayScreen = .upgrade },
+                            onSelectServer: { server in
+                                app.selectServer(server)
+                                selectedTab = .home
+                            }
+                        )
                     case .statistics:
                         StatisticsView()
                     case .settings:
@@ -638,8 +645,17 @@ private struct DashboardView: View {
                     }
 
                     if status == .disconnected || status == .invalid {
-                        QuickConnectCard {
-                            Task { await app.connectSelectedServer() }
+                        if let selectedServer {
+                            SelectedServerCard(
+                                server: selectedServer,
+                                onClearSelection: {
+                                    app.deselectServer()
+                                }
+                            )
+                        } else {
+                            QuickConnectCard {
+                                Task { await app.connectSelectedServer() }
+                            }
                         }
                     }
 
@@ -671,10 +687,8 @@ private struct DashboardView: View {
 
     private var status: VPNConnectionState { app.vpnStatus }
     private var selectedServer: VPNServer? {
-        if let selectedServerID = app.selectedServerID {
-            return app.servers.first(where: { $0.id == selectedServerID })
-        }
-        return app.servers.first
+        guard let selectedServerID = app.selectedServerID else { return nil }
+        return app.servers.first(where: { $0.id == selectedServerID })
     }
 
     private var header: some View {
@@ -788,6 +802,7 @@ private struct ServerListView: View {
     @State private var query = ""
     @State private var favorites: Set<Int> = []
     let onUpgrade: () -> Void
+    let onSelectServer: (VPNServer) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -874,7 +889,7 @@ private struct ServerListView: View {
                                                app.subscription?.isPro != true {
                                                 onUpgrade()
                                             } else {
-                                                app.selectServer(server)
+                                                onSelectServer(server)
                                             }
                                         },
                                         onFavorite: {
@@ -1744,6 +1759,41 @@ private struct QuickConnectCard: View {
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
         }
         .buttonStyle(ScaleButtonStyle())
+    }
+}
+
+private struct SelectedServerCard: View {
+    let server: VPNServer
+    let onClearSelection: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            IconBox(systemName: "network")
+            VStack(alignment: .leading, spacing: 3) {
+                Text(server.serverName)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Text("Selected server")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button(action: onClearSelection) {
+                ZStack {
+                    Circle()
+                        .fill(Color(.systemGray5))
+                        .frame(width: 28, height: 28)
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityLabel("Clear selected server")
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(14)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
     }
 }
 
