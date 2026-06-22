@@ -1120,6 +1120,8 @@ private struct SettingsView: View {
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 22) {
+                    AccountCard(email: app.session?.email)
+
                     if app.subscription?.isPro != true {
                         UpgradeCard(action: onUpgrade)
                     }
@@ -2171,6 +2173,30 @@ private struct UpgradeCard: View {
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(Theme.primary, lineWidth: 1.5))
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct AccountCard: View {
+    let email: String?
+
+    var body: some View {
+        CardContainer {
+            HStack(spacing: 12) {
+                IconBox(systemName: "person.crop.circle.fill", color: Theme.primary, background: Theme.primary.opacity(0.12))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Account")
+                        .font(.headline)
+                    Text(email ?? "Signed in account")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(email.map { "Account, signed in as \($0)" } ?? "Account")
     }
 }
 
