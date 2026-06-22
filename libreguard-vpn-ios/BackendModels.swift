@@ -230,12 +230,154 @@ struct VPNServer: Decodable, Identifiable, Hashable {
         if let serverHostname, !serverHostname.isEmpty { return serverHostname }
         return serverIp
     }
+
+    var pricingTierLabel: String {
+        pricingTier.caseInsensitiveCompare("Premium") == .orderedSame ? "Pro" : pricingTier
+    }
+
+    var requiresProSubscription: Bool {
+        pricingTierLabel.caseInsensitiveCompare("Pro") == .orderedSame
+    }
+
+    var flagEmoji: String {
+        CountryFlagResolver.flagEmoji(for: country)
+    }
 }
 
 struct DevicePublicKeyPayload: Encodable, Equatable {
     let devicePublicKey: String
     let devicePublicKeyId: String
     let devicePublicKeyAlgorithm: String
+}
+
+enum CountryFlagResolver {
+    private static let fallbackFlag = "🌐"
+
+    private static let aliases: [String: String] = [
+        "AE": "AE",
+        "AFGHANISTAN": "AF",
+        "ALBANIA": "AL",
+        "ARGENTINA": "AR",
+        "AUSTRALIA": "AU",
+        "AUSTRIA": "AT",
+        "BELGIUM": "BE",
+        "BOSNIA": "BA",
+        "BOSNIAANDHERZEGOVINA": "BA",
+        "BRAZIL": "BR",
+        "BULGARIA": "BG",
+        "CANADA": "CA",
+        "CHILE": "CL",
+        "CHINA": "CN",
+        "CROATIA": "HR",
+        "CZECHREPUBLIC": "CZ",
+        "CZECHIA": "CZ",
+        "DENMARK": "DK",
+        "EGYPT": "EG",
+        "ESTONIA": "EE",
+        "FINLAND": "FI",
+        "FRANCE": "FR",
+        "GERMANY": "DE",
+        "GREECE": "GR",
+        "HONGKONG": "HK",
+        "HUNGARY": "HU",
+        "ICELAND": "IS",
+        "INDIA": "IN",
+        "INDONESIA": "ID",
+        "IRELAND": "IE",
+        "ISRAEL": "IL",
+        "ITALY": "IT",
+        "JAPAN": "JP",
+        "KAZAKHSTAN": "KZ",
+        "LATVIA": "LV",
+        "LITHUANIA": "LT",
+        "LUXEMBOURG": "LU",
+        "MALAYSIA": "MY",
+        "MEXICO": "MX",
+        "MOLDOVA": "MD",
+        "NETHERLANDS": "NL",
+        "NEWZEALAND": "NZ",
+        "NORWAY": "NO",
+        "PAKISTAN": "PK",
+        "PHILIPPINES": "PH",
+        "POLAND": "PL",
+        "PORTUGAL": "PT",
+        "REPUBLICOFKOREA": "KR",
+        "ROMANIA": "RO",
+        "RUSSIA": "RU",
+        "SERBIA": "RS",
+        "SINGAPORE": "SG",
+        "SLOVAKIA": "SK",
+        "SLOVENIA": "SI",
+        "SOUTHAFRICA": "ZA",
+        "SOUTHKOREA": "KR",
+        "SPAIN": "ES",
+        "SWEDEN": "SE",
+        "SWITZERLAND": "CH",
+        "TAIWAN": "TW",
+        "THAILAND": "TH",
+        "TURKEY": "TR",
+        "UAE": "AE",
+        "UK": "GB",
+        "UNITEDARABEMIRATES": "AE",
+        "UNITEDKINGDOM": "GB",
+        "UNITEDSTATES": "US",
+        "UNITEDSTATESOFAMERICA": "US",
+        "USA": "US",
+        "VIETNAM": "VN"
+    ]
+
+    private static let regionNameIndex: [String: String] = {
+        let locale = Locale(identifier: "en_US_POSIX")
+        var index: [String: String] = [:]
+        for region in Locale.Region.isoRegions {
+            if let name = locale.localizedString(forRegionCode: region.identifier) {
+                index[normalize(name)] = region.identifier
+            }
+        }
+        return index
+    }()
+
+    static func flagEmoji(for regionNameOrCode: String) -> String {
+        let normalized = normalize(regionNameOrCode)
+        guard !normalized.isEmpty else { return fallbackFlag }
+
+        if let regionCode = aliases[normalized] ?? regionNameIndex[normalized] {
+            return flagEmojiForRegionCode(regionCode)
+        }
+
+        if normalized.count == 2, Locale.Region.isoRegions.contains(where: { $0.identifier == normalized }) {
+            return flagEmojiForRegionCode(normalized)
+        }
+
+        if let iso3Code = iso3To2[normalized] {
+            return flagEmojiForRegionCode(iso3Code)
+        }
+
+        return fallbackFlag
+    }
+
+    private static func flagEmojiForRegionCode(_ regionCode: String) -> String {
+        let code = regionCode.uppercased()
+        guard code.count == 2 else { return fallbackFlag }
+        let scalars = code.unicodeScalars.compactMap { scalar -> UnicodeScalar? in
+            guard let value = UnicodeScalar(0x1F1E6 + Int(scalar.value) - 65) else { return nil }
+            return value
+        }
+        return scalars.count == 2 ? String(String.UnicodeScalarView(scalars)) : fallbackFlag
+    }
+
+    private static func normalize(_ string: String) -> String {
+        let folded = string.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let filtered = folded.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? Character($0) : " " }
+        return String(filtered).components(separatedBy: .whitespacesAndNewlines).joined()
+    }
+
+    private static let iso3To2: [String: String] = [
+        "ARE": "AE",
+        "GBR": "GB",
+        "USA": "US",
+        "VNM": "VN"
+    ]
 }
 
 enum VPNConfigurationProtocol: String, Codable, CaseIterable {

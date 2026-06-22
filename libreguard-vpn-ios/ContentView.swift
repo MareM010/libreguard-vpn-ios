@@ -86,7 +86,7 @@ struct ContentView: View {
             guard phase == .active, case .authenticated = app.route else { return }
             Task {
                 await app.refreshAccountData(showErrors: false)
-                await app.refreshServers()
+                app.refreshServers()
                 await app.refreshVPNStatus()
             }
         }
@@ -677,7 +677,7 @@ private struct DashboardView: View {
             if app.usageQuota == nil || app.subscription == nil {
                 await app.refreshAccountData(showErrors: false)
             }
-            await app.refreshServers()
+            app.refreshServers()
             await app.refreshVPNStatus()
         }
         .onChange(of: app.vpnStatus) { _, newValue in
@@ -864,12 +864,7 @@ private struct ServerListView: View {
                     ForEach(groupedServers, id: \.country) { group in
                         VStack(alignment: .leading, spacing: 10) {
                             HStack(spacing: 8) {
-                                Text(group.code)
-                                    .font(.caption.weight(.bold))
-                                    .foregroundStyle(Theme.primary)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                                    .background(Theme.primary.opacity(0.12), in: Capsule())
+                                FlagBadge(flag: group.flag, size: 28)
                                 Text(group.country)
                                     .font(.subheadline.weight(.semibold))
                                 Text("(\(group.servers.count))")
@@ -885,7 +880,7 @@ private struct ServerListView: View {
                                         isFavorite: favorites.contains(server.id),
                                         latency: app.serverLatencies[server.id],
                                         onSelect: {
-                                            if server.pricingTier.caseInsensitiveCompare("Premium") == .orderedSame,
+                                            if server.requiresProSubscription,
                                                app.subscription?.isPro != true {
                                                 onUpgrade()
                                             } else {
@@ -924,18 +919,16 @@ private struct ServerListView: View {
         }
     }
 
-    private var groupedServers: [(country: String, code: String, servers: [VPNServer])] {
+    private var groupedServers: [(country: String, flag: String, servers: [VPNServer])] {
         let countries = Dictionary(grouping: filteredServers, by: \.country)
         return countries.keys.sorted().compactMap { country in
             guard let list = countries[country] else { return nil }
-            return (country, countryCode(country), list)
+            return (country, countryFlag(country), list)
         }
     }
 
-    private func countryCode(_ country: String) -> String {
-        Locale.Region.isoRegions.first {
-            Locale(identifier: "en_US").localizedString(forRegionCode: $0.identifier) == country
-        }?.identifier ?? String(country.prefix(2)).uppercased()
+    private func countryFlag(_ country: String) -> String {
+        CountryFlagResolver.flagEmoji(for: country)
     }
 }
 
@@ -1690,6 +1683,7 @@ private struct ProtectedIPCard: View {
     var body: some View {
         CardContainer {
             HStack(spacing: 16) {
+                FlagBadge(flag: server?.flagEmoji ?? "🌐")
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Selected Server")
                         .font(.caption)
@@ -1768,7 +1762,7 @@ private struct SelectedServerCard: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            IconBox(systemName: "network")
+            FlagBadge(flag: server.flagEmoji)
             VStack(alignment: .leading, spacing: 3) {
                 Text(server.serverName)
                     .font(.subheadline.weight(.semibold))
@@ -1794,6 +1788,19 @@ private struct SelectedServerCard: View {
         .padding(14)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
+    }
+}
+
+private struct FlagBadge: View {
+    let flag: String
+    var size: CGFloat = 34
+
+    var body: some View {
+        Text(flag)
+            .font(.system(size: size * 0.52))
+            .frame(width: size, height: size)
+            .background(Theme.primary.opacity(0.12), in: Circle())
+            .accessibilityHidden(true)
     }
 }
 
@@ -1880,17 +1887,13 @@ private struct ServerRow: View {
         Button(action: onSelect) {
             VStack(spacing: 10) {
                 HStack(spacing: 12) {
-                    Text(String(server.country.prefix(2)).uppercased())
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(Theme.primary)
-                        .frame(width: 34, height: 34)
-                        .background(Theme.primary.opacity(0.12), in: Circle())
+                    FlagBadge(flag: server.flagEmoji)
 
                     VStack(alignment: .leading, spacing: 3) {
                         Text(server.city ?? server.country)
                             .font(.subheadline.weight(.semibold))
                         HStack(spacing: 5) {
-                            Text(server.pricingTier)
+                            Text(server.pricingTierLabel)
                             Text("-")
                             Text(server.serverName)
                                 .fontDesign(.monospaced)

@@ -16,7 +16,7 @@ struct libreguard_vpn_iosTests {
                 #expect(json["devicePublicKey"] as? String == "base64-spki")
                 #expect(json["devicePublicKeyId"] as? String == "device-key-id")
                 #expect(json["devicePublicKeyAlgorithm"] as? String == "RSA-OAEP-256")
-                return try response(request, status: 200, json: [
+                return try makeResponse(request, status: 200, json: [
                     "requiresTwoFactor": true,
                     "pendingLoginToken": "pending-token",
                     "email": "person@example.com",
@@ -35,7 +35,7 @@ struct libreguard_vpn_iosTests {
     @Test func deviceLimitErrorIncludesSelectableDevices() async throws {
         try await withSerializedRequests {
             let client = makeClient { request in
-                try response(request, status: 409, json: [
+                try makeResponse(request, status: 409, json: [
                     "message": "Device limit reached.",
                     "errorCode": "DEVICE_LIMIT_EXCEEDED",
                     "currentDevices": 1,
@@ -81,7 +81,7 @@ struct libreguard_vpn_iosTests {
                     #expect(json["devicePublicKey"] as? String == "base64-spki")
                     #expect(json["devicePublicKeyId"] as? String == "device-key-id")
                     #expect(json["devicePublicKeyAlgorithm"] as? String == "RSA-OAEP-256")
-                    return try response(request, status: 200, json: [
+                    return try makeResponse(request, status: 200, json: [
                         "token": "new-access",
                         "refreshToken": "new-refresh",
                         "email": "person@example.com",
@@ -91,10 +91,10 @@ struct libreguard_vpn_iosTests {
                 case "/api/usage/quota":
                     quotaAttempts += 1
                     if request.value(forHTTPHeaderField: "Authorization") == "Bearer expired-access" {
-                        return try response(request, status: 401, json: ["message": "Expired"])
+                        return try makeResponse(request, status: 401, json: ["message": "Expired"])
                     }
                     #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer new-access")
-                    return try response(request, status: 200, json: quotaJSON)
+                    return try makeResponse(request, status: 200, json: quotaJSON)
                 default:
                     throw APIError(message: "Unexpected endpoint")
                 }
@@ -116,7 +116,7 @@ struct libreguard_vpn_iosTests {
                 #expect(json["serverId"] as? Int == 12)
                 #expect(json["protocol"] as? String == "IKEV2")
 
-                return try response(request, status: 200, json: [
+                return try makeResponse(request, status: 200, json: [
                     "success": true,
                     "protocol": "IKEV2",
                     "serverName": "DE-1",
@@ -135,7 +135,8 @@ struct libreguard_vpn_iosTests {
                 ])
             }
 
-            let response = try await client.fetchVPNConfig(serverId: 12, protocol: .ikev2)
+            let fetchVPNConfig: (Int, VPNConfigurationProtocol) async throws -> VPNConfigResponse = client.fetchVPNConfig(serverId:protocol:)
+            let response = try await fetchVPNConfig(12, VPNConfigurationProtocol.ikev2)
             #expect(response.serverName == "DE-1")
             #expect(response.protocolName == "IKEV2")
             #expect(response.encryptedPassphrase.algorithm == "RSA-OAEP-256")
@@ -179,6 +180,33 @@ struct libreguard_vpn_iosTests {
 
         try recorder.clear()
         #expect(try context.fetchCount(FetchDescriptor<LocalConnectionRecord>()) == 0)
+    }
+
+    @Test func countryFlagsResolveFromNamesAndAliases() {
+        #expect(CountryFlagResolver.flagEmoji(for: "Germany") == "🇩🇪")
+        #expect(CountryFlagResolver.flagEmoji(for: "United States") == "🇺🇸")
+        #expect(CountryFlagResolver.flagEmoji(for: "UK") == "🇬🇧")
+        #expect(CountryFlagResolver.flagEmoji(for: "Unknown Region") == "🌐")
+    }
+
+    @Test func premiumPricingTierDisplaysAsPro() throws {
+        let server = try JSONDecoder().decode(VPNServer.self, from: JSONSerialization.data(withJSONObject: [
+            "id": 99,
+            "serverName": "DE-PRO-1",
+            "serverIp": "203.0.113.99",
+            "country": "Germany",
+            "city": "Frankfurt",
+            "linkSpeed": 1000,
+            "pricingTier": "Premium",
+            "load": 20,
+            "activeConnections": NSNull(),
+            "latencyPingPort": 5001,
+            "loadDataFresh": true
+        ]))
+
+        #expect(server.pricingTierLabel == "Pro")
+        #expect(server.requiresProSubscription == true)
+        #expect(server.flagEmoji == "🇩🇪")
     }
 
     private func makeClient(
@@ -230,7 +258,7 @@ struct libreguard_vpn_iosTests {
         return data
     }
 
-    private func response(_ request: URLRequest, status: Int, json: Any) throws -> (HTTPURLResponse, Data) {
+    private func makeResponse(_ request: URLRequest, status: Int, json: Any) throws -> (HTTPURLResponse, Data) {
         guard let url = request.url else {
             throw APIError(message: "Missing request URL")
         }

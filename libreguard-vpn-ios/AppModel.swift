@@ -431,7 +431,7 @@ final class AppModel: ObservableObject {
     }
 
     private func canUse(server: VPNServer) -> Bool {
-        if server.pricingTier.caseInsensitiveCompare("Premium") == .orderedSame {
+        if server.requiresProSubscription {
             return subscription?.isPro == true
         }
         return true
