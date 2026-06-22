@@ -84,7 +84,11 @@ struct ContentView: View {
         .onOpenURL { app.handleOpenURL($0) }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active, case .authenticated = app.route else { return }
-            Task { await app.refreshAccountData(showErrors: false) }
+            Task {
+                await app.refreshAccountData(showErrors: false)
+                await app.refreshServers()
+                await app.refreshVPNStatus()
+            }
         }
     }
 }
@@ -123,44 +127,6 @@ private enum OverlayScreen: Identifiable {
     }
 }
 
-private enum ConnectionStatus {
-    case disconnected
-    case connecting
-    case connected
-
-    var title: String {
-        switch self {
-        case .disconnected: "Not Protected"
-        case .connecting: "Connecting"
-        case .connected: "Protected"
-        }
-    }
-
-    var description: String {
-        switch self {
-        case .disconnected: "Your connection is not secure"
-        case .connecting: "Establishing secure connection..."
-        case .connected: "Your connection is secure"
-        }
-    }
-
-    var buttonTitle: String {
-        switch self {
-        case .disconnected: "Connect"
-        case .connecting: "Cancel"
-        case .connected: "Disconnect"
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .disconnected: Theme.statusDisconnected
-        case .connecting: Theme.statusConnecting
-        case .connected: Theme.statusConnected
-        }
-    }
-}
-
 private enum Theme {
     static let primary = Color(red: 0.082, green: 0.439, blue: 0.937)
     static let statusConnected = Color(red: 0.063, green: 0.725, blue: 0.506)
@@ -173,6 +139,21 @@ private enum Theme {
     static let card = Color(.secondarySystemBackground)
     static let muted = Color(.systemGray)
     static let border = primary.opacity(0.16)
+}
+
+private extension VPNConnectionState {
+    var color: Color {
+        switch self {
+        case .invalid, .disconnected:
+            return Theme.statusDisconnected
+        case .connecting, .reasserting:
+            return Theme.statusConnecting
+        case .connected:
+            return Theme.statusConnected
+        case .disconnecting:
+            return Theme.destructive
+        }
+    }
 }
 
 private struct MainAppView: View {
@@ -223,8 +204,8 @@ private struct MainAppView: View {
                 title: "Help & Support",
                 subtitle: "Answers for common LibreGuard questions.",
                 sections: [
-                    ("Connection", "Use Quick Connect to select the fastest available server. The current build is visual only."),
-                    ("Account", "Account controls, billing, and VPN setup flows are placeholders for the next implementation phase."),
+                    ("Connection", "Use Quick Connect to select the fastest available server. The new IKEv2 tunnel path is being wired in now."),
+                    ("Account", "Account controls, billing, and some settings screens are still placeholders while we finish the VPN integration."),
                     ("Contact", "Support messaging will be connected once backend services are available.")
                 ],
                 onBack: { overlayScreen = nil }
@@ -243,9 +224,9 @@ private struct MainAppView: View {
         case .terms:
             LegalInfoView(
                 title: "Terms of Service",
-                subtitle: "A visual-only terms page for app navigation.",
+                subtitle: "A placeholder terms page for app navigation.",
                 sections: [
-                    ("Service", "The VPN service screens are mocked until networking and subscription logic are added."),
+                    ("Service", "The VPN service screens are being connected to the live backend and Apple Personal VPN APIs."),
                     ("Usage", "Users are responsible for following applicable laws and platform policies."),
                     ("Updates", "Final terms should be reviewed before production distribution.")
                 ],
@@ -637,7 +618,6 @@ private struct ForgotPasswordView: View {
 
 private struct DashboardView: View {
     @EnvironmentObject private var app: AppModel
-    @State private var status: ConnectionStatus = .disconnected
     @State private var showNetworkWarning = true
     @State private var pulse = false
     let onUpgrade: () -> Void
@@ -648,18 +628,18 @@ private struct DashboardView: View {
                 VStack(spacing: 22) {
                     header
 
-                    if showNetworkWarning && status == .disconnected {
+                    if showNetworkWarning && (status == .disconnected || status == .invalid) {
                         AlertCard()
                     }
 
-                    if status == .connected {
-                        ProtectedIPCard()
+                    if status.isConnected {
+                        ProtectedIPCard(server: selectedServer)
                         ProtectionIndicators()
                     }
 
-                    if status == .disconnected {
+                    if status == .disconnected || status == .invalid {
                         QuickConnectCard {
-                            startConnecting()
+                            Task { await app.connectSelectedServer() }
                         }
                     }
 
@@ -681,7 +661,20 @@ private struct DashboardView: View {
             if app.usageQuota == nil || app.subscription == nil {
                 await app.refreshAccountData(showErrors: false)
             }
+            await app.refreshServers()
+            await app.refreshVPNStatus()
         }
+        .onChange(of: app.vpnStatus) { _, newValue in
+            showNetworkWarning = newValue == .disconnected || newValue == .invalid
+        }
+    }
+
+    private var status: VPNConnectionState { app.vpnStatus }
+    private var selectedServer: VPNServer? {
+        if let selectedServerID = app.selectedServerID {
+            return app.servers.first(where: { $0.id == selectedServerID })
+        }
+        return app.servers.first
     }
 
     private var header: some View {
@@ -711,7 +704,7 @@ private struct DashboardView: View {
                     .frame(width: 168, height: 168)
                     .overlay(Circle().stroke(status.color.opacity(0.25), lineWidth: 1))
                     .shadow(color: status.color.opacity(0.18), radius: 28)
-                    .scaleEffect(status == .connected && pulse ? 1.03 : 1)
+                    .scaleEffect(status.isConnected && pulse ? 1.03 : 1)
 
                 Circle()
                     .fill(status.color.opacity(0.18))
@@ -721,7 +714,7 @@ private struct DashboardView: View {
                     .font(.system(size: 64, weight: .light))
                     .foregroundStyle(status.color)
 
-                if status == .connecting {
+                if status == .connecting || status == .reasserting {
                     Circle()
                         .stroke(status.color, lineWidth: 2)
                         .frame(width: 168, height: 168)
@@ -742,26 +735,26 @@ private struct DashboardView: View {
             .multilineTextAlignment(.center)
 
             PrimaryButton(title: status.buttonTitle, maxWidth: 220) {
-                if status == .disconnected {
-                    startConnecting()
-                } else if status == .connected {
-                    status = .disconnected
+                if status == .disconnected || status == .invalid {
+                    Task { await app.connectSelectedServer() }
+                } else if status.isConnected || status == .reasserting {
+                    Task { await app.disconnectVPN() }
                 }
             }
-            .disabled(status == .connecting)
-            .opacity(status == .connecting ? 0.65 : 1)
+            .disabled(status.isBusy)
+            .opacity(status.isBusy ? 0.65 : 1)
         }
         .padding(.top, 8)
     }
 
     @ViewBuilder
     private var connectedStats: some View {
-        if status == .connected {
+        if status.isConnected {
             VStack(spacing: 22) {
                 HStack(spacing: 10) {
                     StatMini(icon: "clock", value: "00:12:48", label: "Duration")
                     StatMini(icon: "speedometer", value: "12.8 Mbps", label: "Speed")
-                    StatMini(icon: "globe", value: "New York", label: "Location")
+                    StatMini(icon: "globe", value: selectedServer?.city ?? selectedServer?.country ?? "Auto", label: "Location")
                 }
 
                 CardContainer {
@@ -788,22 +781,12 @@ private struct DashboardView: View {
             .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
-
-    private func startConnecting() {
-        status = .connecting
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
-            status = .connected
-            showNetworkWarning = false
-        }
-    }
 }
 
 private struct ServerListView: View {
     @EnvironmentObject private var app: AppModel
     @State private var query = ""
-    @State private var selectedServerID: Int?
     @State private var favorites: Set<Int> = []
-    @State private var protocolName = "IKEv2/IPSec"
     let onUpgrade: () -> Void
 
     var body: some View {
@@ -817,9 +800,7 @@ private struct ServerListView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     HStack(spacing: 8) {
-                        ProtocolButton(title: "IKEv2/IPSec", isSelected: protocolName == "IKEv2/IPSec") {
-                            protocolName = "IKEv2/IPSec"
-                        }
+                        ProtocolButton(title: "IKEv2/IPSec", isSelected: true) {}
                         ProtocolButton(title: "OpenVPN", isSelected: false, badge: "PRO") {
                             onUpgrade()
                         }
@@ -885,7 +866,7 @@ private struct ServerListView: View {
                                 ForEach(group.servers) { server in
                                     ServerRow(
                                         server: server,
-                                        isSelected: selectedServerID == server.id,
+                                        isSelected: app.selectedServerID == server.id,
                                         isFavorite: favorites.contains(server.id),
                                         latency: app.serverLatencies[server.id],
                                         onSelect: {
@@ -893,7 +874,7 @@ private struct ServerListView: View {
                                                app.subscription?.isPro != true {
                                                 onUpgrade()
                                             } else {
-                                                selectedServerID = server.id
+                                                app.selectServer(server)
                                             }
                                         },
                                         onFavorite: {
@@ -1140,7 +1121,7 @@ private struct SettingsView: View {
                     }
 
                     SettingsSection(title: "Protocol") {
-                        NavigationRow(icon: "lock", title: "VPN Protocol", subtitle: "WireGuard")
+                        NavigationRow(icon: "lock", title: "VPN Protocol", subtitle: "IKEv2/IPSec")
                         NavigationRow(icon: "globe", title: "DNS Settings", subtitle: "Custom DNS servers")
                     }
 
@@ -1689,23 +1670,24 @@ private struct AlertCard: View {
 }
 
 private struct ProtectedIPCard: View {
+    let server: VPNServer?
+
     var body: some View {
         CardContainer {
             HStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Your IP")
+                    Text("Selected Server")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("203.0.113.45")
-                        .strikethrough()
-                        .foregroundStyle(.secondary)
+                    Text(server?.serverName ?? "Auto Select")
+                        .foregroundStyle(.primary)
                 }
                 Spacer()
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("VPN IP")
+                    Text("Endpoint")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("198.51.100.78")
+                    Text(server?.serverHostname ?? server?.serverIp ?? "—")
                         .foregroundStyle(Theme.primary)
                 }
             }

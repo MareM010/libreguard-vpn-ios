@@ -13,6 +13,9 @@ struct libreguard_vpn_iosTests {
                 let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
                 #expect(json["deviceId"] as? String == "test-device")
                 #expect(json["appVersion"] as? String == "1.0-test")
+                #expect(json["devicePublicKey"] as? String == "base64-spki")
+                #expect(json["devicePublicKeyId"] as? String == "device-key-id")
+                #expect(json["devicePublicKeyAlgorithm"] as? String == "RSA-OAEP-256")
                 return try response(request, status: 200, json: [
                     "requiresTwoFactor": true,
                     "pendingLoginToken": "pending-token",
@@ -73,6 +76,11 @@ struct libreguard_vpn_iosTests {
             let client = makeClient(sessionStore: store) { request in
                 switch request.url?.path {
                 case "/api/login/refresh":
+                    let body = try requestBody(from: request)
+                    let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                    #expect(json["devicePublicKey"] as? String == "base64-spki")
+                    #expect(json["devicePublicKeyId"] as? String == "device-key-id")
+                    #expect(json["devicePublicKeyAlgorithm"] as? String == "RSA-OAEP-256")
                     return try response(request, status: 200, json: [
                         "token": "new-access",
                         "refreshToken": "new-refresh",
@@ -96,6 +104,41 @@ struct libreguard_vpn_iosTests {
             #expect(quota.isUnlimited == false)
             #expect(quotaAttempts == 2)
             #expect(store.session?.refreshToken == "new-refresh")
+        }
+    }
+
+    @Test func vpnConfigRequestEncodesProtocolAndServer() async throws {
+        try await withSerializedRequests {
+            let client = makeClient { request in
+                #expect(request.url?.path == "/api/vpn/config")
+                let body = try requestBody(from: request)
+                let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                #expect(json["serverId"] as? Int == 12)
+                #expect(json["protocol"] as? String == "IKEV2")
+
+                return try response(request, status: 200, json: [
+                    "success": true,
+                    "protocol": "IKEV2",
+                    "serverName": "DE-1",
+                    "serverIp": "203.0.113.10",
+                    "certificateName": "IKEV2_client1",
+                    "configContent": "{\"local\":{\"p12\":\"UEs=\",\"password\":\"[ENCRYPTED_PASSPHRASE]\"},\"remote\":{\"addr\":\"vpn.libreguard.net\"}}",
+                    "encryptedPassphrase": [
+                        "algorithm": "RSA-OAEP-256",
+                        "keyId": "device-key-id",
+                        "ciphertext": "YQ=="
+                    ],
+                    "issueDate": "2026-06-21T16:00:00Z",
+                    "expirationDate": "2028-06-21T16:00:00Z",
+                    "clientIp": "198.51.100.45",
+                    "deviceId": "test-device"
+                ])
+            }
+
+            let response = try await client.fetchVPNConfig(serverId: 12, protocol: .ikev2)
+            #expect(response.serverName == "DE-1")
+            #expect(response.protocolName == "IKEV2")
+            #expect(response.encryptedPassphrase.algorithm == "RSA-OAEP-256")
         }
     }
 
@@ -140,6 +183,7 @@ struct libreguard_vpn_iosTests {
 
     private func makeClient(
         sessionStore: SessionStoring? = nil,
+        deviceKeyStore: VPNDeviceKeyProviding? = nil,
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
     ) -> APIClient {
         URLProtocolStub.handler = handler
@@ -149,7 +193,8 @@ struct libreguard_vpn_iosTests {
             baseURL: URL(string: "https://management.libreguard.net")!,
             urlSession: URLSession(configuration: configuration),
             sessionStore: sessionStore ?? InMemorySessionStore(),
-            deviceStore: StubDeviceIdentity()
+            deviceStore: StubDeviceIdentity(),
+            deviceKeyStore: deviceKeyStore ?? StubVPNDeviceKeyStore()
         )
     }
 
@@ -265,6 +310,21 @@ private final class InMemorySessionStore: SessionStoring {
 private final class StubDeviceIdentity: DeviceIdentifying {
     let deviceId = "test-device"
     let appVersion = "1.0-test"
+}
+
+@MainActor
+private final class StubVPNDeviceKeyStore: VPNDeviceKeyProviding {
+    func publicKeyPayload() throws -> DevicePublicKeyPayload {
+        DevicePublicKeyPayload(
+            devicePublicKey: "base64-spki",
+            devicePublicKeyId: "device-key-id",
+            devicePublicKeyAlgorithm: "RSA-OAEP-256"
+        )
+    }
+
+    func decryptPassphrase(from encryptedPassphrase: EncryptedPassphrase) throws -> String {
+        "test-passphrase"
+    }
 }
 
 private final class URLProtocolStub: URLProtocol, @unchecked Sendable {

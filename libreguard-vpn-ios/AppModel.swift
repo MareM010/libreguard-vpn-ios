@@ -18,11 +18,14 @@ final class AppModel: ObservableObject {
     @Published var recoveryCodes: [String] = []
     @Published var servers: [VPNServer] = []
     @Published var serverLatencies: [Int: Int] = [:]
+    @Published var selectedServerID: Int?
+    @Published var vpnStatus: VPNConnectionState = .disconnected
     @Published var retryAfterSeconds = 0
 
     private let api: BackendServicing
     private let google: GoogleSigning
     private let latencyProbe: LatencyProbing
+    private let vpn: VPNManaging
     private let defaults: UserDefaults
     private let pendingRegistrationKey = "pending.registration"
     private var serverRefreshTask: Task<Void, Never>?
@@ -32,13 +35,22 @@ final class AppModel: ObservableObject {
         api: BackendServicing? = nil,
         google: GoogleSigning? = nil,
         latencyProbe: LatencyProbing? = nil,
+        vpnManager: VPNManaging? = nil,
         defaults: UserDefaults = .standard
     ) {
         let resolvedAPI = api ?? APIClient()
         self.api = resolvedAPI
         self.google = google ?? GoogleSignInService()
         self.latencyProbe = latencyProbe ?? NetworkLatencyProbe()
+        self.vpn = vpnManager ?? PersonalVPNManager(api: resolvedAPI)
         self.defaults = defaults
+        self.vpnStatus = self.vpn.status
+        self.vpn.onStatusChange = { [weak self] status in
+            self?.vpnStatus = status
+        }
+        self.vpn.onDisconnectError = { [weak self] error in
+            self?.present(error)
+        }
         if let concrete = resolvedAPI as? APIClient {
             concrete.onSessionInvalidated = { [weak self] in self?.forceSignOut() }
         }
@@ -52,6 +64,7 @@ final class AppModel: ObservableObject {
             route = .login
             return
         }
+        await vpn.refreshStatus()
         if api.storedSession != nil {
             do {
                 session = try await api.restoreSession()
@@ -233,11 +246,21 @@ final class AppModel: ObservableObject {
                 guard !Task.isCancelled else { return }
                 servers = fetched
                 serverLatencies = await latencyProbe.measure(fetched)
+                if let selectedServerID = self.selectedServerID,
+                   !fetched.contains(where: { $0.id == selectedServerID }) {
+                    self.selectedServerID = bestAccessibleServer(in: fetched)?.id
+                } else if self.selectedServerID == nil {
+                    self.selectedServerID = bestAccessibleServer(in: fetched)?.id
+                }
             } catch is CancellationError {
             } catch {
                 present(error)
             }
         }
+    }
+
+    func refreshVPNStatus() async {
+        await vpn.refreshStatus()
     }
 
     func loadTwoFactorSetup() async {
@@ -278,9 +301,35 @@ final class AppModel: ObservableObject {
     }
 
     func signOut() async {
+        await vpn.disconnectAndForget()
         await api.logout()
         google.signOut()
-        forceSignOut()
+        clearSessionState()
+    }
+
+    func selectServer(_ server: VPNServer) {
+        selectedServerID = server.id
+    }
+
+    func connectSelectedServer() async {
+        guard let server = selectedServer ?? bestAccessibleServer(in: servers) else {
+            presentedError = APIError(message: "No VPN server is available right now.")
+            return
+        }
+        guard canUse(server: server) else {
+            presentedError = APIError(message: "This server requires a Pro plan.")
+            return
+        }
+        do {
+            try await vpn.connect(to: server, protocol: .ikev2)
+            selectedServerID = server.id
+        } catch {
+            present(error)
+        }
+    }
+
+    func disconnectVPN() async {
+        await vpn.disconnect()
     }
 
     func handleOpenURL(_ url: URL) { _ = google.handle(url: url) }
@@ -331,15 +380,57 @@ final class AppModel: ObservableObject {
     }
 
     private func forceSignOut() {
+        Task { await vpn.disconnectAndForget() }
+        clearSessionState()
+    }
+
+    private func clearSessionState() {
+        serverRefreshTask?.cancel()
+        retryCountdownTask?.cancel()
+        serverRefreshTask = nil
+        retryCountdownTask = nil
         api.clearLocalSession()
         session = nil
         usageQuota = nil
         subscription = nil
         twoFactorStatus = nil
+        authenticatorSetup = nil
+        recoveryCodes = []
+        isAuthenticating = false
+        isRefreshingAccount = false
+        isRefreshingServers = false
+        retryAfterSeconds = 0
         servers = []
         serverLatencies = [:]
+        selectedServerID = nil
+        vpnStatus = .disconnected
         deviceLimitContext = nil
         route = .login
+    }
+
+    private var selectedServer: VPNServer? {
+        guard let selectedServerID else { return nil }
+        return servers.first(where: { $0.id == selectedServerID })
+    }
+
+    private func bestAccessibleServer(in servers: [VPNServer]) -> VPNServer? {
+        let candidates = servers.filter { canUse(server: $0) }
+        let pool = candidates.isEmpty ? servers : candidates
+        return pool.min { lhs, rhs in
+            let lhsLatency = serverLatencies[lhs.id] ?? Int.max
+            let rhsLatency = serverLatencies[rhs.id] ?? Int.max
+            if lhsLatency == rhsLatency {
+                return lhs.serverName < rhs.serverName
+            }
+            return lhsLatency < rhsLatency
+        }
+    }
+
+    private func canUse(server: VPNServer) -> Bool {
+        if server.pricingTier.caseInsensitiveCompare("Premium") == .orderedSame {
+            return subscription?.isPro == true
+        }
+        return true
     }
 
     private func beginRetryCountdown(_ seconds: Int) {

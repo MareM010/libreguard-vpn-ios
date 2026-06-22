@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		A10000012FE7000000000001 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = A10000032FE7000000000003 /* GoogleSignIn */; };
+		A10000022FE7000000000004 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000005 /* NetworkExtension.framework */; };
+		A10000022FE7000000000006 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000007 /* Security.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -31,6 +33,8 @@
 		E678589C2FE6EBD7000CF95E /* libreguard-vpn-ios.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "libreguard-vpn-ios.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		E67858A92FE6EBD9000CF95E /* libreguard-vpn-iosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "libreguard-vpn-iosTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		E67858B32FE6EBD9000CF95E /* libreguard-vpn-iosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "libreguard-vpn-iosUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000032FE7000000000005 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = "NetworkExtension.framework"; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
+		A10000032FE7000000000007 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = "Security.framework"; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -57,6 +61,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000012FE7000000000001 /* GoogleSignIn in Frameworks */,
+				A10000022FE7000000000004 /* NetworkExtension.framework in Frameworks */,
+				A10000022FE7000000000006 /* Security.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -403,6 +409,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = libreguard-vpn-ios/libreguard_vpn_ios.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -438,6 +445,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = libreguard-vpn-ios/libreguard_vpn_ios.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;

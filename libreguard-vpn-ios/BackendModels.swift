@@ -62,18 +62,27 @@ struct LoginRequest: Encodable {
     let password: String
     let deviceId: String
     let appVersion: String
+    let devicePublicKey: String
+    let devicePublicKeyId: String
+    let devicePublicKeyAlgorithm: String
 }
 
 struct GoogleLoginRequest: Encodable {
     let idToken: String
     let deviceId: String
     let appVersion: String
+    let devicePublicKey: String
+    let devicePublicKeyId: String
+    let devicePublicKeyAlgorithm: String
 }
 
 struct RefreshTokenRequest: Encodable {
     let refreshToken: String
     let deviceId: String
     let appVersion: String
+    let devicePublicKey: String
+    let devicePublicKeyId: String
+    let devicePublicKeyAlgorithm: String
 }
 
 struct LoginResponse: Decodable {
@@ -220,6 +229,189 @@ struct VPNServer: Decodable, Identifiable, Hashable {
     var latencyHost: String {
         if let serverHostname, !serverHostname.isEmpty { return serverHostname }
         return serverIp
+    }
+}
+
+struct DevicePublicKeyPayload: Encodable, Equatable {
+    let devicePublicKey: String
+    let devicePublicKeyId: String
+    let devicePublicKeyAlgorithm: String
+}
+
+enum VPNConfigurationProtocol: String, Codable, CaseIterable {
+    case ikev2 = "IKEV2"
+    case ikev2IPSec = "IKEV2/IPSEC"
+
+    var displayName: String {
+        switch self {
+        case .ikev2: return "IKEv2"
+        case .ikev2IPSec: return "IKEv2/IPSec"
+        }
+    }
+}
+
+struct VPNConfigRequest: Encodable {
+    let serverId: Int
+    let protocolName: VPNConfigurationProtocol
+
+    enum CodingKeys: String, CodingKey {
+        case serverId
+        case protocolName = "protocol"
+    }
+}
+
+struct EncryptedPassphrase: Decodable, Equatable {
+    let algorithm: String
+    let keyId: String
+    let ciphertext: String
+
+    var ciphertextData: Data? {
+        Data(base64Encoded: ciphertext.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+}
+
+struct VPNConfigResponse: Decodable, Equatable {
+    let success: Bool?
+    let protocolName: String?
+    let serverName: String
+    let serverIp: String
+    let certificateName: String?
+    let configContent: String
+    let encryptedPassphrase: EncryptedPassphrase
+    let issueDate: Date?
+    let expirationDate: Date?
+    let clientIp: String?
+    let deviceId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case success
+        case protocolName = "protocol"
+        case serverName
+        case serverIp
+        case certificateName
+        case configContent
+        case encryptedPassphrase
+        case issueDate
+        case expirationDate
+        case clientIp
+        case deviceId
+    }
+}
+
+struct SSWANProfile: Decodable, Equatable {
+    let name: String?
+    let uuid: String?
+    let type: String?
+    let remoteAddress: String?
+    let localP12Base64: String?
+    let localPassword: String?
+    let localUsesRSAPSS: Bool
+    let ikeProposal: String?
+    let espProposal: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case uuid
+        case type
+        case remote
+        case local
+        case ikeProposal = "ike-proposal"
+        case espProposal = "esp-proposal"
+    }
+
+    private enum RemoteKeys: String, CodingKey {
+        case addr
+    }
+
+    private enum LocalKeys: String, CodingKey {
+        case p12
+        case password
+        case rsaPSS = "rsa-pss"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        uuid = try container.decodeIfPresent(String.self, forKey: .uuid)
+        type = try container.decodeIfPresent(String.self, forKey: .type)
+        ikeProposal = try container.decodeIfPresent(String.self, forKey: .ikeProposal)
+        espProposal = try container.decodeIfPresent(String.self, forKey: .espProposal)
+
+        if let remote = try? container.nestedContainer(keyedBy: RemoteKeys.self, forKey: .remote) {
+            remoteAddress = try remote.decodeIfPresent(String.self, forKey: .addr)
+        } else {
+            remoteAddress = nil
+        }
+
+        if let local = try? container.nestedContainer(keyedBy: LocalKeys.self, forKey: .local) {
+            localP12Base64 = try local.decodeIfPresent(String.self, forKey: .p12)
+            localPassword = try local.decodeIfPresent(String.self, forKey: .password)
+            localUsesRSAPSS = try local.decodeIfPresent(Bool.self, forKey: .rsaPSS) ?? false
+        } else {
+            localP12Base64 = nil
+            localPassword = nil
+            localUsesRSAPSS = false
+        }
+    }
+}
+
+enum VPNConnectionState: Equatable {
+    case invalid
+    case disconnected
+    case connecting
+    case connected
+    case reasserting
+    case disconnecting
+
+    var isConnected: Bool {
+        switch self {
+        case .connected, .reasserting:
+            return true
+        case .invalid, .disconnected, .connecting, .disconnecting:
+            return false
+        }
+    }
+
+    var isBusy: Bool {
+        switch self {
+        case .connecting, .disconnecting, .reasserting:
+            return true
+        case .invalid, .disconnected, .connected:
+            return false
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .invalid: return "VPN Unavailable"
+        case .disconnected: return "Not Protected"
+        case .connecting: return "Connecting"
+        case .connected: return "Protected"
+        case .reasserting: return "Reconnecting"
+        case .disconnecting: return "Disconnecting"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .invalid: return "The VPN configuration is not ready yet."
+        case .disconnected: return "Your connection is not secure"
+        case .connecting: return "Establishing secure connection..."
+        case .connected: return "Your connection is secure"
+        case .reasserting: return "Re-establishing the tunnel after a network change..."
+        case .disconnecting: return "Closing the secure tunnel..."
+        }
+    }
+
+    var buttonTitle: String {
+        switch self {
+        case .invalid: return "Retry"
+        case .disconnected: return "Connect"
+        case .connecting: return "Cancel"
+        case .connected: return "Disconnect"
+        case .reasserting: return "Disconnect"
+        case .disconnecting: return "Disconnecting..."
+        }
     }
 }
 

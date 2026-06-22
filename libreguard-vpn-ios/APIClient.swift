@@ -19,6 +19,7 @@ protocol BackendServicing: AnyObject {
     func clearLocalSession()
     func logout() async
     func fetchServers() async throws -> [VPNServer]
+    func fetchVPNConfig(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> VPNConfigResponse
     func fetchUsage() async throws -> UsageQuota
     func fetchSubscription() async throws -> SubscriptionStatus
     func fetchTwoFactorStatus() async throws -> TwoFactorStatus
@@ -34,6 +35,7 @@ final class APIClient: BackendServicing {
     private let urlSession: URLSession
     private let sessionStore: SessionStoring
     private let deviceStore: DeviceIdentifying
+    private let deviceKeyStore: VPNDeviceKeyProviding
     private var refreshTask: Task<AuthSession, Error>?
     var onSessionInvalidated: (() -> Void)?
 
@@ -41,12 +43,14 @@ final class APIClient: BackendServicing {
         baseURL: URL = URL(string: "https://management.libreguard.net")!,
         urlSession: URLSession = .shared,
         sessionStore: SessionStoring? = nil,
-        deviceStore: DeviceIdentifying? = nil
+        deviceStore: DeviceIdentifying? = nil,
+        deviceKeyStore: VPNDeviceKeyProviding? = nil
     ) {
         self.baseURL = baseURL
         self.urlSession = urlSession
         self.sessionStore = sessionStore ?? SessionStore()
         self.deviceStore = deviceStore ?? DeviceIdentityStore()
+        self.deviceKeyStore = deviceKeyStore ?? VPNDeviceKeyStore()
     }
 
     var storedSession: AuthSession? { sessionStore.session }
@@ -64,25 +68,44 @@ final class APIClient: BackendServicing {
     }
 
     func login(email: String, password: String) async throws -> LoginResponse {
-        try await send(
+        let keyPayload = try deviceKeyStore.publicKeyPayload()
+        let response: LoginResponse = try await send(
             .post,
             path: "/api/login",
-            body: LoginRequest(email: email, password: password, deviceId: deviceId, appVersion: appVersion),
+            body: LoginRequest(
+                email: email,
+                password: password,
+                deviceId: deviceId,
+                appVersion: appVersion,
+                devicePublicKey: keyPayload.devicePublicKey,
+                devicePublicKeyId: keyPayload.devicePublicKeyId,
+                devicePublicKeyAlgorithm: keyPayload.devicePublicKeyAlgorithm
+            ),
             authorized: false
         )
+        return response
     }
 
     func loginWithGoogle(idToken: String) async throws -> LoginResponse {
-        try await send(
+        let keyPayload = try deviceKeyStore.publicKeyPayload()
+        let response: LoginResponse = try await send(
             .post,
             path: "/api/login/google",
-            body: GoogleLoginRequest(idToken: idToken, deviceId: deviceId, appVersion: appVersion),
+            body: GoogleLoginRequest(
+                idToken: idToken,
+                deviceId: deviceId,
+                appVersion: appVersion,
+                devicePublicKey: keyPayload.devicePublicKey,
+                devicePublicKeyId: keyPayload.devicePublicKeyId,
+                devicePublicKeyAlgorithm: keyPayload.devicePublicKeyAlgorithm
+            ),
             authorized: false
         )
+        return response
     }
 
     func verifyTwoFactor(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse {
-        try await send(
+        let response: LoginResponse = try await send(
             .post,
             path: "/api/login/verify-2fa",
             body: TwoFactorLoginRequest(
@@ -94,10 +117,11 @@ final class APIClient: BackendServicing {
             ),
             authorized: false
         )
+        return response
     }
 
     func verifyRecoveryCode(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse {
-        try await send(
+        let response: LoginResponse = try await send(
             .post,
             path: "/api/login/verify-recovery-code",
             body: RecoveryCodeLoginRequest(
@@ -109,14 +133,17 @@ final class APIClient: BackendServicing {
             ),
             authorized: false
         )
+        return response
     }
 
     func register(email: String, password: String) async throws -> RegistrationResponse {
-        try await send(.post, path: "/api/register", body: RegistrationRequest(email: email, password: password), authorized: false)
+        let response: RegistrationResponse = try await send(.post, path: "/api/register", body: RegistrationRequest(email: email, password: password), authorized: false)
+        return response
     }
 
     func confirmationStatus(userId: String) async throws -> ConfirmationStatusResponse {
-        try await send(.get, path: "/api/register/check-confirmation/\(userId)", authorized: false)
+        let response: ConfirmationStatusResponse = try await send(.get, path: "/api/register/check-confirmation/\(userId)", authorized: false)
+        return response
     }
 
     func resendConfirmation(email: String) async throws {
@@ -185,20 +212,33 @@ final class APIClient: BackendServicing {
         return response.servers
     }
 
+    func fetchVPNConfig(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> VPNConfigResponse {
+        let response: VPNConfigResponse = try await send(
+            .post,
+            path: "/api/vpn/config",
+            body: VPNConfigRequest(serverId: serverId, protocolName: protocolName)
+        )
+        return response
+    }
+
     func fetchUsage() async throws -> UsageQuota {
-        try await send(.get, path: "/api/usage/quota")
+        let response: UsageQuota = try await send(.get, path: "/api/usage/quota")
+        return response
     }
 
     func fetchSubscription() async throws -> SubscriptionStatus {
-        try await send(.get, path: "/api/subscription/status")
+        let response: SubscriptionStatus = try await send(.get, path: "/api/subscription/status")
+        return response
     }
 
     func fetchTwoFactorStatus() async throws -> TwoFactorStatus {
-        try await send(.get, path: "/api/2fa/status")
+        let response: TwoFactorStatus = try await send(.get, path: "/api/2fa/status")
+        return response
     }
 
     func setupTwoFactor() async throws -> AuthenticatorSetup {
-        try await send(.post, path: "/api/2fa/setup", body: EmptyBody())
+        let response: AuthenticatorSetup = try await send(.post, path: "/api/2fa/setup", body: EmptyBody())
+        return response
     }
 
     func enableTwoFactor(code: String) async throws -> [String] {
@@ -228,6 +268,7 @@ final class APIClient: BackendServicing {
         guard let existing = sessionStore.session else {
             throw APIError(statusCode: 401, message: "Your session has expired.", code: "SESSION_EXPIRED", requiresLogin: true)
         }
+        let keyPayload = try deviceKeyStore.publicKeyPayload()
 
         let task = Task { @MainActor [weak self] () throws -> AuthSession in
             guard let self else { throw CancellationError() }
@@ -237,7 +278,10 @@ final class APIClient: BackendServicing {
                 body: RefreshTokenRequest(
                     refreshToken: existing.refreshToken,
                     deviceId: self.deviceId,
-                    appVersion: self.appVersion
+                    appVersion: self.appVersion,
+                    devicePublicKey: keyPayload.devicePublicKey,
+                    devicePublicKeyId: keyPayload.devicePublicKeyId,
+                    devicePublicKeyAlgorithm: keyPayload.devicePublicKeyAlgorithm
                 ),
                 authorized: false,
                 retryAfterRefresh: false
