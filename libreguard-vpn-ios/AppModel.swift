@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     @Published var servers: [VPNServer] = []
     @Published var serverLatencies: [Int: Int] = [:]
     @Published var selectedServerID: Int?
+    @Published var selectedVPNProtocol: VPNConfigurationProtocol
     @Published var vpnStatus: VPNConnectionState = .disconnected
     @Published var retryAfterSeconds = 0
 
@@ -27,6 +28,7 @@ final class AppModel: ObservableObject {
     private let latencyProbe: LatencyProbing
     private let vpn: VPNManaging
     private let defaults: UserDefaults
+    private let protocolSelectionStore: VPNProtocolSelectionStoring
     private let pendingRegistrationKey = "pending.registration"
     private var serverRefreshTask: Task<Void, Never>?
     private var retryCountdownTask: Task<Void, Never>?
@@ -36,13 +38,16 @@ final class AppModel: ObservableObject {
         google: GoogleSigning? = nil,
         latencyProbe: LatencyProbing? = nil,
         vpnManager: VPNManaging? = nil,
+        protocolSelectionStore: VPNProtocolSelectionStoring? = nil,
         defaults: UserDefaults = .standard
     ) {
         let resolvedAPI = api ?? APIClient()
         self.api = resolvedAPI
         self.google = google ?? GoogleSignInService()
         self.latencyProbe = latencyProbe ?? NetworkLatencyProbe()
-        self.vpn = vpnManager ?? PersonalVPNManager(api: resolvedAPI)
+        self.protocolSelectionStore = protocolSelectionStore ?? UserDefaultsVPNProtocolSelectionStore(defaults: defaults)
+        self.selectedVPNProtocol = self.protocolSelectionStore.selectedProtocol
+        self.vpn = vpnManager ?? VPNManagerCoordinator(api: resolvedAPI)
         self.defaults = defaults
         self.vpnStatus = self.vpn.status
         self.vpn.onStatusChange = { [weak self] status in
@@ -315,6 +320,17 @@ final class AppModel: ObservableObject {
         selectedServerID = nil
     }
 
+    func selectVPNProtocol(_ protocolName: VPNConfigurationProtocol) {
+        guard canSelect(protocolName: protocolName) else {
+            if protocolName == .openVPN {
+                presentedError = APIError(message: "OpenVPN requires a Pro plan.")
+            }
+            return
+        }
+        selectedVPNProtocol = protocolName
+        protocolSelectionStore.selectedProtocol = protocolName
+    }
+
     func connectSelectedServer() async {
         guard let server = selectedServer ?? bestAccessibleServer(in: servers) else {
             presentedError = APIError(message: "No VPN server is available right now.")
@@ -324,8 +340,9 @@ final class AppModel: ObservableObject {
             presentedError = APIError(message: "This server requires a Pro plan.")
             return
         }
+        let protocolToUse = effectiveConnectionProtocol()
         do {
-            try await vpn.connect(to: server, protocol: .ikev2)
+            try await vpn.connect(to: server, protocol: protocolToUse)
             selectedServerID = server.id
         } catch {
             present(error)
@@ -435,6 +452,18 @@ final class AppModel: ObservableObject {
             return subscription?.isPro == true
         }
         return true
+    }
+
+    private func canSelect(protocolName: VPNConfigurationProtocol) -> Bool {
+        guard protocolName.requiresProSubscription else { return true }
+        return subscription?.isPro == true
+    }
+
+    private func effectiveConnectionProtocol() -> VPNConfigurationProtocol {
+        if selectedVPNProtocol.requiresProSubscription, subscription?.isPro != true {
+            return .ikev2
+        }
+        return selectedVPNProtocol
     }
 
     private func beginRetryCountdown(_ seconds: Int) {

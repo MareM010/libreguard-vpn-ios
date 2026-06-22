@@ -815,9 +815,22 @@ private struct ServerListView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     HStack(spacing: 8) {
-                        ProtocolButton(title: "IKEv2/IPSec", isSelected: true) {}
-                        ProtocolButton(title: "OpenVPN", isSelected: false, badge: "PRO") {
-                            onUpgrade()
+                        ProtocolButton(
+                            title: "IKEv2/IPSec",
+                            isSelected: app.selectedVPNProtocol == .ikev2 || app.selectedVPNProtocol == .ikev2IPSec
+                        ) {
+                            app.selectVPNProtocol(.ikev2)
+                        }
+                        ProtocolButton(
+                            title: "OpenVPN",
+                            isSelected: app.selectedVPNProtocol == .openVPN,
+                            badge: "PRO"
+                        ) {
+                            if app.subscription?.isPro == true {
+                                app.selectVPNProtocol(.openVPN)
+                            } else {
+                                onUpgrade()
+                            }
                         }
                     }
                 }
@@ -1129,7 +1142,7 @@ private struct SettingsView: View {
                     }
 
                     SettingsSection(title: "Protocol") {
-                        NavigationRow(icon: "lock", title: "VPN Protocol", subtitle: "IKEv2/IPSec")
+                        NavigationRow(icon: "lock", title: "VPN Protocol", subtitle: app.selectedVPNProtocol.displayName)
                         NavigationRow(icon: "globe", title: "DNS Settings", subtitle: "Custom DNS servers")
                     }
 

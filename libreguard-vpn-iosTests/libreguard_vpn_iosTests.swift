@@ -209,7 +209,7 @@ struct libreguard_vpn_iosTests {
         #expect(server.flagEmoji == "🇩🇪")
     }
 
-    private func makeClient(
+    func makeClient(
         sessionStore: SessionStoring? = nil,
         deviceKeyStore: VPNDeviceKeyProviding? = nil,
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
@@ -226,11 +226,11 @@ struct libreguard_vpn_iosTests {
         )
     }
 
-    private func withSerializedRequests<T>(_ operation: () async throws -> T) async rethrows -> T {
+    func withSerializedRequests<T>(_ operation: () async throws -> T) async rethrows -> T {
         try await TestIsolation.shared.withExclusiveAccess(operation)
     }
 
-    private func requestBody(from request: URLRequest) throws -> Data {
+    func requestBody(from request: URLRequest) throws -> Data {
         if let body = request.httpBody {
             return body
         }
@@ -258,7 +258,7 @@ struct libreguard_vpn_iosTests {
         return data
     }
 
-    private func makeResponse(_ request: URLRequest, status: Int, json: Any) throws -> (HTTPURLResponse, Data) {
+    func makeResponse(_ request: URLRequest, status: Int, json: Any) throws -> (HTTPURLResponse, Data) {
         guard let url = request.url else {
             throw APIError(message: "Missing request URL")
         }
@@ -291,7 +291,7 @@ struct libreguard_vpn_iosTests {
     }
 }
 
-private actor TestIsolation {
+actor TestIsolation {
     static let shared = TestIsolation()
     private var isLocked = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -326,7 +326,7 @@ private actor TestIsolation {
 }
 
 @MainActor
-private final class InMemorySessionStore: SessionStoring {
+final class InMemorySessionStore: SessionStoring {
     private(set) var session: AuthSession?
 
     init(session: AuthSession? = nil) { self.session = session }
@@ -335,13 +335,13 @@ private final class InMemorySessionStore: SessionStoring {
 }
 
 @MainActor
-private final class StubDeviceIdentity: DeviceIdentifying {
+final class StubDeviceIdentity: DeviceIdentifying {
     let deviceId = "test-device"
     let appVersion = "1.0-test"
 }
 
 @MainActor
-private final class StubVPNDeviceKeyStore: VPNDeviceKeyProviding {
+final class StubVPNDeviceKeyStore: VPNDeviceKeyProviding {
     func publicKeyPayload() throws -> DevicePublicKeyPayload {
         DevicePublicKeyPayload(
             devicePublicKey: "base64-spki",
@@ -355,7 +355,7 @@ private final class StubVPNDeviceKeyStore: VPNDeviceKeyProviding {
     }
 }
 
-private final class URLProtocolStub: URLProtocol, @unchecked Sendable {
+final class URLProtocolStub: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
 
     override class func canInit(with request: URLRequest) -> Bool { true }

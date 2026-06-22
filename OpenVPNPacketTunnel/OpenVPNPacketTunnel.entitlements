@@ -6,13 +6,10 @@
 	<array>
 		<string>packet-tunnel-provider</string>
 	</array>
-	<key>com.apple.developer.networking.vpn.api</key>
-	<array>
-		<string>allow-vpn</string>
-	</array>
 	<key>keychain-access-groups</key>
 	<array>
 		<string>$(AppIdentifierPrefix)net.libreguard.libreguard-vpn-ios.openvpn</string>
 	</array>
 </dict>
 </plist>
+

@@ -383,12 +383,18 @@ enum CountryFlagResolver {
 enum VPNConfigurationProtocol: String, Codable, CaseIterable {
     case ikev2 = "IKEV2"
     case ikev2IPSec = "IKEV2/IPSEC"
+    case openVPN = "OPENVPN"
 
     var displayName: String {
         switch self {
         case .ikev2: return "IKEv2"
         case .ikev2IPSec: return "IKEv2/IPSec"
+        case .openVPN: return "OpenVPN"
         }
+    }
+
+    var requiresProSubscription: Bool {
+        self == .openVPN
     }
 }
 
