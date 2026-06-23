@@ -1,6 +1,18 @@
 import Foundation
 import Security
 
+private typealias SecTask = CFTypeRef
+
+@_silgen_name("SecTaskCreateFromSelf")
+private func SecTaskCreateFromSelf(_ allocator: CFAllocator?) -> SecTask?
+
+@_silgen_name("SecTaskCopyValueForEntitlement")
+private func SecTaskCopyValueForEntitlement(
+    _ task: SecTask,
+    _ entitlement: CFString,
+    _ error: UnsafeMutablePointer<Unmanaged<CFError>?>?
+) -> CFTypeRef?
+
 protocol SharedKeychainDataStoring {
     func data(for account: String) -> Data?
     func set(_ data: Data, for account: String) throws
@@ -113,11 +125,14 @@ struct SharedKeychainError: LocalizedError {
 
 enum KeychainAccessGroupResolver {
     static func resolve(suffix: String) -> String? {
-        guard let task = SecTaskCreateFromSelf(nil),
-              let entitlements = SecTaskCopyValueForEntitlement(task, "keychain-access-groups" as CFString, nil) as? [String] else {
+        guard let task = SecTaskCreateFromSelf(nil as CFAllocator?),
+              let entitlements = SecTaskCopyValueForEntitlement(
+                task,
+                "keychain-access-groups" as CFString,
+                nil as UnsafeMutablePointer<Unmanaged<CFError>?>?
+              ) as? [String] else {
             return nil
         }
         return entitlements.first(where: { $0.hasSuffix(suffix) })
     }
 }
-

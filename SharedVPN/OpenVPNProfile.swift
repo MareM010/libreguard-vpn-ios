@@ -133,15 +133,15 @@ struct OpenVPNProfileConfiguration: Equatable {
         var currentBlockContents: [String] = []
 
         func flushBlock() {
-            guard let currentBlockName else { return }
-            inlineBlocks[currentBlockName] = currentBlockContents.joined(separator: "\n").trimmingCharacters(in: .newlines)
+            guard let blockName = currentBlockName else { return }
+            inlineBlocks[blockName] = currentBlockContents.joined(separator: "\n").trimmingCharacters(in: .newlines)
         }
 
         for rawLine in lines {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            if let currentBlockName {
-                if line.caseInsensitiveCompare("</\(currentBlockName)>") == .orderedSame {
+            if let blockName = currentBlockName {
+                if line.caseInsensitiveCompare("</\(blockName)>") == .orderedSame {
                     flushBlock()
                     currentBlockName = nil
                     currentBlockContents = []
@@ -169,8 +169,8 @@ struct OpenVPNProfileConfiguration: Equatable {
             directives.append(Directive(name: name, arguments: arguments))
         }
 
-        if let currentBlockName {
-            throw OpenVPNProfileError.invalidConfiguration("Missing closing tag for <\(currentBlockName)> block.")
+        if let blockName = currentBlockName {
+            throw OpenVPNProfileError.invalidConfiguration("Missing closing tag for <\(blockName)> block.")
         }
 
         return OpenVPNProfileConfiguration(

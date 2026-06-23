@@ -149,6 +149,29 @@ struct OpenVPNTests {
         #expect(restored.selectedProtocol == .openVPN)
     }
 
+    @Test func appModelUnlocksOpenVPNWhenQuotaIndicatesUnlimitedPlan() throws {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let app = AppModel(vpnManager: SpyVPNManager(), defaults: defaults)
+        app.usageQuota = try JSONDecoder().decode(UsageQuota.self, from: JSONSerialization.data(withJSONObject: [
+            "bytesUsed": 2_048,
+            "bytesLimit": 0,
+            "bytesRemaining": 0,
+            "usagePercentage": 0,
+            "isUnlimited": true,
+            "isOverLimit": false,
+            "formattedUsed": "2 KB",
+            "formattedLimit": "Unlimited",
+            "formattedRemaining": "Unlimited",
+            "cycleStart": NSNull(),
+            "cycleEnd": NSNull(),
+            "resetDate": NSNull()
+        ]))
+
+        #expect(app.isProUser == true)
+        #expect(app.currentPlanDisplayName == "Pro")
+        #expect(app.isOpenVPNAvailable == true)
+    }
+
     private func makeClient(
         sessionStore: SessionStoring? = nil,
         deviceKeyStore: VPNDeviceKeyProviding? = nil,
@@ -196,6 +219,21 @@ struct OpenVPNTests {
             data.append(buffer, count: count)
         }
         return data
+    }
+
+    private func makeResponse(_ request: URLRequest, status: Int, json: Any) throws -> (HTTPURLResponse, Data) {
+        guard let url = request.url else {
+            throw APIError(message: "Missing request URL")
+        }
+        guard let response = HTTPURLResponse(
+            url: url,
+            statusCode: status,
+            httpVersion: "HTTP/2",
+            headerFields: nil
+        ) else {
+            throw APIError(message: "Failed to build test response")
+        }
+        return (response, try JSONSerialization.data(withJSONObject: json))
     }
 
     private func openVPNSampleConfig() -> String {

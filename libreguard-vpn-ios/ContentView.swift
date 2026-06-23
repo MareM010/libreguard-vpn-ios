@@ -700,7 +700,7 @@ private struct DashboardView: View {
                         .font(.system(size: 24, weight: .semibold, design: .rounded))
                 }
                 Spacer()
-                Text("\(app.subscription?.plan ?? "—") Plan")
+                Text("\(app.currentPlanDisplayName) Plan")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
@@ -774,18 +774,22 @@ private struct DashboardView: View {
                 CardContainer {
                     VStack(spacing: 14) {
                         HStack {
-                            Text("Bandwidth Usage")
+                            Text("Monthly Data Usage")
                                 .font(.subheadline.weight(.semibold))
                             Spacer()
-                            Text("55.9% of 5GB")
+                            Text(app.usageQuota?.dashboardUsageHeadline ?? "Loading…")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        ProgressBar(progress: 0.559, color: Theme.primary, height: 10)
+                        ProgressBar(
+                            progress: app.usageQuota?.displayProgress ?? 0,
+                            color: app.usageQuota?.usageTint ?? Theme.primary,
+                            height: 10
+                        )
                         HStack {
-                            Label("12.8 Mbps", systemImage: "arrow.down")
+                            Label(app.usageQuota?.usageSummaryText ?? "Loading usage", systemImage: "arrow.up.arrow.down")
                             Spacer()
-                            Label("4.1 Mbps", systemImage: "arrow.up")
+                            Text(app.usageQuota?.usageDetailText ?? "Waiting for backend data")
                         }
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.secondary)
@@ -824,15 +828,18 @@ private struct ServerListView: View {
                         ProtocolButton(
                             title: "OpenVPN",
                             isSelected: app.selectedVPNProtocol == .openVPN,
-                            badge: "PRO"
+                            badge: app.isOpenVPNAvailable ? nil : "PRO"
                         ) {
-                            if app.subscription?.isPro == true {
+                            if app.isOpenVPNAvailable {
                                 app.selectVPNProtocol(.openVPN)
                             } else {
                                 onUpgrade()
                             }
                         }
                     }
+                    Text(app.isOpenVPNAvailable ? "Your current plan includes OpenVPN access." : "Upgrade to Pro to unlock OpenVPN.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 HStack(spacing: 10) {
@@ -894,7 +901,7 @@ private struct ServerListView: View {
                                         latency: app.serverLatencies[server.id],
                                         onSelect: {
                                             if server.requiresProSubscription,
-                                               app.subscription?.isPro != true {
+                                               !app.isProUser {
                                                 onUpgrade()
                                             } else {
                                                 onSelectServer(server)
@@ -1121,10 +1128,7 @@ private struct SettingsView: View {
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 22) {
                     AccountCard(email: app.session?.email)
-
-                    if app.subscription?.isPro != true {
-                        UpgradeCard(action: onUpgrade)
-                    }
+                    UpgradeCard(action: onUpgrade)
 
                     SettingsSection(title: "Security") {
                         NavigationRow(
@@ -1388,6 +1392,7 @@ private struct QRCodeView: View {
 }
 
 private struct UpgradeView: View {
+    @EnvironmentObject private var app: AppModel
     let onBack: () -> Void
 
     var body: some View {
@@ -1402,58 +1407,93 @@ private struct UpgradeView: View {
                 HStack(spacing: 12) {
                     LibreGuardLogo(size: 42)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Upgrade to Pro")
+                        Text(app.shouldShowUpgradePrompt ? "Upgrade to Pro" : "You are on Pro")
                             .font(.system(size: 26, weight: .semibold))
-                        Text("Unlock premium privacy and performance")
+                        Text(app.shouldShowUpgradePrompt
+                             ? "Unlock premium privacy and performance"
+                             : "Premium servers, OpenVPN, and unlimited monthly data are already active.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
                 }
 
-                PlanCard(
-                    title: "Free Plan",
-                    price: "$0",
-                    badge: "Current Plan",
-                    highlighted: false,
-                    features: [
-                        ("Access on 1 device only", true),
-                        ("Free servers", true),
-                        ("5GB data per month", true),
-                        ("Pro servers", false),
-                        ("Unlimited data", false),
-                        ("Custom DNS servers", false)
-                    ]
-                )
+                if app.shouldShowUpgradePrompt {
+                    PlanCard(
+                        title: "Free Plan",
+                        price: "$0",
+                        badge: "Current Plan",
+                        highlighted: false,
+                        features: [
+                            ("Access on 1 device", true),
+                            ("Free servers", true),
+                            ("5GB data per month", true),
+                            ("IKEv2 protocol", true),
+                            ("Premium servers", false),
+                            ("OpenVPN protocol", false)
+                        ]
+                    )
 
-                PlanCard(
-                    title: "Pro Plan",
-                    price: "$4",
-                    badge: "Popular",
-                    highlighted: true,
-                    features: [
-                        ("Access on unlimited devices", true),
-                        ("Pro servers", true),
-                        ("Unlimited data", true),
-                        ("Custom VPN configuration", true),
-                        ("Ad Blocking", true),
-                        ("Split Tunneling", true)
-                    ]
-                )
+                    PlanCard(
+                        title: "Pro Plan",
+                        price: "$4",
+                        badge: "Upgrade",
+                        highlighted: true,
+                        features: [
+                            ("Access on up to 3 devices", true),
+                            ("Premium servers", true),
+                            ("Unlimited data", true),
+                            ("OpenVPN protocol", true),
+                            ("IKEv2 protocol", true),
+                            ("Usage tracked each billing cycle", true)
+                        ]
+                    )
 
-                VStack(spacing: 12) {
-                    PaymentButton(icon: "bitcoinsign.circle", title: "Pay with Monero (XMR)", subtitle: "Recommended for privacy", badge: "Preferred", highlighted: true)
-                    PaymentButton(icon: "creditcard", title: "Pay with Card", subtitle: "Visa, Mastercard, Amex", badge: nil, highlighted: false)
-                }
-
-                CardContainer {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Why we recommend Monero (XMR)", systemImage: "bitcoinsign.circle")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Theme.primary)
-                        Text("Monero provides transaction privacy, aligning with LibreGuard's focus on private access. This copy is placeholder content for the visual build.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    VStack(spacing: 12) {
+                        PaymentButton(icon: "bitcoinsign.circle", title: "Pay with Monero (XMR)", subtitle: "Recommended for privacy", badge: "Preferred", highlighted: true)
+                        PaymentButton(icon: "creditcard", title: "Pay with Card", subtitle: "Visa, Mastercard, Amex", badge: nil, highlighted: false)
                     }
+
+                    CardContainer {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Why we recommend Monero (XMR)", systemImage: "bitcoinsign.circle")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Theme.primary)
+                            Text("Monero provides transaction privacy, aligning with LibreGuard's focus on private access. This copy is placeholder content for the visual build.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } else {
+                    PlanCard(
+                        title: "Pro Plan",
+                        price: "$4",
+                        badge: "Current Plan",
+                        highlighted: true,
+                        features: [
+                            ("Access on up to \(app.maxDeviceCount) devices", true),
+                            ("Premium servers", true),
+                            ("Unlimited data", true),
+                            ("OpenVPN protocol", true),
+                            ("IKEv2 protocol", true),
+                            ("Usage tracked each billing cycle", true)
+                        ]
+                    )
+
+                    CardContainer {
+                        VStack(alignment: .leading, spacing: 12) {
+                            PlanDetailRow(title: "Status", value: app.subscription?.status.capitalized ?? "Active")
+                            PlanDetailRow(title: "Billing cycle", value: app.subscription?.billingCycle.capitalized ?? "Monthly")
+                            PlanDetailRow(title: "Active devices", value: "\(app.subscription?.activeDevices ?? 0) / \(app.maxDeviceCount)")
+                            if let currentPeriodEnd = app.subscription?.currentPeriodEnd {
+                                PlanDetailRow(
+                                    title: "Current period ends",
+                                    value: currentPeriodEnd.formatted(date: .abbreviated, time: .omitted)
+                                )
+                            }
+                        }
+                    }
+
+                    MonthlyUsageCard(quota: app.usageQuota)
                 }
             }
             .padding(24)
@@ -1461,6 +1501,23 @@ private struct UpgradeView: View {
             .frame(maxWidth: .infinity)
         }
         .background(Theme.background.ignoresSafeArea())
+    }
+}
+
+private struct PlanDetailRow: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .font(.subheadline.weight(.semibold))
+                .multilineTextAlignment(.trailing)
+        }
+        .font(.subheadline)
     }
 }
 
@@ -1833,10 +1890,10 @@ private struct MonthlyUsageCard: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                ProgressBar(progress: progress, color: quota?.isOverLimit == true ? Theme.destructive : Theme.primary, height: 8)
+                ProgressBar(progress: progress, color: quota?.usageTint ?? Theme.primary, height: 8)
                 HStack {
                     Text(usageText)
-                        .foregroundStyle(quota?.isOverLimit == true ? Theme.destructive : Theme.primary)
+                        .foregroundStyle(quota?.usageTint ?? Theme.primary)
                     Spacer()
                     Text(remainingText)
                         .foregroundStyle(.secondary)
@@ -1847,27 +1904,56 @@ private struct MonthlyUsageCard: View {
     }
 
     private var progress: Double {
-        guard let quota, !quota.isUnlimited else { return quota == nil ? 0 : 1 }
-        return quota.usagePercentage / 100
+        quota?.displayProgress ?? 0
     }
 
     private var quotaText: String {
         guard let quota else { return "Loading…" }
-        return quota.isUnlimited ? "\(quota.formattedUsed) / Unlimited" : "\(quota.formattedUsed) / \(quota.formattedLimit)"
+        return quota.dashboardUsageHeadline
     }
 
     private var usageText: String {
         guard let quota else { return "—" }
-        if quota.isUnlimited { return "Unlimited plan" }
-        return String(format: "%.1f%% used", quota.usagePercentage)
+        return quota.usageSummaryText
     }
 
     private var remainingText: String {
         guard let quota else { return "—" }
-        if quota.isUnlimited { return "No data limit" }
-        if quota.isOverLimit { return "Limit reached" }
-        if let resetDate = quota.resetDate { return "Resets \(resetDate.formatted(date: .abbreviated, time: .omitted))" }
-        return "\(quota.formattedRemaining) left"
+        return quota.usageDetailText
+    }
+}
+
+private extension UsageQuota {
+    var displayProgress: Double {
+        if isUnlimited {
+            return usagePercentage > 0 ? min(max(usagePercentage / 100, 0.08), 1) : 0.08
+        }
+        return min(max(usagePercentage / 100, 0), 1)
+    }
+
+    var usageTint: Color {
+        isOverLimit ? Theme.destructive : Theme.primary
+    }
+
+    var dashboardUsageHeadline: String {
+        "\(formattedUsed) / \(isUnlimited ? "Unlimited" : formattedLimit)"
+    }
+
+    var usageSummaryText: String {
+        if isUnlimited { return "\(formattedUsed) used this cycle" }
+        return String(format: "%.1f%% used", usagePercentage)
+    }
+
+    var usageDetailText: String {
+        if isUnlimited {
+            if let resetDate {
+                return "Cycle resets \(resetDate.formatted(date: .abbreviated, time: .omitted))"
+            }
+            return "Unlimited monthly data"
+        }
+        if isOverLimit { return "Limit reached" }
+        if let resetDate { return "Resets \(resetDate.formatted(date: .abbreviated, time: .omitted))" }
+        return "\(formattedRemaining) left"
     }
 }
 
@@ -2145,34 +2231,62 @@ private struct NavigationRow: View {
 }
 
 private struct UpgradeCard: View {
+    @EnvironmentObject private var app: AppModel
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .top, spacing: 12) {
-                    IconBox(systemName: "crown.fill", color: .white, background: Theme.primary)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Upgrade to Pro")
-                            .font(.headline)
-                        Text("Unlock unlimited data, faster servers, and premium features")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+        Group {
+            if app.shouldShowUpgradePrompt {
+                Button(action: action) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(alignment: .top, spacing: 12) {
+                            IconBox(systemName: "crown.fill", color: .white, background: Theme.primary)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Upgrade to Pro")
+                                    .font(.headline)
+                                Text("Unlock unlimited monthly data, premium servers, and OpenVPN access")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        HStack(spacing: 12) {
+                            Text("✓ Unlimited bandwidth")
+                            Text("✓ Up to 3 devices")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        PrimaryButton(title: "Upgrade Now", action: action)
+                    }
+                    .padding(18)
+                    .background(Theme.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(Theme.primary, lineWidth: 1.5))
+                }
+                .buttonStyle(.plain)
+            } else {
+                CardContainer {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(alignment: .top, spacing: 12) {
+                            IconBox(systemName: "checkmark.shield.fill", color: .white, background: Theme.statusConnected)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("You are a Pro user")
+                                    .font(.headline)
+                                Text("Premium servers, OpenVPN, and unlimited monthly data are enabled on this account.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        HStack(spacing: 12) {
+                            Text("Used: \(app.usageQuota?.formattedUsed ?? "—")")
+                            Text("Devices: \(app.subscription?.activeDevices ?? 0)/\(app.maxDeviceCount)")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
                 }
-                HStack(spacing: 12) {
-                    Text("✓ Unlimited bandwidth")
-                    Text("✓ Priority servers")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                PrimaryButton(title: "Upgrade Now", action: action)
+                .background(Theme.statusConnected.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(Theme.statusConnected.opacity(0.5), lineWidth: 1.5))
             }
-            .padding(18)
-            .background(Theme.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(Theme.primary, lineWidth: 1.5))
         }
-        .buttonStyle(.plain)
     }
 }
 

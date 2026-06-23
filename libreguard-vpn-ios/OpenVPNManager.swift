@@ -268,6 +268,27 @@ final class OpenVPNManager: VPNManaging {
     }
 }
 
+private extension VPNConnectionState {
+    init(networkExtensionStatus: NEVPNStatus) {
+        switch networkExtensionStatus {
+        case .invalid:
+            self = .invalid
+        case .disconnected:
+            self = .disconnected
+        case .connecting:
+            self = .connecting
+        case .connected:
+            self = .connected
+        case .reasserting:
+            self = .reasserting
+        case .disconnecting:
+            self = .disconnecting
+        @unknown default:
+            self = .invalid
+        }
+    }
+}
+
 enum OpenVPNManagerError: LocalizedError {
     case unsupportedProtocol(String)
 

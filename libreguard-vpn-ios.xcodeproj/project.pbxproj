@@ -11,6 +11,8 @@
 		A10000022FE7000000000004 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000005 /* NetworkExtension.framework */; };
 		A10000022FE7000000000006 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000007 /* Security.framework */; };
 		A20000012FE700000000000B /* OpenVPNPacketTunnel.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A20000032FE700000000000A /* OpenVPNPacketTunnel.appex */; };
+		E686F16A2FE9A7770072FD83 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000005 /* NetworkExtension.framework */; };
+		E686F16B2FE9A7770072FD83 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000007 /* Security.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -37,26 +39,30 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		E67858D72FE6EBD9000CF95E /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				A20000012FE700000000000B /* OpenVPNPacketTunnel.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		A10000032FE7000000000005 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
 		A10000032FE7000000000007 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
-		A20000032FE700000000000A /* OpenVPNPacketTunnel.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = OpenVPNPacketTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000032FE700000000000A /* OpenVPNPacketTunnel.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = OpenVPNPacketTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		E678589C2FE6EBD7000CF95E /* libreguard-vpn-ios.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "libreguard-vpn-ios.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		E67858A92FE6EBD9000CF95E /* libreguard-vpn-iosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "libreguard-vpn-iosTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		E67858B32FE6EBD9000CF95E /* libreguard-vpn-iosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "libreguard-vpn-iosUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		E686EEA72FE8C5970072FD83 /* SharedVPN */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = "SharedVPN";
-			sourceTree = "<group>";
-		};
-		E686EEA82FE8C5970072FD84 /* OpenVPNPacketTunnel */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = "OpenVPNPacketTunnel";
-			sourceTree = "<group>";
-		};
 		E678589E2FE6EBD7000CF95E /* libreguard-vpn-ios */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "libreguard-vpn-ios";
@@ -72,6 +78,16 @@
 			path = "libreguard-vpn-iosUITests";
 			sourceTree = "<group>";
 		};
+		E686EEA72FE8C5970072FD83 /* SharedVPN */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SharedVPN;
+			sourceTree = "<group>";
+		};
+		E686EEA82FE8C5970072FD84 /* OpenVPNPacketTunnel */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = OpenVPNPacketTunnel;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -80,8 +96,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000012FE7000000000001 /* GoogleSignIn in Frameworks */,
-				A10000022FE7000000000004 /* NetworkExtension.framework in Frameworks */,
-				A10000022FE7000000000006 /* Security.framework in Frameworks */,
+				E686F16A2FE9A7770072FD83 /* NetworkExtension.framework in Frameworks */,
+				E686F16B2FE9A7770072FD83 /* Security.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -97,17 +113,6 @@
 			buildActionMask = 2147483647;
 			files = (
 			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		E67858D72FE6EBD9000CF95E /* Embed App Extensions */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 13;
-			files = (
-				A20000012FE700000000000B /* OpenVPNPacketTunnel.appex in Embed App Extensions */,
-			);
-			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		E67858D22FE6EBD9000CF95E /* Frameworks */ = {
@@ -243,8 +248,8 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				E686EEA82FE8C5970072FD84 /* OpenVPNPacketTunnel */,
 				E686EEA72FE8C5970072FD83 /* SharedVPN */,
+				E686EEA82FE8C5970072FD84 /* OpenVPNPacketTunnel */,
 			);
 			name = OpenVPNPacketTunnel;
 			packageProductDependencies = (
@@ -660,11 +665,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
-				CODE_SIGN_ENTITLEMENTS = "OpenVPNPacketTunnel/OpenVPNPacketTunnel.entitlements";
+				CODE_SIGN_ENTITLEMENTS = OpenVPNPacketTunnel/OpenVPNPacketTunnel.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = "OpenVPNPacketTunnel/Info.plist";
+				INFOPLIST_FILE = OpenVPNPacketTunnel-Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "net.libreguard.libreguard-vpn-ios.openvpn-tunnel";
@@ -682,11 +687,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
-				CODE_SIGN_ENTITLEMENTS = "OpenVPNPacketTunnel/OpenVPNPacketTunnel.entitlements";
+				CODE_SIGN_ENTITLEMENTS = OpenVPNPacketTunnel/OpenVPNPacketTunnel.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = "OpenVPNPacketTunnel/Info.plist";
+				INFOPLIST_FILE = OpenVPNPacketTunnel-Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "net.libreguard.libreguard-vpn-ios.openvpn-tunnel";

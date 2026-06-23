@@ -209,6 +209,24 @@ struct libreguard_vpn_iosTests {
         #expect(server.flagEmoji == "🇩🇪")
     }
 
+    @Test func subscriptionDisplayNameNormalizesPremiumTier() throws {
+        let subscription = try JSONDecoder().decode(SubscriptionStatus.self, from: JSONSerialization.data(withJSONObject: [
+            "plan": "Premium",
+            "isPro": true,
+            "status": "Active",
+            "paymentType": NSNull(),
+            "currentPeriodEnd": NSNull(),
+            "cancelAtPeriodEnd": false,
+            "billingCycle": "Monthly",
+            "activeDevices": 2,
+            "maxDevices": 3,
+            "canAddDevice": true
+        ]))
+
+        #expect(subscription.planTier == .pro)
+        #expect(subscription.displayName == "Pro")
+    }
+
     func makeClient(
         sessionStore: SessionStoring? = nil,
         deviceKeyStore: VPNDeviceKeyProviding? = nil,

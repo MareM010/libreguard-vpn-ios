@@ -57,6 +57,33 @@ struct AuthSession: Codable, Equatable {
     let deviceId: String
 }
 
+enum AccountPlanTier: String {
+    case free = "Free"
+    case pro = "Pro"
+
+    init?(planName: String?) {
+        guard let normalized = planName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+            !normalized.isEmpty else {
+            return nil
+        }
+
+        switch normalized {
+        case "free":
+            self = .free
+        case "pro", "premium":
+            self = .pro
+        default:
+            return nil
+        }
+    }
+
+    var isPro: Bool {
+        self == .pro
+    }
+}
+
 struct LoginRequest: Encodable {
     let email: String
     let password: String
@@ -99,6 +126,10 @@ struct LoginResponse: Decodable {
     let provider: String?
     let message: String?
     let warningRecoveryCodes: Bool?
+
+    var planTier: AccountPlanTier? {
+        AccountPlanTier(planName: planType)
+    }
 }
 
 struct TwoFactorLoginRequest: Encodable {
@@ -326,6 +357,14 @@ enum CountryFlagResolver {
         "VIETNAM": "VN"
     ]
 
+    private static let normalizedAliases: [String: String] = {
+        var resolved: [String: String] = [:]
+        for (key, value) in aliases {
+            resolved[normalize(key)] = value
+        }
+        return resolved
+    }()
+
     private static let regionNameIndex: [String: String] = {
         let locale = Locale(identifier: "en_US_POSIX")
         var index: [String: String] = [:]
@@ -341,7 +380,7 @@ enum CountryFlagResolver {
         let normalized = normalize(regionNameOrCode)
         guard !normalized.isEmpty else { return fallbackFlag }
 
-        if let regionCode = aliases[normalized] ?? regionNameIndex[normalized] {
+        if let regionCode = normalizedAliases[normalized] ?? regionNameIndex[normalized] {
             return flagEmojiForRegionCode(regionCode)
         }
 
@@ -589,6 +628,21 @@ struct SubscriptionStatus: Decodable, Equatable {
     let activeDevices: Int
     let maxDevices: Int
     let canAddDevice: Bool
+
+    var planTier: AccountPlanTier {
+        if isPro { return .pro }
+        return AccountPlanTier(planName: plan) ?? .free
+    }
+
+    var displayName: String {
+        planTier.rawValue
+    }
+}
+
+extension UsageQuota {
+    var planTierHint: AccountPlanTier {
+        isUnlimited ? .pro : .free
+    }
 }
 
 struct TwoFactorStatus: Decodable, Equatable {

@@ -30,6 +30,10 @@ final class AppModel: ObservableObject {
     private let defaults: UserDefaults
     private let protocolSelectionStore: VPNProtocolSelectionStoring
     private let pendingRegistrationKey = "pending.registration"
+    private let cachedPlanNameKey = "cached.plan.name"
+    private let cachedPlanIsProKey = "cached.plan.isPro"
+    private var cachedPlanName: String?
+    private var cachedPlanIsPro = false
     private var serverRefreshTask: Task<Void, Never>?
     private var retryCountdownTask: Task<Void, Never>?
 
@@ -49,6 +53,10 @@ final class AppModel: ObservableObject {
         self.selectedVPNProtocol = self.protocolSelectionStore.selectedProtocol
         self.vpn = vpnManager ?? VPNManagerCoordinator(api: resolvedAPI)
         self.defaults = defaults
+        self.cachedPlanName = defaults.string(forKey: cachedPlanNameKey)
+        self.cachedPlanIsPro = defaults.object(forKey: cachedPlanIsProKey) != nil
+            ? defaults.bool(forKey: cachedPlanIsProKey)
+            : false
         self.vpnStatus = self.vpn.status
         self.vpn.onStatusChange = { [weak self] status in
             self?.vpnStatus = status
@@ -65,6 +73,7 @@ final class AppModel: ObservableObject {
         guard case .launching = route else { return }
         if ProcessInfo.processInfo.arguments.contains("--uitesting-reset") {
             api.clearLocalSession()
+            clearCachedPlan()
             clearPendingRegistration()
             route = .login
             return
@@ -79,6 +88,7 @@ final class AppModel: ObservableObject {
             } catch let error as APIError where error.code == "APP_VERSION_BLOCKED" || error.code == "APP_VERSION_REQUIRED" {
                 presentedError = error
             } catch {
+                clearCachedPlan()
                 // A stale session falls through to registration or login.
             }
         }
@@ -234,6 +244,7 @@ final class AppModel: ObservableObject {
             let values = try await (usage, subscription, twoFactor)
             usageQuota = values.0
             self.subscription = values.1
+            cachePlan(name: values.1.displayName, isPro: values.1.isPro)
             twoFactorStatus = values.2
         } catch {
             if showErrors { present(error) }
@@ -355,6 +366,33 @@ final class AppModel: ObservableObject {
 
     func handleOpenURL(_ url: URL) { _ = google.handle(url: url) }
 
+    var isProUser: Bool {
+        if let subscription { return subscription.isPro }
+        if let usageQuota { return usageQuota.planTierHint.isPro }
+        return cachedPlanIsPro
+    }
+
+    var currentPlanDisplayName: String {
+        if let subscription { return subscription.displayName }
+        if let usageQuota { return usageQuota.planTierHint.rawValue }
+        if let cachedPlan = AccountPlanTier(planName: cachedPlanName) {
+            return cachedPlan.rawValue
+        }
+        return AccountPlanTier.free.rawValue
+    }
+
+    var shouldShowUpgradePrompt: Bool {
+        !isProUser
+    }
+
+    var maxDeviceCount: Int {
+        subscription?.maxDevices ?? (isProUser ? 3 : 1)
+    }
+
+    var isOpenVPNAvailable: Bool {
+        canSelect(protocolName: .openVPN)
+    }
+
     private func handleLogin(_ response: LoginResponse, attempt: LoginAttempt, afterTwoFactor: Bool) async throws {
         if response.requiresTwoFactor == true {
             guard let pendingToken = response.pendingLoginToken,
@@ -365,6 +403,9 @@ final class AppModel: ObservableObject {
             return
         }
         session = try api.adoptSession(from: response)
+        if let planTier = response.planTier {
+            cachePlan(name: planTier.rawValue, isPro: planTier.isPro)
+        }
         clearPendingRegistration()
         deviceLimitContext = nil
         route = .authenticated
@@ -410,6 +451,7 @@ final class AppModel: ObservableObject {
         retryCountdownTask?.cancel()
         serverRefreshTask = nil
         retryCountdownTask = nil
+        clearCachedPlan()
         api.clearLocalSession()
         session = nil
         usageQuota = nil
@@ -449,21 +491,35 @@ final class AppModel: ObservableObject {
 
     private func canUse(server: VPNServer) -> Bool {
         if server.requiresProSubscription {
-            return subscription?.isPro == true
+            return isProUser
         }
         return true
     }
 
     private func canSelect(protocolName: VPNConfigurationProtocol) -> Bool {
         guard protocolName.requiresProSubscription else { return true }
-        return subscription?.isPro == true
+        return isProUser
     }
 
     private func effectiveConnectionProtocol() -> VPNConfigurationProtocol {
-        if selectedVPNProtocol.requiresProSubscription, subscription?.isPro != true {
+        if selectedVPNProtocol.requiresProSubscription, !isProUser {
             return .ikev2
         }
         return selectedVPNProtocol
+    }
+
+    private func cachePlan(name: String, isPro: Bool) {
+        cachedPlanName = name
+        cachedPlanIsPro = isPro
+        defaults.set(name, forKey: cachedPlanNameKey)
+        defaults.set(isPro, forKey: cachedPlanIsProKey)
+    }
+
+    private func clearCachedPlan() {
+        cachedPlanName = nil
+        cachedPlanIsPro = false
+        defaults.removeObject(forKey: cachedPlanNameKey)
+        defaults.removeObject(forKey: cachedPlanIsProKey)
     }
 
     private func beginRetryCountdown(_ seconds: Int) {
