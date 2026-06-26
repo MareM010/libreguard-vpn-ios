@@ -21,6 +21,7 @@ final class AppModel: ObservableObject {
     @Published var selectedServerID: Int?
     @Published var selectedVPNProtocol: VPNConfigurationProtocol
     @Published var vpnStatus: VPNConnectionState = .disconnected
+    @Published private(set) var hasQueuedVPNReconnect = false
     @Published var retryAfterSeconds = 0
 
     private let api: BackendServicing
@@ -36,6 +37,14 @@ final class AppModel: ObservableObject {
     private var cachedPlanIsPro = false
     private var serverRefreshTask: Task<Void, Never>?
     private var retryCountdownTask: Task<Void, Never>?
+    private var vpnTransitionTask: Task<Void, Never>?
+    private var vpnTransitionGeneration: UInt = 0
+    private var activeVPNTransition: VPNTransitionRequest?
+    private var queuedVPNConnectRequest: VPNConnectRequest? {
+        didSet {
+            hasQueuedVPNReconnect = queuedVPNConnectRequest != nil
+        }
+    }
 
     init(
         api: BackendServicing? = nil,
@@ -59,7 +68,7 @@ final class AppModel: ObservableObject {
             : false
         self.vpnStatus = self.vpn.status
         self.vpn.onStatusChange = { [weak self] status in
-            self?.vpnStatus = status
+            self?.handleVPNStatusChange(status)
         }
         self.vpn.onDisconnectError = { [weak self] error in
             self?.present(error)
@@ -317,6 +326,7 @@ final class AppModel: ObservableObject {
     }
 
     func signOut() async {
+        cancelActiveVPNTransition()
         await vpn.disconnectAndForget()
         await api.logout()
         google.signOut()
@@ -342,7 +352,7 @@ final class AppModel: ObservableObject {
         protocolSelectionStore.selectedProtocol = protocolName
     }
 
-    func connectSelectedServer() async {
+    func requestConnectionToSelectedServer() {
         guard let server = selectedServer ?? bestAccessibleServer(in: servers) else {
             presentedError = APIError(message: "No VPN server is available right now.")
             return
@@ -351,17 +361,52 @@ final class AppModel: ObservableObject {
             presentedError = APIError(message: "This server requires a Pro plan.")
             return
         }
-        let protocolToUse = effectiveConnectionProtocol()
-        do {
-            try await vpn.connect(to: server, protocol: protocolToUse)
-            selectedServerID = server.id
-        } catch {
-            present(error)
+        requestConnection(
+            VPNConnectRequest(
+                server: server,
+                protocolName: effectiveConnectionProtocol()
+            )
+        )
+    }
+
+    func requestVPNDisconnect() {
+        queuedVPNConnectRequest = nil
+
+        switch vpnStatus {
+        case .invalid, .disconnected:
+            cancelActiveVPNTransition()
+        case .disconnecting:
+            break
+        case .connecting, .connected, .reasserting:
+            beginDisconnect(preservingQueuedConnection: false)
         }
     }
 
+    func performVPNPrimaryAction() {
+        switch vpnStatus {
+        case .invalid, .disconnected:
+            requestConnectionToSelectedServer()
+        case .connecting, .connected, .reasserting:
+            requestVPNDisconnect()
+        case .disconnecting:
+            if hasQueuedVPNReconnect {
+                requestVPNDisconnect()
+            } else {
+                requestConnectionToSelectedServer()
+            }
+        }
+    }
+
+    func connectSelectedServer() async {
+        requestConnectionToSelectedServer()
+        let task = vpnTransitionTask
+        await task?.value
+    }
+
     func disconnectVPN() async {
-        await vpn.disconnect()
+        requestVPNDisconnect()
+        let task = vpnTransitionTask
+        await task?.value
     }
 
     func handleOpenURL(_ url: URL) { _ = google.handle(url: url) }
@@ -442,6 +487,7 @@ final class AppModel: ObservableObject {
     }
 
     private func forceSignOut() {
+        cancelActiveVPNTransition()
         Task { await vpn.disconnectAndForget() }
         clearSessionState()
     }
@@ -449,6 +495,7 @@ final class AppModel: ObservableObject {
     private func clearSessionState() {
         serverRefreshTask?.cancel()
         retryCountdownTask?.cancel()
+        cancelActiveVPNTransition()
         serverRefreshTask = nil
         retryCountdownTask = nil
         clearCachedPlan()
@@ -506,6 +553,109 @@ final class AppModel: ObservableObject {
             return .ikev2
         }
         return selectedVPNProtocol
+    }
+
+    private func requestConnection(_ request: VPNConnectRequest) {
+        selectedServerID = request.server.id
+
+        switch vpnStatus {
+        case .invalid, .disconnected:
+            if case .connect = activeVPNTransition {
+                queuedVPNConnectRequest = request
+                beginDisconnect(preservingQueuedConnection: true)
+            } else {
+                queuedVPNConnectRequest = nil
+                beginConnect(request)
+            }
+        case .connecting, .connected, .reasserting:
+            queuedVPNConnectRequest = request
+            beginDisconnect(preservingQueuedConnection: true)
+        case .disconnecting:
+            queuedVPNConnectRequest = request
+        }
+    }
+
+    private func beginConnect(_ request: VPNConnectRequest) {
+        vpnTransitionTask?.cancel()
+        vpnTransitionGeneration &+= 1
+        let generation = vpnTransitionGeneration
+        activeVPNTransition = .connect(request)
+        vpnStatus = .connecting
+
+        vpnTransitionTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await vpn.connect(to: request.server, protocol: request.protocolName)
+                guard generation == vpnTransitionGeneration, !Task.isCancelled else { return }
+                activeVPNTransition = nil
+                handleVPNStatusChange(vpn.status)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard generation == vpnTransitionGeneration, !Task.isCancelled else { return }
+                activeVPNTransition = nil
+                handleVPNStatusChange(vpn.status)
+                present(error)
+            }
+        }
+    }
+
+    private func beginDisconnect(preservingQueuedConnection: Bool) {
+        if !preservingQueuedConnection {
+            queuedVPNConnectRequest = nil
+        }
+
+        vpnTransitionTask?.cancel()
+        vpnTransitionGeneration &+= 1
+        let generation = vpnTransitionGeneration
+        activeVPNTransition = .disconnect
+        vpnStatus = .disconnecting
+
+        vpnTransitionTask = Task { [weak self] in
+            guard let self else { return }
+            await vpn.disconnect()
+            guard generation == vpnTransitionGeneration, !Task.isCancelled else { return }
+            activeVPNTransition = nil
+            handleVPNStatusChange(vpn.status)
+        }
+    }
+
+    private func handleVPNStatusChange(_ status: VPNConnectionState) {
+        if case .connect = activeVPNTransition,
+           status == .disconnected || status == .invalid {
+            vpnStatus = .connecting
+            return
+        }
+
+        if activeVPNTransition == .disconnect,
+           status != .disconnected,
+           status != .invalid,
+           status != .disconnecting {
+            vpnStatus = .disconnecting
+            return
+        }
+
+        vpnStatus = status
+
+        switch status {
+        case .invalid, .disconnected:
+            activeVPNTransition = nil
+            guard let queuedRequest = queuedVPNConnectRequest else { return }
+            queuedVPNConnectRequest = nil
+            beginConnect(queuedRequest)
+        case .connected:
+            activeVPNTransition = nil
+        case .connecting, .reasserting, .disconnecting:
+            break
+        }
+    }
+
+    private func cancelActiveVPNTransition() {
+        vpnTransitionGeneration &+= 1
+        vpnTransitionTask?.cancel()
+        vpnTransitionTask = nil
+        activeVPNTransition = nil
+        queuedVPNConnectRequest = nil
     }
 
     private func cachePlan(name: String, isPro: Bool) {

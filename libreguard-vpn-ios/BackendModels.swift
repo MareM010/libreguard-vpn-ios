@@ -437,6 +437,16 @@ enum VPNConfigurationProtocol: String, Codable, CaseIterable {
     }
 }
 
+struct VPNConnectRequest: Equatable {
+    let server: VPNServer
+    let protocolName: VPNConfigurationProtocol
+}
+
+enum VPNTransitionRequest: Equatable {
+    case connect(VPNConnectRequest)
+    case disconnect
+}
+
 struct VPNConfigRequest: Encodable {
     let serverId: Int
     let protocolName: VPNConfigurationProtocol
@@ -583,10 +593,10 @@ enum VPNConnectionState: Equatable {
         switch self {
         case .invalid: return "The VPN configuration is not ready yet."
         case .disconnected: return "Your connection is not secure"
-        case .connecting: return "Establishing secure connection..."
-        case .connected: return "Your connection is secure"
-        case .reasserting: return "Re-establishing the tunnel after a network change..."
-        case .disconnecting: return "Closing the secure tunnel..."
+        case .connecting: return "Establishing secure tunnel..."
+        case .connected: return "Secure tunnel active"
+        case .reasserting: return "Re-establishing secure tunnel..."
+        case .disconnecting: return "Closing secure tunnel..."
         }
     }
 

@@ -82,15 +82,18 @@ final class OpenVPNManager: VPNManaging {
         do {
             logger.debug("Fetching OpenVPN configuration from backend")
             let response = try await api.fetchVPNConfig(serverId: server.id, protocol: .openVPN)
+            try Task.checkCancellation()
             logger.debug("Backend OpenVPN configuration received for server \(server.id, privacy: .public)")
             let profile = try OpenVPNProfileConfiguration.parse(response.configContent)
             try profile.validateMobileCompatibility()
+            try Task.checkCancellation()
 
             if let expirationDate = response.expirationDate, expirationDate <= Date() {
                 throw OpenVPNProfileError.expiredCertificate
             }
 
             let passphrase = try deviceKeyStore.decryptPassphrase(from: response.encryptedPassphrase)
+            try Task.checkCancellation()
             let serverAddress = Self.resolveServerAddress(from: profile, response: response, server: server)
             let envelope = OpenVPNProfileEnvelope(
                 serverId: server.id,
@@ -104,8 +107,10 @@ final class OpenVPNManager: VPNManaging {
             )
 
             let persistentReference = try profileStore.save(envelope)
+            try Task.checkCancellation()
 
             try await loadPreferences()
+            try Task.checkCancellation()
             let tunnelProtocol = NETunnelProviderProtocol()
             tunnelProtocol.providerBundleIdentifier = providerBundleIdentifier
             tunnelProtocol.serverAddress = serverAddress
@@ -125,12 +130,21 @@ final class OpenVPNManager: VPNManaging {
 
             logger.debug("Saving OpenVPN preferences")
             try await savePreferences()
+            try Task.checkCancellation()
             logger.debug("Reloading OpenVPN preferences before tunnel start")
             try await loadPreferences()
+            try Task.checkCancellation()
             logger.debug("Starting OpenVPN tunnel")
             try manager.connection.startVPNTunnel()
+            try Task.checkCancellation()
             logger.info("OpenVPN startVPNTunnel() returned without throwing")
             updateStatus(from: manager.connection.status)
+        } catch is CancellationError {
+            logger.info("OpenVPN connect request cancelled")
+            status = .disconnecting
+            manager.connection.stopVPNTunnel()
+            await refreshStatus()
+            throw CancellationError()
         } catch {
             logger.error("OpenVPN connect failed: \(Self.describe(error))")
             status = .disconnected

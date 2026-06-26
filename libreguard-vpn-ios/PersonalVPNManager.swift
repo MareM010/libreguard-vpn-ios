@@ -84,8 +84,10 @@ final class PersonalVPNManager: VPNManaging {
         do {
             logger.debug("Fetching VPN configuration from backend")
             let response = try await api.fetchVPNConfig(serverId: server.id, protocol: protocolName)
+            try Task.checkCancellation()
             logger.debug("Backend VPN configuration received for server \(server.id, privacy: .public)")
             let vpnProtocol = try translator.makeProtocol(server: server, response: response)
+            try Task.checkCancellation()
             let serverAddress = String(describing: vpnProtocol.serverAddress)
             let remoteIdentifier = String(describing: vpnProtocol.remoteIdentifier)
             let localIdentifier = String(describing: vpnProtocol.localIdentifier)
@@ -93,6 +95,7 @@ final class PersonalVPNManager: VPNManaging {
             logger.debug("Translated VPN config \(configSummary, privacy: .public)")
 
             try await loadPreferences()
+            try Task.checkCancellation()
             logger.debug("Loaded existing VPN preferences")
             manager.localizedDescription = "LibreGuard"
             manager.protocolConfiguration = vpnProtocol
@@ -101,12 +104,21 @@ final class PersonalVPNManager: VPNManaging {
             manager.onDemandRules = nil
             logger.debug("Saving VPN preferences")
             try await savePreferences()
+            try Task.checkCancellation()
             logger.debug("Reloading VPN preferences before tunnel start")
             try await loadPreferences()
+            try Task.checkCancellation()
             logger.debug("Starting VPN tunnel")
             try manager.connection.startVPNTunnel()
+            try Task.checkCancellation()
             logger.info("startVPNTunnel() returned without throwing")
             updateStatus(from: manager.connection.status)
+        } catch is CancellationError {
+            logger.info("VPN connect request cancelled")
+            status = .disconnecting
+            manager.connection.stopVPNTunnel()
+            await refreshStatus()
+            throw CancellationError()
         } catch {
             logger.error("VPN connect failed: \(Self.describe(error))")
             status = .disconnected

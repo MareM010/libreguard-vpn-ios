@@ -127,7 +127,7 @@ private enum OverlayScreen: Identifiable {
     }
 }
 
-private enum Theme {
+enum Theme {
     static let primary = Color(red: 0.082, green: 0.439, blue: 0.937)
     static let statusConnected = Color(red: 0.063, green: 0.725, blue: 0.506)
     static let statusConnecting = Color(red: 0.961, green: 0.620, blue: 0.043)
@@ -141,7 +141,7 @@ private enum Theme {
     static let border = primary.opacity(0.16)
 }
 
-private extension VPNConnectionState {
+extension VPNConnectionState {
     var color: Color {
         switch self {
         case .invalid, .disconnected:
@@ -626,7 +626,6 @@ private struct ForgotPasswordView: View {
 private struct DashboardView: View {
     @EnvironmentObject private var app: AppModel
     @State private var showNetworkWarning = true
-    @State private var pulse = false
     let onUpgrade: () -> Void
 
     var body: some View {
@@ -654,7 +653,7 @@ private struct DashboardView: View {
                             )
                         } else {
                             QuickConnectCard {
-                                Task { await app.connectSelectedServer() }
+                                app.requestConnectionToSelectedServer()
                             }
                         }
                     }
@@ -711,53 +710,12 @@ private struct DashboardView: View {
     }
 
     private var statusControl: some View {
-        VStack(spacing: 24) {
-            ZStack {
-                Circle()
-                    .fill(status.color.opacity(0.12))
-                    .frame(width: 168, height: 168)
-                    .overlay(Circle().stroke(status.color.opacity(0.25), lineWidth: 1))
-                    .shadow(color: status.color.opacity(0.18), radius: 28)
-                    .scaleEffect(status.isConnected && pulse ? 1.03 : 1)
-
-                Circle()
-                    .fill(status.color.opacity(0.18))
-                    .frame(width: 132, height: 132)
-
-                Image(systemName: "shield")
-                    .font(.system(size: 64, weight: .light))
-                    .foregroundStyle(status.color)
-
-                if status == .connecting || status == .reasserting {
-                    Circle()
-                        .stroke(status.color, lineWidth: 2)
-                        .frame(width: 168, height: 168)
-                        .scaleEffect(pulse ? 1.20 : 1)
-                        .opacity(pulse ? 0 : 0.8)
-                }
-            }
-            .onAppear { pulse = true }
-            .animation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true), value: pulse)
-
-            VStack(spacing: 8) {
-                Text(status.title)
-                    .font(.system(size: 32, weight: .semibold))
-                    .foregroundStyle(status.color)
-                Text(status.description)
-                    .foregroundStyle(.secondary)
-            }
-            .multilineTextAlignment(.center)
-
-            PrimaryButton(title: status.buttonTitle, maxWidth: 220) {
-                if status == .disconnected || status == .invalid {
-                    Task { await app.connectSelectedServer() }
-                } else if status.isConnected || status == .reasserting {
-                    Task { await app.disconnectVPN() }
-                }
-            }
-            .disabled(status.isBusy)
-            .opacity(status.isBusy ? 0.65 : 1)
-        }
+        ConnectionHeroView(
+            status: status,
+            hasQueuedReconnect: app.hasQueuedVPNReconnect,
+            action: app.performVPNPrimaryAction
+        )
+        .animation(.easeInOut(duration: 0.25), value: app.hasQueuedVPNReconnect)
         .padding(.top, 8)
     }
 
