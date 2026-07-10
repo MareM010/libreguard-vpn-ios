@@ -1,33 +1,40 @@
+import Darwin
 import Foundation
 import SwiftData
 
 @Model
 final class LocalConnectionRecord {
     @Attribute(.unique) var id: UUID
+    var userId: String?
     var connectedAt: Date
     var disconnectedAt: Date
     var serverId: Int?
     var serverName: String
     var country: String
+    var protocolName: String?
     var downloadedBytes: Int64
     var uploadedBytes: Int64
 
     init(
         id: UUID = UUID(),
+        userId: String? = nil,
         connectedAt: Date,
         disconnectedAt: Date,
         serverId: Int? = nil,
         serverName: String,
         country: String,
+        protocolName: String? = nil,
         downloadedBytes: Int64,
         uploadedBytes: Int64
     ) {
         self.id = id
+        self.userId = userId
         self.connectedAt = connectedAt
         self.disconnectedAt = disconnectedAt
         self.serverId = serverId
         self.serverName = serverName
         self.country = country
+        self.protocolName = protocolName
         self.downloadedBytes = downloadedBytes
         self.uploadedBytes = uploadedBytes
     }
@@ -38,13 +45,15 @@ final class LocalConnectionRecord {
 @MainActor
 protocol LocalStatisticsRecording {
     func record(
+        userId: String,
         connectedAt: Date,
         disconnectedAt: Date,
         server: VPNServer,
+        protocolName: VPNConfigurationProtocol,
         downloadedBytes: Int64,
         uploadedBytes: Int64
     ) throws
-    func clear() throws
+    func clear(userId: String) throws
 }
 
 @MainActor
@@ -56,26 +65,35 @@ final class SwiftDataStatisticsRecorder: LocalStatisticsRecording {
     }
 
     func record(
+        userId: String,
         connectedAt: Date,
         disconnectedAt: Date,
         server: VPNServer,
+        protocolName: VPNConfigurationProtocol,
         downloadedBytes: Int64,
         uploadedBytes: Int64
     ) throws {
         context.insert(LocalConnectionRecord(
+            userId: userId,
             connectedAt: connectedAt,
             disconnectedAt: disconnectedAt,
             serverId: server.id,
             serverName: server.serverName,
             country: server.country,
+            protocolName: protocolName.rawValue,
             downloadedBytes: downloadedBytes,
             uploadedBytes: uploadedBytes
         ))
         try context.save()
     }
 
-    func clear() throws {
-        try context.delete(model: LocalConnectionRecord.self)
+    func clear(userId: String) throws {
+        let descriptor = FetchDescriptor<LocalConnectionRecord>(
+            predicate: #Predicate { $0.userId == userId }
+        )
+        for record in try context.fetch(descriptor) {
+            context.delete(record)
+        }
         try context.save()
     }
 }
@@ -101,5 +119,53 @@ extension ByteCountFormatter {
         formatter.countStyle = .binary
         formatter.includesUnit = true
         return formatter.string(fromByteCount: bytes)
+    }
+}
+
+struct TunnelTrafficSnapshot: Equatable {
+    let downloadedBytes: Int64
+    let uploadedBytes: Int64
+
+    func delta(from baseline: TunnelTrafficSnapshot) -> TunnelTrafficSnapshot {
+        TunnelTrafficSnapshot(
+            downloadedBytes: max(0, downloadedBytes - baseline.downloadedBytes),
+            uploadedBytes: max(0, uploadedBytes - baseline.uploadedBytes)
+        )
+    }
+}
+
+protocol TunnelTrafficSampling {
+    func currentSnapshot() -> TunnelTrafficSnapshot?
+}
+
+struct SystemTunnelTrafficSampler: TunnelTrafficSampling {
+    func currentSnapshot() -> TunnelTrafficSnapshot? {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0, let first = interfaces else {
+            return nil
+        }
+        defer { freeifaddrs(interfaces) }
+
+        var downloadedBytes: Int64 = 0
+        var uploadedBytes: Int64 = 0
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+
+        while let interface = cursor?.pointee {
+            defer { cursor = interface.ifa_next }
+
+            let name = String(cString: interface.ifa_name)
+            guard name.hasPrefix("utun"),
+                  let data = interface.ifa_data?.assumingMemoryBound(to: if_data.self) else {
+                continue
+            }
+
+            downloadedBytes += Int64(data.pointee.ifi_ibytes)
+            uploadedBytes += Int64(data.pointee.ifi_obytes)
+        }
+
+        return TunnelTrafficSnapshot(
+            downloadedBytes: downloadedBytes,
+            uploadedBytes: uploadedBytes
+        )
     }
 }

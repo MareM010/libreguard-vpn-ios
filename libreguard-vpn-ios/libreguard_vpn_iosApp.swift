@@ -10,13 +10,24 @@ import SwiftData
 
 @main
 struct libreguard_vpn_iosApp: App {
-    @StateObject private var appModel = AppModel()
+    private let modelContainer: ModelContainer
+    @StateObject private var appModel: AppModel
+
+    init() {
+        let container = try! ModelContainer(for: LocalConnectionRecord.self)
+        self.modelContainer = container
+        _appModel = StateObject(
+            wrappedValue: AppModel(
+                statisticsRecorder: SwiftDataStatisticsRecorder(context: container.mainContext)
+            )
+        )
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(appModel)
         }
-        .modelContainer(for: LocalConnectionRecord.self)
+        .modelContainer(modelContainer)
     }
 }

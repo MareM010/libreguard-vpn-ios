@@ -179,7 +179,7 @@ private struct MainAppView: View {
                             }
                         )
                     case .statistics:
-                        StatisticsView()
+                        StatisticsView(userId: app.session?.userId)
                     case .settings:
                         SettingsView(
                             isDarkMode: $isDarkMode,
@@ -911,10 +911,29 @@ private struct ServerListView: View {
 }
 
 private struct StatisticsView: View {
+    @EnvironmentObject private var app: AppModel
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \LocalConnectionRecord.connectedAt, order: .reverse) private var records: [LocalConnectionRecord]
+    @Query private var records: [LocalConnectionRecord]
+    private let userId: String?
     @State private var timeRange = "This Week"
     @State private var confirmClear = false
+
+    init(userId: String?) {
+        self.userId = userId
+        if let userId {
+            _records = Query(
+                filter: #Predicate<LocalConnectionRecord> { $0.userId == userId },
+                sort: \LocalConnectionRecord.connectedAt,
+                order: .reverse
+            )
+        } else {
+            _records = Query(
+                filter: #Predicate<LocalConnectionRecord> { $0.userId == "__no-user__" },
+                sort: \LocalConnectionRecord.connectedAt,
+                order: .reverse
+            )
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -934,9 +953,9 @@ private struct StatisticsView: View {
 
                     if summary.filtered.isEmpty {
                         ContentUnavailableView {
-                            Label("No Local Statistics Yet", systemImage: "chart.bar.xaxis")
+                            Label("No Statistics Yet", systemImage: "chart.bar.xaxis")
                         } description: {
-                            Text("LibreGuard will record sessions here when the VPN tunnel begins supplying real connection and byte metrics.")
+                            Text("LibreGuard records your VPN sessions on this device for the currently signed-in account.")
                         }
                         .padding(.vertical, 44)
                     } else {
@@ -999,7 +1018,7 @@ private struct StatisticsView: View {
                         }
 
                         Button(role: .destructive) { confirmClear = true } label: {
-                            Label("Clear Local Statistics", systemImage: "trash")
+                            Label("Clear My Statistics", systemImage: "trash")
                                 .frame(maxWidth: .infinity)
                                 .padding(14)
                                 .background(Theme.destructive.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
@@ -1007,7 +1026,7 @@ private struct StatisticsView: View {
                     }
 
                     CardContainer {
-                        Label("Statistics are stored only on this device and are never shared.", systemImage: "lock.shield")
+                        Label("Statistics stay on this device and are separated per signed-in account.", systemImage: "lock.shield")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1020,10 +1039,12 @@ private struct StatisticsView: View {
         .background(Theme.background)
         .confirmationDialog("Clear all local statistics?", isPresented: $confirmClear, titleVisibility: .visible) {
             Button("Clear Statistics", role: .destructive) {
-                try? SwiftDataStatisticsRecorder(context: modelContext).clear()
+                if let userId = app.session?.userId {
+                    try? SwiftDataStatisticsRecorder(context: modelContext).clear(userId: userId)
+                }
             }
         } message: {
-            Text("This cannot be undone. No data will be removed from the LibreGuard account because these statistics never leave this device.")
+            Text("This cannot be undone. Only statistics for the current account will be removed from this device.")
         }
     }
 
@@ -1059,6 +1080,7 @@ private struct StatisticsView: View {
 
 private struct SettingsView: View {
     @EnvironmentObject private var app: AppModel
+    @Environment(\.openURL) private var openURL
     @Binding var isDarkMode: Bool
     @State private var autoConnect = true
     @State private var killSwitch = false
@@ -1117,9 +1139,18 @@ private struct SettingsView: View {
                     }
 
                     SettingsSection(title: "Support") {
-                        NavigationRow(icon: "questionmark.circle", title: "Help & Support") { onNavigate(.help) }
-                        NavigationRow(icon: "doc.text", title: "Privacy Policy") { onNavigate(.privacy) }
-                        NavigationRow(icon: "doc.text", title: "Terms of Service") { onNavigate(.terms) }
+                        NavigationRow(icon: "questionmark.circle", title: "Help & Support") {
+                            _ = openURL(URL(string: "https://libreguard.net/Support")!)
+                        }
+                        NavigationRow(icon: "doc.text", title: "Privacy Policy") {
+                            _ = openURL(URL(string: "https://libreguard.net/Privacy")!)
+                        }
+                        NavigationRow(icon: "doc.text", title: "Terms of Service") {
+                            _ = openURL(URL(string: "https://libreguard.net/Terms")!)
+                        }
+                        NavigationRow(icon: "chevron.left.forwardslash.chevron.right", title: "Open Source Licenses") {
+                            _ = openURL(URL(string: "https://github.com/LibreGuard-Developer/libreguard-vpn-ios")!)
+                        }
                     }
 
                     Button(action: onSignOut) {

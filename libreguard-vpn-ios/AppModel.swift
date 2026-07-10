@@ -30,6 +30,8 @@ final class AppModel: ObservableObject {
     private let vpn: VPNManaging
     private let defaults: UserDefaults
     private let protocolSelectionStore: VPNProtocolSelectionStoring
+    private let statisticsRecorder: LocalStatisticsRecording?
+    private let trafficSampler: TunnelTrafficSampling
     private let pendingRegistrationKey = "pending.registration"
     private let cachedPlanNameKey = "cached.plan.name"
     private let cachedPlanIsProKey = "cached.plan.isPro"
@@ -40,6 +42,8 @@ final class AppModel: ObservableObject {
     private var vpnTransitionTask: Task<Void, Never>?
     private var vpnTransitionGeneration: UInt = 0
     private var activeVPNTransition: VPNTransitionRequest?
+    private var pendingStatisticsRequest: VPNConnectRequest?
+    private var activeStatisticsSession: ActiveStatisticsSession?
     private var queuedVPNConnectRequest: VPNConnectRequest? {
         didSet {
             hasQueuedVPNReconnect = queuedVPNConnectRequest != nil
@@ -52,6 +56,8 @@ final class AppModel: ObservableObject {
         latencyProbe: LatencyProbing? = nil,
         vpnManager: VPNManaging? = nil,
         protocolSelectionStore: VPNProtocolSelectionStoring? = nil,
+        statisticsRecorder: LocalStatisticsRecording? = nil,
+        trafficSampler: TunnelTrafficSampling = SystemTunnelTrafficSampler(),
         defaults: UserDefaults = .standard
     ) {
         let resolvedAPI = api ?? APIClient()
@@ -59,6 +65,8 @@ final class AppModel: ObservableObject {
         self.google = google ?? GoogleSignInService()
         self.latencyProbe = latencyProbe ?? NetworkLatencyProbe()
         self.protocolSelectionStore = protocolSelectionStore ?? UserDefaultsVPNProtocolSelectionStore(defaults: defaults)
+        self.statisticsRecorder = statisticsRecorder
+        self.trafficSampler = trafficSampler
         self.selectedVPNProtocol = self.protocolSelectionStore.selectedProtocol
         self.vpn = vpnManager ?? VPNManagerCoordinator(api: resolvedAPI)
         self.defaults = defaults
@@ -328,6 +336,7 @@ final class AppModel: ObservableObject {
     func signOut() async {
         cancelActiveVPNTransition()
         await vpn.disconnectAndForget()
+        persistActiveStatisticsSessionIfNeeded(endedAt: Date())
         await api.logout()
         google.signOut()
         clearSessionState()
@@ -488,6 +497,7 @@ final class AppModel: ObservableObject {
 
     private func forceSignOut() {
         cancelActiveVPNTransition()
+        persistActiveStatisticsSessionIfNeeded(endedAt: Date())
         Task { await vpn.disconnectAndForget() }
         clearSessionState()
     }
@@ -515,6 +525,8 @@ final class AppModel: ObservableObject {
         selectedServerID = nil
         vpnStatus = .disconnected
         deviceLimitContext = nil
+        pendingStatisticsRequest = nil
+        activeStatisticsSession = nil
         route = .login
     }
 
@@ -580,6 +592,7 @@ final class AppModel: ObservableObject {
         vpnTransitionGeneration &+= 1
         let generation = vpnTransitionGeneration
         activeVPNTransition = .connect(request)
+        pendingStatisticsRequest = request
         vpnStatus = .connecting
 
         vpnTransitionTask = Task { [weak self] in
@@ -640,11 +653,13 @@ final class AppModel: ObservableObject {
         switch status {
         case .invalid, .disconnected:
             activeVPNTransition = nil
+            persistActiveStatisticsSessionIfNeeded(endedAt: Date())
             guard let queuedRequest = queuedVPNConnectRequest else { return }
             queuedVPNConnectRequest = nil
             beginConnect(queuedRequest)
         case .connected:
             activeVPNTransition = nil
+            beginStatisticsSessionIfNeeded()
         case .connecting, .reasserting, .disconnecting:
             break
         }
@@ -656,6 +671,7 @@ final class AppModel: ObservableObject {
         vpnTransitionTask = nil
         activeVPNTransition = nil
         queuedVPNConnectRequest = nil
+        pendingStatisticsRequest = nil
     }
 
     private func cachePlan(name: String, isPro: Bool) {
@@ -694,4 +710,62 @@ final class AppModel: ObservableObject {
     }
 
     private func clearPendingRegistration() { defaults.removeObject(forKey: pendingRegistrationKey) }
+}
+
+private extension AppModel {
+    struct ActiveStatisticsSession {
+        let userId: String
+        let server: VPNServer
+        let protocolName: VPNConfigurationProtocol
+        let connectedAt: Date
+        let baselineSnapshot: TunnelTrafficSnapshot?
+    }
+
+    func beginStatisticsSessionIfNeeded() {
+        guard activeStatisticsSession == nil,
+              let userId = session?.userId,
+              let request = pendingStatisticsRequest else {
+            return
+        }
+
+        activeStatisticsSession = ActiveStatisticsSession(
+            userId: userId,
+            server: request.server,
+            protocolName: request.protocolName,
+            connectedAt: Date(),
+            baselineSnapshot: trafficSampler.currentSnapshot()
+        )
+        pendingStatisticsRequest = nil
+    }
+
+    func persistActiveStatisticsSessionIfNeeded(endedAt: Date) {
+        guard let activeStatisticsSession else {
+            pendingStatisticsRequest = nil
+            return
+        }
+
+        defer {
+            self.activeStatisticsSession = nil
+            self.pendingStatisticsRequest = nil
+        }
+
+        guard let statisticsRecorder else { return }
+
+        let snapshot = trafficSampler.currentSnapshot()
+        let totals = if let baseline = activeStatisticsSession.baselineSnapshot, let snapshot {
+            snapshot.delta(from: baseline)
+        } else {
+            TunnelTrafficSnapshot(downloadedBytes: 0, uploadedBytes: 0)
+        }
+
+        try? statisticsRecorder.record(
+            userId: activeStatisticsSession.userId,
+            connectedAt: activeStatisticsSession.connectedAt,
+            disconnectedAt: max(endedAt, activeStatisticsSession.connectedAt),
+            server: activeStatisticsSession.server,
+            protocolName: activeStatisticsSession.protocolName,
+            downloadedBytes: totals.downloadedBytes,
+            uploadedBytes: totals.uploadedBytes
+        )
+    }
 }

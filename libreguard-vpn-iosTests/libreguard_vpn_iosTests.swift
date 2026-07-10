@@ -164,22 +164,35 @@ struct libreguard_vpn_iosTests {
 
         let start = Date().addingTimeInterval(-600)
         try recorder.record(
+            userId: "user-1",
             connectedAt: start,
             disconnectedAt: Date(),
             server: server,
+            protocolName: .ikev2,
             downloadedBytes: 1_000,
             uploadedBytes: 250
         )
+        try recorder.record(
+            userId: "user-2",
+            connectedAt: start,
+            disconnectedAt: Date(),
+            server: server,
+            protocolName: .openVPN,
+            downloadedBytes: 5_000,
+            uploadedBytes: 900
+        )
         let records = try context.fetch(FetchDescriptor<LocalConnectionRecord>())
         let summary = LocalStatisticsSummary(
-            records: records,
+            records: records.filter { $0.userId == "user-1" },
             interval: DateInterval(start: start.addingTimeInterval(-1), end: Date().addingTimeInterval(1))
         )
         #expect(summary.totalBytes == 1_250)
         #expect(summary.connectedDuration >= 599)
 
-        try recorder.clear()
-        #expect(try context.fetchCount(FetchDescriptor<LocalConnectionRecord>()) == 0)
+        try recorder.clear(userId: "user-1")
+        let remainingRecords = try context.fetch(FetchDescriptor<LocalConnectionRecord>())
+        #expect(remainingRecords.count == 1)
+        #expect(remainingRecords.first?.userId == "user-2")
     }
 
     @Test func countryFlagsResolveFromNamesAndAliases() {

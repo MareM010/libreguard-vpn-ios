@@ -152,9 +152,72 @@ struct ConnectionTransitionTests {
         #expect(coordinator.status == .connected)
     }
 
-    private func makeApp(manager: ControlledVPNManager, servers: [VPNServer]) -> AppModel {
+    @Test func disconnectPersistsStatisticsForTheActiveUser() async throws {
+        let manager = ControlledVPNManager()
+        let recorder = RecordingStatisticsRecorder()
+        let sampler = ScriptedTrafficSampler([
+            TunnelTrafficSnapshot(downloadedBytes: 100, uploadedBytes: 40),
+            TunnelTrafficSnapshot(downloadedBytes: 460, uploadedBytes: 160)
+        ])
+        let server = try makeServer(id: 7)
+        let app = makeApp(manager: manager, servers: [server], recorder: recorder, sampler: sampler)
+        app.session = makeSession(userId: "user-1")
+
+        app.requestConnectionToSelectedServer()
+        await settle()
+        manager.emit(.connected)
+        await settle()
+
+        await app.disconnectVPN()
+
+        #expect(recorder.records.count == 1)
+        #expect(recorder.records.first?.userId == "user-1")
+        #expect(recorder.records.first?.server.id == 7)
+        #expect(recorder.records.first?.protocolName == .ikev2)
+        #expect(recorder.records.first?.downloadedBytes == 360)
+        #expect(recorder.records.first?.uploadedBytes == 120)
+    }
+
+    @Test func signOutFinalizesStatisticsBeforeClearingTheSession() async throws {
+        let manager = ControlledVPNManager()
+        let recorder = RecordingStatisticsRecorder()
+        let sampler = ScriptedTrafficSampler([
+            TunnelTrafficSnapshot(downloadedBytes: 50, uploadedBytes: 20),
+            TunnelTrafficSnapshot(downloadedBytes: 150, uploadedBytes: 55)
+        ])
+        let server = try makeServer(id: 9)
+        let app = makeApp(manager: manager, servers: [server], recorder: recorder, sampler: sampler)
+        app.session = makeSession(userId: "user-2")
+
+        app.requestConnectionToSelectedServer()
+        await settle()
+        manager.emit(.connected)
+        await settle()
+
+        await app.signOut()
+
+        #expect(recorder.records.count == 1)
+        #expect(recorder.records.first?.userId == "user-2")
+        #expect(app.session == nil)
+        if case .login = app.route {
+        } else {
+            Issue.record("Expected the app to return to the login route")
+        }
+    }
+
+    private func makeApp(
+        manager: VPNManaging,
+        servers: [VPNServer],
+        recorder: LocalStatisticsRecording? = nil,
+        sampler: TunnelTrafficSampling = ScriptedTrafficSampler([])
+    ) -> AppModel {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
-        let app = AppModel(vpnManager: manager, defaults: defaults)
+        let app = AppModel(
+            vpnManager: manager,
+            statisticsRecorder: recorder,
+            trafficSampler: sampler,
+            defaults: defaults
+        )
         app.servers = servers
         app.selectedServerID = servers.first?.id
         return app
@@ -183,6 +246,16 @@ struct ConnectionTransitionTests {
         for _ in 0..<8 {
             await Task.yield()
         }
+    }
+
+    private func makeSession(userId: String) -> AuthSession {
+        AuthSession(
+            accessToken: "access",
+            refreshToken: "refresh",
+            email: "\(userId)@example.com",
+            userId: userId,
+            deviceId: "device-1"
+        )
     }
 }
 
@@ -258,5 +331,63 @@ private enum StubConnectionError: LocalizedError {
 
     var errorDescription: String? {
         "Connection failed"
+    }
+}
+
+@MainActor
+private final class RecordingStatisticsRecorder: LocalStatisticsRecording {
+    struct Record {
+        let userId: String
+        let connectedAt: Date
+        let disconnectedAt: Date
+        let server: VPNServer
+        let protocolName: VPNConfigurationProtocol
+        let downloadedBytes: Int64
+        let uploadedBytes: Int64
+    }
+
+    private(set) var records: [Record] = []
+    private(set) var clearedUserIDs: [String] = []
+
+    func record(
+        userId: String,
+        connectedAt: Date,
+        disconnectedAt: Date,
+        server: VPNServer,
+        protocolName: VPNConfigurationProtocol,
+        downloadedBytes: Int64,
+        uploadedBytes: Int64
+    ) throws {
+        records.append(
+            Record(
+                userId: userId,
+                connectedAt: connectedAt,
+                disconnectedAt: disconnectedAt,
+                server: server,
+                protocolName: protocolName,
+                downloadedBytes: downloadedBytes,
+                uploadedBytes: uploadedBytes
+            )
+        )
+    }
+
+    func clear(userId: String) throws {
+        clearedUserIDs.append(userId)
+    }
+}
+
+private final class ScriptedTrafficSampler: TunnelTrafficSampling {
+    private var snapshots: [TunnelTrafficSnapshot]
+    private var index = 0
+
+    init(_ snapshots: [TunnelTrafficSnapshot]) {
+        self.snapshots = snapshots
+    }
+
+    func currentSnapshot() -> TunnelTrafficSnapshot? {
+        guard !snapshots.isEmpty else { return nil }
+        let snapshot = snapshots[min(index, snapshots.count - 1)]
+        index += 1
+        return snapshot
     }
 }
