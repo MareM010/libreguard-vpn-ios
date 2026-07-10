@@ -1,4 +1,5 @@
 import Foundation
+import NetworkExtension
 import Testing
 @testable import libreguard_vpn_ios
 
@@ -92,6 +93,64 @@ struct OpenVPNTests {
 
         store.clear()
         #expect(try store.load() == nil)
+    }
+
+    @Test func openVPNProviderMessageCodecRoundTripsDiagnostics() throws {
+        let diagnostics = OpenVPNRuntimeDiagnostics(
+            state: .connected,
+            serverId: 12,
+            serverName: "DE-1",
+            serverAddress: "vpn.example.com",
+            connectedAt: Date(timeIntervalSince1970: 1_820_000_000),
+            engine: .openVPNCore,
+            canStartConnections: true
+        )
+        let requestData = try JSONEncoder().encode(OpenVPNProviderRequest(type: .diagnostics))
+        let request = try OpenVPNProviderMessageCodec.decodeRequest(from: requestData)
+        #expect(request.type == .diagnostics)
+
+        let responseData = try OpenVPNProviderMessageCodec.encodeResponse(
+            type: request.type,
+            diagnostics: diagnostics
+        )
+        let response = try OpenVPNProviderMessageCodec.decodeResponse(from: responseData)
+
+        #expect(response.success == true)
+        #expect(response.type == .diagnostics)
+        #expect(response.diagnostics == diagnostics)
+        #expect(response.error == nil)
+    }
+
+    @Test func unavailableOpenVPNRuntimeReportsMissingEngineDiagnostics() {
+        let runtime = UnavailableOpenVPNRuntime()
+        let envelope = OpenVPNProfileEnvelope(
+            serverId: 12,
+            serverName: "DE-1",
+            serverAddress: "vpn.example.com",
+            certificateName: "OVPN_client891",
+            issueDate: nil,
+            expirationDate: nil,
+            configContent: openVPNSampleConfig(),
+            privateKeyPassphrase: "test-passphrase",
+            storedAt: Date(timeIntervalSince1970: 1_717_000_100)
+        )
+        let provider = NEPacketTunnelProvider()
+        var capturedResult: Result<Void, Error>?
+
+        runtime.start(envelope: envelope, provider: provider) { result in
+            capturedResult = result
+        }
+
+        guard case .failure(let error) = capturedResult else {
+            Issue.record("Expected unavailable runtime to fail")
+            return
+        }
+
+        #expect((error as? OpenVPNRuntimeError) == .missingEngine)
+        #expect(runtime.diagnostics.state == .failed)
+        #expect(runtime.diagnostics.serverId == 12)
+        #expect(runtime.diagnostics.engine == .missing)
+        #expect(runtime.diagnostics.canStartConnections == false)
     }
 
     @Test func appModelFallsBackToIKEv2WhenOpenVPNIsLocked() async throws {

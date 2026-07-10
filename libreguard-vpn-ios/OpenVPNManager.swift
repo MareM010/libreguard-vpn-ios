@@ -171,6 +171,11 @@ final class OpenVPNManager: VPNManaging {
         status = .disconnected
     }
 
+    func fetchProviderDiagnostics() async throws -> OpenVPNRuntimeDiagnostics {
+        let response = try await sendProviderMessage(type: .diagnostics)
+        return response.diagnostics
+    }
+
     private func observeStatusChanges() {
         statusObserver = NotificationCenter.default.addObserver(
             forName: Notification.Name.NEVPNStatusDidChange,
@@ -191,6 +196,26 @@ final class OpenVPNManager: VPNManaging {
                 }
             }
         }
+    }
+
+    private func sendProviderMessage(type: OpenVPNProviderMessageType) async throws -> OpenVPNProviderResponse {
+        let requestData = try JSONEncoder().encode(OpenVPNProviderRequest(type: type))
+
+        let responseData = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+            do {
+                try manager.connection.sendProviderMessage(requestData) { data in
+                    guard let data else {
+                        continuation.resume(throwing: OpenVPNProviderMessageError.invalidMessage)
+                        return
+                    }
+                    continuation.resume(returning: data)
+                }
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
+
+        return try OpenVPNProviderMessageCodec.decodeResponse(from: responseData)
     }
 
     private func updateStatus(from neStatus: NEVPNStatus) {

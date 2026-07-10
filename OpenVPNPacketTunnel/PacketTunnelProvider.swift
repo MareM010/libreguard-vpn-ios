@@ -57,7 +57,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)? = nil) {
-        completionHandler?(nil)
+        guard let completionHandler else { return }
+
+        do {
+            let request = try OpenVPNProviderMessageCodec.decodeRequest(from: messageData)
+            let response = try OpenVPNProviderMessageCodec.encodeResponse(
+                type: request.type,
+                diagnostics: runtime.diagnostics
+            )
+            completionHandler(response)
+        } catch {
+            logger.error("OpenVPN app message handling failed: \(Self.describe(error))")
+            let response = try? OpenVPNProviderMessageCodec.encodeInvalidMessageResponse(
+                diagnostics: runtime.diagnostics
+            )
+            completionHandler(response)
+        }
     }
 
     private static func describe(_ error: Error) -> String {
@@ -82,4 +97,3 @@ enum OpenVPNProviderError: LocalizedError {
         }
     }
 }
-
