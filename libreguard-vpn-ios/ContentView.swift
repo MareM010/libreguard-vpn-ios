@@ -651,10 +651,10 @@ private struct DashboardView: View {
                                     app.deselectServer()
                                 }
                             )
-                        } else {
-                            QuickConnectCard {
-                                app.requestConnectionToSelectedServer()
-                            }
+                        }
+
+                        QuickConnectCard {
+                            app.requestQuickConnect()
                         }
                     }
 
@@ -1801,7 +1801,7 @@ private struct QuickConnectCard: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Quick Connect")
                         .font(.subheadline.weight(.semibold))
-                    Text("Connect to fastest server")
+                    Text("Connect to the best available server")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

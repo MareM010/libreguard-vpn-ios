@@ -281,9 +281,7 @@ final class AppModel: ObservableObject {
                 serverLatencies = await latencyProbe.measure(fetched)
                 if let selectedServerID = self.selectedServerID,
                    !fetched.contains(where: { $0.id == selectedServerID }) {
-                    self.selectedServerID = bestAccessibleServer(in: fetched)?.id
-                } else if self.selectedServerID == nil {
-                    self.selectedServerID = bestAccessibleServer(in: fetched)?.id
+                    self.selectedServerID = nil
                 }
             } catch is CancellationError {
             } catch {
@@ -362,8 +360,8 @@ final class AppModel: ObservableObject {
     }
 
     func requestConnectionToSelectedServer() {
-        guard let server = selectedServer ?? bestAccessibleServer(in: servers) else {
-            presentedError = APIError(message: "No VPN server is available right now.")
+        guard let server = selectedServer else {
+            requestQuickConnect()
             return
         }
         guard canUse(server: server) else {
@@ -376,6 +374,25 @@ final class AppModel: ObservableObject {
                 protocolName: effectiveConnectionProtocol()
             )
         )
+    }
+
+    func requestQuickConnect() {
+        guard let server = QuickConnectRanker.bestServer(
+            in: servers,
+            latencies: serverLatencies,
+            isProUser: isProUser
+        ) else {
+            presentedError = APIError(message: "No VPN server is available right now.")
+            return
+        }
+        selectedServerID = server.id
+        requestConnection(
+            VPNConnectRequest(
+                server: server,
+                protocolName: effectiveConnectionProtocol()
+            )
+        )
+        refreshServers()
     }
 
     func requestVPNDisconnect() {
@@ -533,19 +550,6 @@ final class AppModel: ObservableObject {
     private var selectedServer: VPNServer? {
         guard let selectedServerID else { return nil }
         return servers.first(where: { $0.id == selectedServerID })
-    }
-
-    private func bestAccessibleServer(in servers: [VPNServer]) -> VPNServer? {
-        let candidates = servers.filter { canUse(server: $0) }
-        let pool = candidates.isEmpty ? servers : candidates
-        return pool.min { lhs, rhs in
-            let lhsLatency = serverLatencies[lhs.id] ?? Int.max
-            let rhsLatency = serverLatencies[rhs.id] ?? Int.max
-            if lhsLatency == rhsLatency {
-                return lhs.serverName < rhs.serverName
-            }
-            return lhsLatency < rhsLatency
-        }
     }
 
     private func canUse(server: VPNServer) -> Bool {

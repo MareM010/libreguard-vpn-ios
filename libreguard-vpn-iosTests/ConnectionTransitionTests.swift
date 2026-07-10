@@ -53,6 +53,20 @@ struct ConnectionTransitionTests {
         #expect(app.hasQueuedVPNReconnect == false)
     }
 
+    @Test func quickConnectRanksServersThenSelectsAndConnectsTheWinner() async throws {
+        let manager = ControlledVPNManager()
+        let first = try makeServer(id: 1, load: 90)
+        let second = try makeServer(id: 2, load: 20)
+        let app = makeApp(manager: manager, servers: [first, second])
+        app.serverLatencies = [1: 30, 2: 65]
+
+        app.requestQuickConnect()
+        await settle()
+
+        #expect(app.selectedServerID == second.id)
+        #expect(manager.connectCalls.map(\.serverID) == [second.id])
+    }
+
     @Test func newerConnectRequestReplacesAnInFlightConnection() async throws {
         let manager = ControlledVPNManager()
         let first = try makeServer(id: 1)
@@ -223,7 +237,7 @@ struct ConnectionTransitionTests {
         return app
     }
 
-    private func makeServer(id: Int) throws -> VPNServer {
+    private func makeServer(id: Int, load: Int = 20) throws -> VPNServer {
         try JSONDecoder().decode(
             VPNServer.self,
             from: JSONSerialization.data(withJSONObject: [
@@ -234,7 +248,7 @@ struct ConnectionTransitionTests {
                 "city": "Frankfurt",
                 "linkSpeed": 1000,
                 "pricingTier": "Free",
-                "load": 20,
+                "load": load,
                 "activeConnections": NSNull(),
                 "latencyPingPort": 5001,
                 "loadDataFresh": true
