@@ -54,22 +54,27 @@ final class VPNManagerCoordinator: VPNManaging {
         reconcileStatus()
     }
 
-    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol) async throws {
+    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, onDemandEnabled: Bool) async throws {
         requestGeneration &+= 1
         let generation = requestGeneration
         activeProtocol = protocolName
-        let manager = manager(for: protocolName)
+        let selectedManager = manager(for: protocolName)
 
         do {
-            try await manager.connect(to: server, protocol: protocolName)
+            if onDemandEnabled {
+                let inactiveProtocol: VPNConfigurationProtocol = protocolName == .openVPN ? .ikev2 : .openVPN
+                let inactiveManager = manager(for: inactiveProtocol)
+                try await inactiveManager.setOnDemandEnabled(false)
+            }
+            try await selectedManager.connect(to: server, protocol: protocolName, onDemandEnabled: onDemandEnabled)
             try Task.checkCancellation()
             guard generation == requestGeneration else {
-                await stopIfActive(manager)
+                await stopIfActive(selectedManager)
                 throw CancellationError()
             }
             reconcileStatus()
         } catch is CancellationError {
-            await stopIfActive(manager)
+            await stopIfActive(selectedManager)
             if generation == requestGeneration {
                 activeProtocol = nil
                 reconcileStatus()
@@ -82,6 +87,18 @@ final class VPNManagerCoordinator: VPNManaging {
             }
             throw error
         }
+    }
+
+    func setOnDemandEnabled(_ enabled: Bool) async throws {
+        if enabled, let activeProtocol {
+            let inactiveProtocol: VPNConfigurationProtocol = activeProtocol == .openVPN ? .ikev2 : .openVPN
+            try await manager(for: inactiveProtocol).setOnDemandEnabled(false)
+            try await manager(for: activeProtocol).setOnDemandEnabled(true)
+            return
+        }
+
+        try await ikev2Manager.setOnDemandEnabled(false)
+        try await openVPNManager.setOnDemandEnabled(false)
     }
 
     func disconnect() async {

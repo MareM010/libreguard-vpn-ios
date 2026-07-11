@@ -166,6 +166,18 @@ struct ConnectionTransitionTests {
         #expect(coordinator.status == .connected)
     }
 
+    @Test func coordinatorDisablesOnDemandForBothProtocols() async throws {
+        let ikev2 = ControlledVPNManager(status: .connected)
+        let openVPN = ControlledVPNManager(status: .disconnected)
+        let coordinator = VPNManagerCoordinator(ikev2Manager: ikev2, openVPNManager: openVPN)
+
+        try await coordinator.setOnDemandEnabled(false)
+
+        #expect(ikev2.onDemandUpdates == [false])
+        #expect(openVPN.onDemandUpdates == [false])
+        #expect(ikev2.disconnectCalls == 0)
+    }
+
     @Test func disconnectPersistsStatisticsForTheActiveUser() async throws {
         let manager = ControlledVPNManager()
         let recorder = RecordingStatisticsRecorder()
@@ -287,6 +299,7 @@ private final class ControlledVPNManager: VPNManaging {
     var connectError: Error?
     private(set) var connectCalls: [ConnectCall] = []
     private(set) var disconnectCalls = 0
+    private(set) var onDemandUpdates: [Bool] = []
     private var disconnectContinuation: CheckedContinuation<Void, Never>?
 
     init(status: VPNConnectionState = .disconnected) {
@@ -297,7 +310,7 @@ private final class ControlledVPNManager: VPNManaging {
         onStatusChange?(status)
     }
 
-    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol) async throws {
+    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, onDemandEnabled: Bool) async throws {
         connectCalls.append(ConnectCall(serverID: server.id, protocolName: protocolName))
         status = .connecting
         onStatusChange?(status)
@@ -306,6 +319,10 @@ private final class ControlledVPNManager: VPNManaging {
             onStatusChange?(status)
             throw connectError
         }
+    }
+
+    func setOnDemandEnabled(_ enabled: Bool) async throws {
+        onDemandUpdates.append(enabled)
     }
 
     func disconnect() async {

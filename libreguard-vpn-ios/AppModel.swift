@@ -22,6 +22,8 @@ final class AppModel: ObservableObject {
     @Published var selectedVPNProtocol: VPNConfigurationProtocol
     @Published var vpnStatus: VPNConnectionState = .disconnected
     @Published private(set) var hasQueuedVPNReconnect = false
+    @Published private(set) var isAutoConnectEnabled: Bool
+    @Published private(set) var isUpdatingAutoConnect = false
     @Published var retryAfterSeconds = 0
 
     private let api: BackendServicing
@@ -35,6 +37,7 @@ final class AppModel: ObservableObject {
     private let pendingRegistrationKey = "pending.registration"
     private let cachedPlanNameKey = "cached.plan.name"
     private let cachedPlanIsProKey = "cached.plan.isPro"
+    private let autoConnectEnabledKey = "vpn.autoConnect.enabled"
     private var cachedPlanName: String?
     private var cachedPlanIsPro = false
     private var serverRefreshTask: Task<Void, Never>?
@@ -68,6 +71,7 @@ final class AppModel: ObservableObject {
         self.statisticsRecorder = statisticsRecorder
         self.trafficSampler = trafficSampler
         self.selectedVPNProtocol = self.protocolSelectionStore.selectedProtocol
+        self.isAutoConnectEnabled = defaults.bool(forKey: "vpn.autoConnect.enabled")
         self.vpn = vpnManager ?? VPNManagerCoordinator(api: resolvedAPI)
         self.defaults = defaults
         self.cachedPlanName = defaults.string(forKey: cachedPlanNameKey)
@@ -101,6 +105,7 @@ final class AppModel: ObservableObject {
                 session = try await api.restoreSession()
                 route = .authenticated
                 await refreshAccountData(showErrors: false)
+                await reconcileAutoConnectOnLaunch()
                 return
             } catch let error as APIError where error.code == "APP_VERSION_BLOCKED" || error.code == "APP_VERSION_REQUIRED" {
                 presentedError = error
@@ -125,6 +130,46 @@ final class AppModel: ObservableObject {
 
     func showRegister() { route = .register }
     func showForgotPassword() { route = .forgotPassword }
+
+    func requestPasswordReset(email: String) async -> Bool {
+        let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedEmail.isEmpty else {
+            presentedError = APIError(message: "Enter your email address.")
+            return false
+        }
+        isAuthenticating = true
+        defer { isAuthenticating = false }
+        do {
+            _ = try await api.requestPasswordReset(email: normalizedEmail)
+            prefilledEmail = normalizedEmail
+            return true
+        } catch {
+            present(error)
+            return false
+        }
+    }
+
+    func resetPassword(_ link: PasswordResetLink, newPassword: String, confirmation: String) async -> Bool {
+        guard newPassword.count >= 8 else {
+            presentedError = APIError(message: "Password must be at least 8 characters.")
+            return false
+        }
+        guard newPassword == confirmation else {
+            presentedError = APIError(message: "Passwords do not match.")
+            return false
+        }
+        isAuthenticating = true
+        defer { isAuthenticating = false }
+        do {
+            _ = try await api.resetPassword(email: link.email, token: link.token, newPassword: newPassword)
+            showLogin(prefill: link.email)
+            presentedError = APIError(message: "Your password has been reset. Sign in with your new password.")
+            return true
+        } catch {
+            present(error)
+            return false
+        }
+    }
 
     func login(email: String, password: String) async {
         let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -290,6 +335,53 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func setAutoConnectEnabled(_ enabled: Bool) async {
+        guard enabled != isAutoConnectEnabled, !isUpdatingAutoConnect else { return }
+        isUpdatingAutoConnect = true
+        defer { isUpdatingAutoConnect = false }
+
+        do {
+            if enabled {
+                if vpnStatus.isConnected || vpnStatus.isBusy {
+                    try await vpn.setOnDemandEnabled(true)
+                } else {
+                    refreshServers()
+                    await serverRefreshTask?.value
+                    guard let server = QuickConnectRanker.bestServer(
+                        in: servers,
+                        latencies: serverLatencies,
+                        isProUser: isProUser
+                    ) else {
+                        throw APIError(message: "No VPN server is available right now.")
+                    }
+                    selectedServerID = server.id
+                    requestConnection(
+                        VPNConnectRequest(
+                            server: server,
+                            protocolName: effectiveConnectionProtocol(),
+                            onDemandEnabled: true
+                        )
+                    )
+                    await vpnTransitionTask?.value
+                    guard vpnStatus != .disconnected, vpnStatus != .invalid else {
+                        try? await vpn.setOnDemandEnabled(false)
+                        return
+                    }
+                }
+            } else {
+                try await vpn.setOnDemandEnabled(false)
+            }
+
+            persistAutoConnectEnabled(enabled)
+        } catch {
+            if enabled {
+                try? await vpn.setOnDemandEnabled(false)
+            }
+            persistAutoConnectEnabled(false)
+            present(error)
+        }
+    }
+
     func refreshVPNStatus() async {
         await vpn.refreshStatus()
     }
@@ -333,6 +425,7 @@ final class AppModel: ObservableObject {
 
     func signOut() async {
         cancelActiveVPNTransition()
+        persistAutoConnectEnabled(false)
         await vpn.disconnectAndForget()
         persistActiveStatisticsSessionIfNeeded(endedAt: Date())
         await api.logout()
@@ -371,7 +464,8 @@ final class AppModel: ObservableObject {
         requestConnection(
             VPNConnectRequest(
                 server: server,
-                protocolName: effectiveConnectionProtocol()
+                protocolName: effectiveConnectionProtocol(),
+                onDemandEnabled: isAutoConnectEnabled
             )
         )
     }
@@ -389,7 +483,8 @@ final class AppModel: ObservableObject {
         requestConnection(
             VPNConnectRequest(
                 server: server,
-                protocolName: effectiveConnectionProtocol()
+                protocolName: effectiveConnectionProtocol(),
+                onDemandEnabled: isAutoConnectEnabled
             )
         )
         refreshServers()
@@ -435,7 +530,25 @@ final class AppModel: ObservableObject {
         await task?.value
     }
 
-    func handleOpenURL(_ url: URL) { _ = google.handle(url: url) }
+    func handleOpenURL(_ url: URL) {
+        guard url.scheme?.lowercased() == "libreguardvpn" else {
+            _ = google.handle(url: url)
+            return
+        }
+        guard url.host?.lowercased() == "account",
+              url.path == "/reset-password",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let email = components.queryItems?.first(where: { $0.name == "email" })?.value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let token = components.queryItems?.first(where: { $0.name == "code" })?.value,
+              !email.isEmpty,
+              !token.isEmpty else {
+            presentedError = APIError(message: "This password reset link is invalid. Request a new one and try again.")
+            route = .forgotPassword
+            return
+        }
+        prefilledEmail = email
+        route = .resetPassword(PasswordResetLink(email: email, token: token))
+    }
 
     var isProUser: Bool {
         if let subscription { return subscription.isPro }
@@ -514,6 +627,7 @@ final class AppModel: ObservableObject {
 
     private func forceSignOut() {
         cancelActiveVPNTransition()
+        persistAutoConnectEnabled(false)
         persistActiveStatisticsSessionIfNeeded(endedAt: Date())
         Task { await vpn.disconnectAndForget() }
         clearSessionState()
@@ -545,6 +659,21 @@ final class AppModel: ObservableObject {
         pendingStatisticsRequest = nil
         activeStatisticsSession = nil
         route = .login
+    }
+
+    private func reconcileAutoConnectOnLaunch() async {
+        guard isAutoConnectEnabled,
+              vpnStatus == .disconnected || vpnStatus == .invalid else { return }
+        refreshServers()
+        await serverRefreshTask?.value
+        guard isAutoConnectEnabled,
+              vpnStatus == .disconnected || vpnStatus == .invalid else { return }
+        requestQuickConnect()
+    }
+
+    private func persistAutoConnectEnabled(_ enabled: Bool) {
+        isAutoConnectEnabled = enabled
+        defaults.set(enabled, forKey: autoConnectEnabledKey)
     }
 
     private var selectedServer: VPNServer? {
@@ -602,7 +731,11 @@ final class AppModel: ObservableObject {
         vpnTransitionTask = Task { [weak self] in
             guard let self else { return }
             do {
-                try await vpn.connect(to: request.server, protocol: request.protocolName)
+                try await vpn.connect(
+                    to: request.server,
+                    protocol: request.protocolName,
+                    onDemandEnabled: request.onDemandEnabled
+                )
                 guard generation == vpnTransitionGeneration, !Task.isCancelled else { return }
                 activeVPNTransition = nil
                 handleVPNStatusChange(vpn.status)

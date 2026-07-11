@@ -64,7 +64,7 @@ final class OpenVPNManager: VPNManaging {
         }
     }
 
-    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol = .openVPN) async throws {
+    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol = .openVPN, onDemandEnabled: Bool = false) async throws {
         logger.info("OpenVPN connect requested for server \(server.id, privacy: .public) using protocol \(protocolName.rawValue, privacy: .public)")
 
         guard protocolName == .openVPN else {
@@ -125,8 +125,7 @@ final class OpenVPNManager: VPNManaging {
             manager.localizedDescription = "LibreGuard OpenVPN"
             manager.protocolConfiguration = tunnelProtocol
             manager.isEnabled = true
-            manager.isOnDemandEnabled = false
-            manager.onDemandRules = nil
+            applyOnDemandConfiguration(enabled: onDemandEnabled)
 
             logger.debug("Saving OpenVPN preferences")
             try await savePreferences()
@@ -150,6 +149,15 @@ final class OpenVPNManager: VPNManaging {
             status = .disconnected
             throw error
         }
+    }
+
+    func setOnDemandEnabled(_ enabled: Bool) async throws {
+        guard !isRunningInSimulator else { return }
+        try await loadPreferences()
+        guard manager.protocolConfiguration != nil else { return }
+        applyOnDemandConfiguration(enabled: enabled)
+        try await savePreferences()
+        try await loadPreferences()
     }
 
     func disconnect() async {
@@ -198,12 +206,20 @@ final class OpenVPNManager: VPNManaging {
         }
     }
 
+    private func applyOnDemandConfiguration(enabled: Bool) {
+        manager.onDemandRules = enabled ? [NEOnDemandRuleConnect()] : nil
+        manager.isOnDemandEnabled = enabled
+    }
+
     private func sendProviderMessage(type: OpenVPNProviderMessageType) async throws -> OpenVPNProviderResponse {
         let requestData = try JSONEncoder().encode(OpenVPNProviderRequest(type: type))
+        guard let providerSession = manager.connection as? NETunnelProviderSession else {
+            throw OpenVPNProviderMessageError.invalidMessage
+        }
 
         let responseData = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
             do {
-                try manager.connection.sendProviderMessage(requestData) { data in
+                try providerSession.sendProviderMessage(requestData) { data in
                     guard let data else {
                         continuation.resume(throwing: OpenVPNProviderMessageError.invalidMessage)
                         return

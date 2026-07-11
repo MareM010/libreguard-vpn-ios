@@ -153,6 +153,16 @@ struct RegistrationRequest: Encodable {
     let password: String
 }
 
+struct ForgotPasswordRequest: Encodable {
+    let email: String
+}
+
+struct ResetPasswordRequest: Encodable {
+    let email: String
+    let token: String
+    let newPassword: String
+}
+
 struct RegistrationResponse: Decodable {
     let message: String
     let accountStatus: String?
@@ -440,6 +450,17 @@ enum VPNConfigurationProtocol: String, Codable, CaseIterable {
 struct VPNConnectRequest: Equatable {
     let server: VPNServer
     let protocolName: VPNConfigurationProtocol
+    let onDemandEnabled: Bool
+
+    init(
+        server: VPNServer,
+        protocolName: VPNConfigurationProtocol,
+        onDemandEnabled: Bool = false
+    ) {
+        self.server = server
+        self.protocolName = protocolName
+        self.onDemandEnabled = onDemandEnabled
+    }
 }
 
 enum VPNTransitionRequest: Equatable {
@@ -713,6 +734,12 @@ enum AppRoute {
     case register
     case emailConfirmation(PendingRegistration)
     case forgotPassword
+    case resetPassword(PasswordResetLink)
     case twoFactor(TwoFactorChallenge)
     case authenticated
+}
+
+struct PasswordResetLink: Equatable {
+    let email: String
+    let token: String
 }

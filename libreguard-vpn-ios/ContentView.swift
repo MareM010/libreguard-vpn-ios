@@ -56,6 +56,8 @@ struct ContentView: View {
                     )
                 case .forgotPassword:
                     ForgotPasswordView(onBack: { app.showLogin() })
+                case let .resetPassword(link):
+                    ResetPasswordView(link: link, onBack: { app.showLogin(prefill: link.email) })
                 case let .twoFactor(challenge):
                     TwoFactorLoginView(challenge: challenge, onBack: { app.showLogin(prefill: challenge.email) })
                 case .authenticated:
@@ -598,28 +600,89 @@ private struct DeviceLimitView: View {
 }
 
 private struct ForgotPasswordView: View {
+    @EnvironmentObject private var app: AppModel
     @State private var email = ""
+    @State private var didSendRequest = false
     let onBack: () -> Void
 
     var body: some View {
-        VStack(spacing: 24) {
-            LibreGuardLogo(size: 88)
-            VStack(spacing: 8) {
-                Text("Reset Password")
-                    .font(.system(size: 30, weight: .semibold))
-                Text("Enter your email and we will send reset instructions.")
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+        ScrollView {
+            VStack(spacing: 24) {
+                LibreGuardLogo(size: 88)
+                VStack(spacing: 8) {
+                    Text("Reset Password")
+                        .font(.system(size: 30, weight: .semibold))
+                    Text(didSendRequest
+                         ? "If an account matches this email address, reset instructions are on their way."
+                         : "Enter your email and we will send reset instructions.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                FormField(label: "Email", text: $email, icon: "envelope", placeholder: "you@example.com")
+                PrimaryButton(
+                    title: app.isAuthenticating
+                        ? "Sending..."
+                        : (didSendRequest ? "Send Another Email" : "Send Reset Link"),
+                    accessibilityIdentifier: "forgot-password-send-button"
+                ) {
+                    Task { didSendRequest = await app.requestPasswordReset(email: email) }
+                }
+                .disabled(app.isAuthenticating)
+                Button("Back to Sign In", action: onBack)
+                    .foregroundStyle(Theme.primary)
             }
-            FormField(label: "Email", text: $email, icon: "envelope", placeholder: "you@example.com")
-            PrimaryButton(title: "Send Reset Link", action: onBack)
-            Button("Back to Sign In", action: onBack)
-                .foregroundStyle(Theme.primary)
+            .padding(24)
+            .frame(maxWidth: 480)
+            .frame(maxWidth: .infinity)
         }
-        .padding(24)
-        .frame(maxWidth: 480)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
+        .accessibilityIdentifier("forgot-password-screen")
+        .onAppear {
+            if email.isEmpty { email = app.prefilledEmail }
+        }
+    }
+}
+
+private struct ResetPasswordView: View {
+    @EnvironmentObject private var app: AppModel
+    let link: PasswordResetLink
+    let onBack: () -> Void
+    @State private var newPassword = ""
+    @State private var confirmation = ""
+    @State private var showNewPassword = false
+    @State private var showConfirmation = false
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                LibreGuardLogo(size: 88)
+                VStack(spacing: 8) {
+                    Text("Choose a New Password")
+                        .font(.system(size: 30, weight: .semibold))
+                    Text("Set a new password for \(link.email).")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                VStack(spacing: 16) {
+                    PasswordField(label: "New Password", text: $newPassword, showPassword: $showNewPassword, hint: "Must be at least 8 characters")
+                    PasswordField(label: "Confirm New Password", text: $confirmation, showPassword: $showConfirmation)
+                    PrimaryButton(
+                        title: app.isAuthenticating ? "Resetting..." : "Reset Password",
+                        accessibilityIdentifier: "reset-password-submit-button"
+                    ) {
+                        Task { _ = await app.resetPassword(link, newPassword: newPassword, confirmation: confirmation) }
+                    }
+                    .disabled(app.isAuthenticating)
+                }
+                Button("Back to Sign In", action: onBack)
+                    .foregroundStyle(Theme.primary)
+            }
+            .padding(24)
+            .frame(maxWidth: 480)
+            .frame(maxWidth: .infinity)
+        }
+        .background(Theme.background)
+        .accessibilityIdentifier("reset-password-screen")
     }
 }
 
@@ -1082,7 +1145,6 @@ private struct SettingsView: View {
     @EnvironmentObject private var app: AppModel
     @Environment(\.openURL) private var openURL
     @Binding var isDarkMode: Bool
-    @State private var autoConnect = true
     @State private var killSwitch = false
     @State private var splitTunneling = false
     @State private var showTwoFactorManagement = false
@@ -1122,7 +1184,20 @@ private struct SettingsView: View {
                     }
 
                     SettingsSection(title: "Connection") {
-                        ToggleRow(icon: "power", title: "Auto-Connect", subtitle: "Connect on app launch", isOn: $autoConnect)
+                        ToggleRow(
+                            icon: "power",
+                            title: "Auto-Connect",
+                            subtitle: app.isUpdatingAutoConnect
+                                ? "Updating VPN configuration…"
+                                : "Reconnect on Wi-Fi or cellular, including after restart",
+                            isOn: Binding(
+                                get: { app.isAutoConnectEnabled },
+                                set: { enabled in
+                                    Task { await app.setAutoConnectEnabled(enabled) }
+                                }
+                            )
+                        )
+                        .disabled(app.isUpdatingAutoConnect)
                         ToggleRow(icon: "shield", title: "Kill Switch", subtitle: "Block internet if VPN drops", isOn: $killSwitch)
                         ToggleRow(icon: "wifi", title: "Split Tunneling", subtitle: "Exclude apps from VPN", isOn: $splitTunneling)
                     }

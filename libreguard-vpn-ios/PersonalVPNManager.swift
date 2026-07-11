@@ -9,7 +9,8 @@ protocol VPNManaging: AnyObject {
     var onDisconnectError: ((Error) -> Void)? { get set }
 
     func refreshStatus() async
-    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol) async throws
+    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, onDemandEnabled: Bool) async throws
+    func setOnDemandEnabled(_ enabled: Bool) async throws
     func disconnect() async
     func disconnectAndForget() async
 }
@@ -70,7 +71,7 @@ final class PersonalVPNManager: VPNManaging {
         }
     }
 
-    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol = .ikev2) async throws {
+    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol = .ikev2, onDemandEnabled: Bool = false) async throws {
         logger.info("VPN connect requested for server \(server.id, privacy: .public) using protocol \(protocolName.rawValue, privacy: .public)")
 
         guard !isRunningInSimulator else {
@@ -100,8 +101,7 @@ final class PersonalVPNManager: VPNManaging {
             manager.localizedDescription = "LibreGuard"
             manager.protocolConfiguration = vpnProtocol
             manager.isEnabled = true
-            manager.isOnDemandEnabled = false
-            manager.onDemandRules = nil
+            applyOnDemandConfiguration(enabled: onDemandEnabled)
             logger.debug("Saving VPN preferences")
             try await savePreferences()
             try Task.checkCancellation()
@@ -124,6 +124,15 @@ final class PersonalVPNManager: VPNManaging {
             status = .disconnected
             throw error
         }
+    }
+
+    func setOnDemandEnabled(_ enabled: Bool) async throws {
+        guard !isRunningInSimulator else { return }
+        try await loadPreferences()
+        guard manager.protocolConfiguration != nil else { return }
+        applyOnDemandConfiguration(enabled: enabled)
+        try await savePreferences()
+        try await loadPreferences()
     }
 
     func disconnect() async {
@@ -165,6 +174,11 @@ final class PersonalVPNManager: VPNManaging {
                 }
             }
         }
+    }
+
+    private func applyOnDemandConfiguration(enabled: Bool) {
+        manager.onDemandRules = enabled ? [NEOnDemandRuleConnect()] : nil
+        manager.isOnDemandEnabled = enabled
     }
 
     private func updateStatus(from neStatus: NEVPNStatus) {

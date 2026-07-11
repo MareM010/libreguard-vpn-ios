@@ -382,11 +382,13 @@ private final class SpyVPNManager: VPNManaging {
 
     func refreshStatus() async {}
 
-    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol) async throws {
+    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, onDemandEnabled: Bool) async throws {
         connectCalls.append(Call(serverID: server.id, protocolName: protocolName))
         status = .connected
         onStatusChange?(status)
     }
+
+    func setOnDemandEnabled(_ enabled: Bool) async throws {}
 
     func disconnect() async {
         status = .disconnected
