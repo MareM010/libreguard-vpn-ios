@@ -1,0 +1,84 @@
+{
+  "identifier" : "A54D499C-824F-4D05-A405-ED70BE7B8E63",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+
+  ],
+  "settings" : {
+    "_failTransactionsEnabled" : false,
+    "_locale" : "en_US",
+    "_storefront" : "USA",
+    "_timeRate" : 0
+  },
+  "subscriptionGroups" : [
+    {
+      "id" : "C0EB4904-6E41-487E-A650-747487A26C26",
+      "localizations" : [
+        {
+          "description" : "Unlimited data, premium servers, OpenVPN, and access on up to three devices.",
+          "displayName" : "LibreGuard Pro",
+          "locale" : "en_US"
+        }
+      ],
+      "name" : "LibreGuard Pro",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "5.99",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "DC10394D-5A21-44E4-B001-D36D120DE3B5",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "Unlimited data, premium servers, OpenVPN, and access on up to three devices.",
+              "displayName" : "LibreGuard Pro Monthly",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "net.libreguard.pro.monthly",
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "LibreGuard Pro Monthly",
+          "subscriptionGroupID" : "C0EB4904-6E41-487E-A650-747487A26C26",
+          "type" : "RecurringSubscription"
+        },
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "29.99",
+          "familyShareable" : false,
+          "groupNumber" : 2,
+          "internalID" : "8D1622E8-A7D5-4A12-B518-935164C82D18",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "Unlimited data, premium servers, OpenVPN, and access on up to three devices.",
+              "displayName" : "LibreGuard Pro Annual",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "net.libreguard.pro.annual",
+          "recurringSubscriptionPeriod" : "P1Y",
+          "referenceName" : "LibreGuard Pro Annual",
+          "subscriptionGroupID" : "C0EB4904-6E41-487E-A650-747487A26C26",
+          "type" : "RecurringSubscription"
+        }
+      ]
+    }
+  ],
+  "version" : {
+    "major" : 4,
+    "minor" : 0
+  }
+}

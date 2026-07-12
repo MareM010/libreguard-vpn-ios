@@ -5,6 +5,57 @@ import Testing
 
 @MainActor
 struct libreguard_vpn_iosTests {
+    @Test func appleSubscriptionEndpointsUseAuthenticatedAccountContract() async throws {
+        try await withSerializedRequests {
+            let token = UUID(uuidString: "4CB6C240-6A45-42B4-AD28-C54C49B43F11")!
+            var requestCount = 0
+            let client = makeClient(sessionStore: InMemorySessionStore(session: AuthSession(
+                accessToken: "apple-access",
+                refreshToken: "refresh",
+                email: "person@example.com",
+                userId: "user-1",
+                deviceId: "test-device"
+            ))) { request in
+                requestCount += 1
+                #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer apple-access")
+                switch request.url?.path {
+                case "/api/subscription/apple/account-token":
+                    #expect(request.httpMethod == "GET")
+                    return try makeResponse(request, status: 200, json: ["appAccountToken": token.uuidString])
+                case "/api/subscription/apple/verify":
+                    #expect(request.httpMethod == "POST")
+                    let json = try #require(JSONSerialization.jsonObject(with: requestBody(from: request)) as? [String: Any])
+                    #expect(json["signedTransactionInfo"] as? String == "signed-jws")
+                    #expect(json["allowTransfer"] as? Bool == true)
+                    return try makeResponse(request, status: 200, json: [
+                        "transferred": true,
+                        "subscription": [
+                            "plan": "Pro",
+                            "isPro": true,
+                            "status": "active",
+                            "paymentType": "Apple",
+                            "currentPeriodEnd": NSNull(),
+                            "cancelAtPeriodEnd": false,
+                            "billingCycle": "annual",
+                            "activeDevices": 1,
+                            "maxDevices": 3,
+                            "canAddDevice": true
+                        ]
+                    ])
+                default:
+                    throw APIError(message: "Unexpected endpoint")
+                }
+            }
+
+            #expect(try await client.fetchAppleAccountToken() == token)
+            let response = try await client.verifyAppleTransaction("signed-jws", allowTransfer: true)
+            #expect(response.transferred)
+            #expect(response.subscription.isAppleBilled)
+            #expect(response.subscription.billingCycle == "annual")
+            #expect(requestCount == 2)
+        }
+    }
+
     @Test func passwordResetRequestsUseUnauthenticatedAccountEndpoints() async throws {
         try await withSerializedRequests {
             var requestCount = 0

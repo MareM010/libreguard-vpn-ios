@@ -24,6 +24,8 @@ protocol BackendServicing: AnyObject {
     func fetchVPNConfig(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> VPNConfigResponse
     func fetchUsage() async throws -> UsageQuota
     func fetchSubscription() async throws -> SubscriptionStatus
+    func fetchAppleAccountToken() async throws -> UUID
+    func verifyAppleTransaction(_ signedTransactionInfo: String, allowTransfer: Bool) async throws -> AppleTransactionVerificationResponse
     func fetchTwoFactorStatus() async throws -> TwoFactorStatus
     func setupTwoFactor() async throws -> AuthenticatorSetup
     func enableTwoFactor(code: String) async throws -> [String]
@@ -249,6 +251,22 @@ final class APIClient: BackendServicing {
     func fetchSubscription() async throws -> SubscriptionStatus {
         let response: SubscriptionStatus = try await send(.get, path: "/api/subscription/status")
         return response
+    }
+
+    func fetchAppleAccountToken() async throws -> UUID {
+        let response: AppleAccountTokenResponse = try await send(.get, path: "/api/subscription/apple/account-token")
+        return response.appAccountToken
+    }
+
+    func verifyAppleTransaction(_ signedTransactionInfo: String, allowTransfer: Bool) async throws -> AppleTransactionVerificationResponse {
+        try await send(
+            .post,
+            path: "/api/subscription/apple/verify",
+            body: AppleTransactionVerificationRequest(
+                signedTransactionInfo: signedTransactionInfo,
+                allowTransfer: allowTransfer
+            )
+        )
     }
 
     func fetchTwoFactorStatus() async throws -> TwoFactorStatus {

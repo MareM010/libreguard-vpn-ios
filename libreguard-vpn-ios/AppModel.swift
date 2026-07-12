@@ -14,6 +14,13 @@ final class AppModel: ObservableObject {
     @Published var session: AuthSession?
     @Published var usageQuota: UsageQuota?
     @Published var subscription: SubscriptionStatus?
+    @Published private(set) var appleSubscriptionProducts: [AppleSubscriptionProduct] = []
+    @Published var selectedAppleProductID = AppleSubscriptionCatalog.annualProductID
+    @Published private(set) var isLoadingAppleSubscriptions = false
+    @Published private(set) var isPurchasingAppleSubscription = false
+    @Published private(set) var isRestoringApplePurchases = false
+    @Published var applePurchaseMessage: String?
+    @Published var pendingAppleSubscriptionTransfer: PendingAppleSubscriptionTransfer?
     @Published var twoFactorStatus: TwoFactorStatus?
     @Published var authenticatorSetup: AuthenticatorSetup?
     @Published var recoveryCodes: [String] = []
@@ -34,6 +41,7 @@ final class AppModel: ObservableObject {
     @Published var retryAfterSeconds = 0
 
     private let api: BackendServicing
+    private let appleStore: AppleSubscriptionStoreServing
     private let google: GoogleSigning
     private let latencyProbe: LatencyProbing
     private let vpn: VPNManaging
@@ -54,6 +62,8 @@ final class AppModel: ObservableObject {
     private var cachedPlanIsPro = false
     private var serverRefreshTask: Task<Void, Never>?
     private var retryCountdownTask: Task<Void, Never>?
+    private var appleTransactionListenerTask: Task<Void, Never>?
+    private var processingAppleTransactionIDs: Set<UInt64> = []
     private var vpnTransitionTask: Task<Void, Never>?
     private var trafficMonitorTask: Task<Void, Never>?
     private var liveActivityUpdateCounter = 0
@@ -71,6 +81,7 @@ final class AppModel: ObservableObject {
 
     init(
         api: BackendServicing? = nil,
+        appleStore: AppleSubscriptionStoreServing? = nil,
         google: GoogleSigning? = nil,
         latencyProbe: LatencyProbing? = nil,
         vpnManager: VPNManaging? = nil,
@@ -84,6 +95,7 @@ final class AppModel: ObservableObject {
     ) {
         let resolvedAPI = api ?? APIClient()
         self.api = resolvedAPI
+        self.appleStore = appleStore ?? AppleSubscriptionStore()
         self.google = google ?? GoogleSignInService()
         self.latencyProbe = latencyProbe ?? NetworkLatencyProbe()
         self.protocolSelectionStore = protocolSelectionStore ?? UserDefaultsVPNProtocolSelectionStore(defaults: defaults)
@@ -120,6 +132,7 @@ final class AppModel: ObservableObject {
     }
 
     func start() async {
+        startAppleTransactionListener()
         guard case .launching = route else { return }
         await refreshNotificationAuthorizationStatus()
         if ProcessInfo.processInfo.arguments.contains("--uitesting-reset") {
@@ -144,6 +157,7 @@ final class AppModel: ObservableObject {
                 session = try await api.restoreSession()
                 route = .authenticated
                 await refreshAccountData(showErrors: false)
+                await reconcileUnfinishedAppleTransactions()
                 if vpnStatus.isConnected {
                     refreshServers()
                     await serverRefreshTask?.value
@@ -360,6 +374,79 @@ final class AppModel: ObservableObject {
         } catch {
             if showErrors { present(error) }
         }
+    }
+
+    func loadAppleSubscriptions() async {
+        guard appleSubscriptionProducts.isEmpty, !isLoadingAppleSubscriptions else { return }
+        isLoadingAppleSubscriptions = true
+        defer { isLoadingAppleSubscriptions = false }
+        do {
+            appleSubscriptionProducts = try await appleStore.loadProducts()
+            if !appleSubscriptionProducts.contains(where: { $0.id == selectedAppleProductID }) {
+                selectedAppleProductID = appleSubscriptionProducts.first?.id ?? AppleSubscriptionCatalog.annualProductID
+            }
+        } catch {
+            present(error)
+        }
+    }
+
+    func purchaseSelectedAppleSubscription() async {
+        guard session != nil, !isPurchasingAppleSubscription else { return }
+        isPurchasingAppleSubscription = true
+        applePurchaseMessage = nil
+        defer { isPurchasingAppleSubscription = false }
+
+        do {
+            let accountToken = try await api.fetchAppleAccountToken()
+            switch try await appleStore.purchase(productID: selectedAppleProductID, appAccountToken: accountToken) {
+            case let .success(transaction):
+                await processAppleTransaction(transaction, allowTransfer: false)
+            case .pending:
+                applePurchaseMessage = "Your purchase is pending approval. Pro will activate automatically after the App Store completes it."
+            case .userCancelled:
+                break
+            }
+        } catch {
+            present(error)
+        }
+    }
+
+    func restoreApplePurchases() async {
+        guard session != nil, !isRestoringApplePurchases else { return }
+        isRestoringApplePurchases = true
+        applePurchaseMessage = nil
+        defer { isRestoringApplePurchases = false }
+
+        do {
+            try await appleStore.sync()
+            let updates = await appleStore.currentEntitlements()
+            let transactions = updates.compactMap { update -> AppleStoreTransaction? in
+                guard case let .verified(transaction) = update,
+                      AppleSubscriptionCatalog.productIDs.contains(transaction.productID) else { return nil }
+                return transaction
+            }
+            guard !transactions.isEmpty else {
+                applePurchaseMessage = "No active LibreGuard Pro subscription was found for this Apple Account."
+                return
+            }
+            for transaction in transactions {
+                await processAppleTransaction(transaction, allowTransfer: false)
+                if pendingAppleSubscriptionTransfer != nil { break }
+            }
+        } catch {
+            present(error)
+        }
+    }
+
+    func confirmAppleSubscriptionTransfer(_ transaction: AppleStoreTransaction) async {
+        isRestoringApplePurchases = true
+        defer { isRestoringApplePurchases = false }
+        await processAppleTransaction(transaction, allowTransfer: true)
+    }
+
+    func cancelAppleSubscriptionTransfer() {
+        pendingAppleSubscriptionTransfer = nil
+        applePurchaseMessage = "The Apple subscription remains linked to its previous LibreGuard account."
     }
 
     func refreshServers() {
@@ -714,6 +801,7 @@ final class AppModel: ObservableObject {
         deviceLimitContext = nil
         route = .authenticated
         await refreshAccountData(showErrors: false)
+        await reconcileUnfinishedAppleTransactions()
         if response.warningRecoveryCodes == true {
             presentedError = APIError(message: "A recovery code was used. Generate a new set from Settings.")
         }
@@ -775,6 +863,11 @@ final class AppModel: ObservableObject {
         isRefreshingAccount = false
         isRefreshingServers = false
         retryAfterSeconds = 0
+        processingAppleTransactionIDs.removeAll()
+        pendingAppleSubscriptionTransfer = nil
+        applePurchaseMessage = nil
+        isPurchasingAppleSubscription = false
+        isRestoringApplePurchases = false
         servers = []
         serverLatencies = [:]
         selectedServerID = nil
@@ -785,6 +878,59 @@ final class AppModel: ObservableObject {
         sessionMetrics = nil
         VPNSharedSessionStore.clear()
         route = .login
+    }
+
+    private func startAppleTransactionListener() {
+        guard appleTransactionListenerTask == nil else { return }
+        let updates = appleStore.transactionUpdates()
+        appleTransactionListenerTask = Task { @MainActor [weak self] in
+            for await update in updates {
+                guard let self, !Task.isCancelled else { return }
+                guard self.session != nil else { continue }
+                switch update {
+                case let .verified(transaction) where AppleSubscriptionCatalog.productIDs.contains(transaction.productID):
+                    await self.processAppleTransaction(transaction, allowTransfer: false)
+                case .unverified:
+                    self.applePurchaseMessage = AppleStoreError.unverifiedTransaction.localizedDescription
+                case .verified:
+                    break
+                }
+            }
+        }
+    }
+
+    private func reconcileUnfinishedAppleTransactions() async {
+        guard session != nil else { return }
+        for update in await appleStore.unfinishedTransactions() {
+            guard case let .verified(transaction) = update,
+                  AppleSubscriptionCatalog.productIDs.contains(transaction.productID) else { continue }
+            await processAppleTransaction(transaction, allowTransfer: false)
+            if pendingAppleSubscriptionTransfer != nil { break }
+        }
+    }
+
+    private func processAppleTransaction(_ transaction: AppleStoreTransaction, allowTransfer: Bool) async {
+        guard session != nil,
+              processingAppleTransactionIDs.insert(transaction.id).inserted else { return }
+        defer { processingAppleTransactionIDs.remove(transaction.id) }
+
+        do {
+            let response = try await api.verifyAppleTransaction(
+                transaction.signedTransactionInfo,
+                allowTransfer: allowTransfer
+            )
+            subscription = response.subscription
+            cachePlan(name: response.subscription.displayName, isPro: response.subscription.isPro)
+            usageQuota = try? await api.fetchUsage()
+            await appleStore.finish(transactionID: transaction.id)
+            applePurchaseMessage = response.transferred
+                ? "Your Apple subscription was moved to this LibreGuard account and Pro is now active."
+                : "LibreGuard Pro is now active."
+        } catch let error as APIError where error.code == "APPLE_SUBSCRIPTION_TRANSFER_REQUIRED" && !allowTransfer {
+            pendingAppleSubscriptionTransfer = PendingAppleSubscriptionTransfer(transaction: transaction)
+        } catch {
+            present(error)
+        }
     }
 
     private func reconcileAutoConnectOnLaunch() async {

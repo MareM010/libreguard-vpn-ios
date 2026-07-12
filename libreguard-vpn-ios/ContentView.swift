@@ -9,6 +9,7 @@ import SwiftUI
 import SwiftData
 import CoreImage.CIFilterBuiltins
 import UserNotifications
+import StoreKit
 
 struct ContentView: View {
     @EnvironmentObject private var app: AppModel
@@ -1583,7 +1584,12 @@ private struct QRCodeView: View {
 
 private struct UpgradeView: View {
     @EnvironmentObject private var app: AppModel
+    @State private var isManagingSubscriptions = false
     let onBack: () -> Void
+
+    private var selectedProduct: AppleSubscriptionProduct? {
+        app.appleSubscriptionProducts.first { $0.id == app.selectedAppleProductID }
+    }
 
     var body: some View {
         ScrollView(showsIndicators: false) {
@@ -1611,6 +1617,7 @@ private struct UpgradeView: View {
                     PlanCard(
                         title: "Free Plan",
                         price: "$0",
+                        billingPeriod: "/month",
                         badge: "Current Plan",
                         highlighted: false,
                         features: [
@@ -1625,7 +1632,8 @@ private struct UpgradeView: View {
 
                     PlanCard(
                         title: "Pro Plan",
-                        price: "$4",
+                        price: selectedProduct?.displayPrice ?? "—",
+                        billingPeriod: selectedProduct?.period == .annual ? "/year" : "/month",
                         badge: "Upgrade",
                         highlighted: true,
                         features: [
@@ -1638,25 +1646,63 @@ private struct UpgradeView: View {
                         ]
                     )
 
-                    VStack(spacing: 12) {
-                        PaymentButton(icon: "bitcoinsign.circle", title: "Pay with Monero (XMR)", subtitle: "Recommended for privacy", badge: "Preferred", highlighted: true)
-                        PaymentButton(icon: "creditcard", title: "Pay with Card", subtitle: "Visa, Mastercard, Amex", badge: nil, highlighted: false)
+                    if app.isLoadingAppleSubscriptions {
+                        ProgressView("Loading App Store subscriptions…")
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                    } else {
+                        VStack(spacing: 12) {
+                            ForEach(app.appleSubscriptionProducts) { product in
+                                AppleSubscriptionOption(
+                                    product: product,
+                                    isSelected: app.selectedAppleProductID == product.id,
+                                    action: { app.selectedAppleProductID = product.id }
+                                )
+                            }
+                        }
                     }
 
                     CardContainer {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Label("Why we recommend Monero (XMR)", systemImage: "bitcoinsign.circle")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(Theme.primary)
-                            Text("Monero provides transaction privacy, aligning with LibreGuard's focus on private access. This copy is placeholder content for the visual build.")
+                        VStack(spacing: 12) {
+                            PrimaryButton(
+                                title: app.isPurchasingAppleSubscription ? "Completing Purchase…" : "Subscribe with Apple"
+                            ) {
+                                Task { await app.purchaseSelectedAppleSubscription() }
+                            }
+                            .disabled(selectedProduct == nil || app.isPurchasingAppleSubscription || app.isRestoringApplePurchases)
+
+                            Button(app.isRestoringApplePurchases ? "Restoring…" : "Restore Purchases") {
+                                Task { await app.restoreApplePurchases() }
+                            }
+                            .font(.subheadline.weight(.semibold))
+                            .disabled(app.isPurchasingAppleSubscription || app.isRestoringApplePurchases)
+
+                            if let message = app.applePurchaseMessage {
+                                Text(message)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
+
+                            Text("Payment will be charged to your Apple Account. Subscriptions renew automatically unless canceled at least 24 hours before the end of the current period.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+
+                            HStack(spacing: 18) {
+                                Link("Terms of Service", destination: URL(string: "https://libreguard.net/Terms")!)
+                                Link("Privacy Policy", destination: URL(string: "https://libreguard.net/Privacy")!)
+                            }
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.primary)
                         }
+                        .frame(maxWidth: .infinity)
                     }
                 } else {
                     PlanCard(
                         title: "Pro Plan",
-                        price: "$4",
+                        price: "Active",
+                        billingPeriod: "",
                         badge: "Current Plan",
                         highlighted: true,
                         features: [
@@ -1683,6 +1729,17 @@ private struct UpgradeView: View {
                         }
                     }
 
+                    if app.subscription?.isAppleBilled == true {
+                        Button("Manage Apple Subscription") {
+                            isManagingSubscriptions = true
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(15)
+                        .background(Theme.card, in: RoundedRectangle(cornerRadius: 14))
+                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
+                    }
+
                     MonthlyUsageCard(quota: app.usageQuota)
                 }
             }
@@ -1691,6 +1748,74 @@ private struct UpgradeView: View {
             .frame(maxWidth: .infinity)
         }
         .background(Theme.background.ignoresSafeArea())
+        .task {
+            if app.shouldShowUpgradePrompt { await app.loadAppleSubscriptions() }
+        }
+        .confirmationDialog(
+            "Move Apple subscription to this account?",
+            isPresented: Binding(
+                get: { app.pendingAppleSubscriptionTransfer != nil },
+                set: { if !$0, app.pendingAppleSubscriptionTransfer != nil { app.cancelAppleSubscriptionTransfer() } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Move Subscription", role: .destructive) {
+                guard let transaction = app.pendingAppleSubscriptionTransfer?.transaction else { return }
+                app.pendingAppleSubscriptionTransfer = nil
+                Task { await app.confirmAppleSubscriptionTransfer(transaction) }
+            }
+            Button("Keep on Previous Account", role: .cancel) {
+                app.cancelAppleSubscriptionTransfer()
+            }
+        } message: {
+            Text("Pro access will be removed from the LibreGuard account currently linked to this Apple subscription and activated on the account signed in here.")
+        }
+        .manageSubscriptionsSheet(isPresented: $isManagingSubscriptions)
+    }
+}
+
+private struct AppleSubscriptionOption: View {
+    let product: AppleSubscriptionProduct
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isSelected ? Theme.primary : .secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text(product.period == .annual ? "Annual" : "Monthly")
+                            .font(.subheadline.weight(.semibold))
+                        if product.period == .annual {
+                            Text("BEST VALUE")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(Theme.primary)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(Theme.primary.opacity(0.12), in: Capsule())
+                        }
+                    }
+                    Text(product.period == .annual ? "Billed once per year" : "Billed monthly")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(product.displayPrice)
+                    .font(.headline)
+            }
+            .padding(15)
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 14))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(isSelected ? Theme.primary : Theme.border, lineWidth: isSelected ? 1.5 : 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(product.period == .annual ? "Annual" : "Monthly") subscription, \(product.displayPrice)")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
@@ -2508,6 +2633,7 @@ private struct AccountCard: View {
 private struct PlanCard: View {
     let title: String
     let price: String
+    let billingPeriod: String
     let badge: String
     let highlighted: Bool
     let features: [(String, Bool)]
@@ -2524,7 +2650,7 @@ private struct PlanCard: View {
                             Text(price)
                                 .font(.system(size: 28, weight: .semibold))
                                 .foregroundStyle(highlighted ? Theme.primary : .primary)
-                            Text("/month")
+                            Text(billingPeriod)
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
@@ -2554,42 +2680,6 @@ private struct PlanCard: View {
         }
         .background(highlighted ? Theme.primary.opacity(0.04) : Color.clear, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(highlighted ? Theme.primary : Color.clear, lineWidth: highlighted ? 1.5 : 0))
-    }
-}
-
-private struct PaymentButton: View {
-    let icon: String
-    let title: String
-    let subtitle: String
-    let badge: String?
-    let highlighted: Bool
-
-    var body: some View {
-        Button {} label: {
-            HStack(spacing: 12) {
-                IconBox(systemName: icon, color: highlighted ? Theme.primary : .secondary, background: highlighted ? Theme.primary.opacity(0.14) : Color(.tertiarySystemFill))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title)
-                        .font(.subheadline.weight(.semibold))
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if let badge {
-                    Text(badge)
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(Theme.primary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(Theme.primary.opacity(0.13), in: Capsule())
-                }
-            }
-            .padding(15)
-            .background(Theme.card, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(highlighted ? Theme.primary : Theme.border, lineWidth: highlighted ? 1.5 : 1))
-        }
-        .buttonStyle(ScaleButtonStyle())
     }
 }
 

@@ -683,6 +683,24 @@ struct SubscriptionStatus: Decodable, Equatable {
     var displayName: String {
         planTier.rawValue
     }
+
+    var isAppleBilled: Bool {
+        paymentType?.caseInsensitiveCompare("Apple") == .orderedSame
+    }
+}
+
+struct AppleAccountTokenResponse: Decodable, Equatable {
+    let appAccountToken: UUID
+}
+
+struct AppleTransactionVerificationRequest: Encodable, Equatable {
+    let signedTransactionInfo: String
+    let allowTransfer: Bool
+}
+
+struct AppleTransactionVerificationResponse: Decodable, Equatable {
+    let subscription: SubscriptionStatus
+    let transferred: Bool
 }
 
 extension UsageQuota {
