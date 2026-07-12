@@ -1200,7 +1200,6 @@ private struct SettingsView: View {
                     SettingsSection(title: "Preferences") {
                         ToggleRow(icon: "moon", title: "Dark Mode", subtitle: "Toggle dark theme", isOn: $isDarkMode)
                         ToggleRow(icon: "bell", title: "Notifications", subtitle: "Connection status alerts", isOn: $notifications)
-                        NavigationRow(icon: "character.book.closed", title: "Language", subtitle: "English")
                     }
 
                     SettingsSection(title: "Support") {
