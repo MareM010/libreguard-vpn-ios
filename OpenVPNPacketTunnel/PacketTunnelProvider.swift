@@ -1,3 +1,4 @@
+import ActivityKit
 import Foundation
 import NetworkExtension
 import OSLog
@@ -14,6 +15,13 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
         engine: .tunnelKit,
         canStartConnections: true
     )
+    private var activityUpdateTask: Task<Void, Never>?
+    private var trafficAccumulator = VPNTrafficAccumulator()
+
+    override init() {
+        super.init()
+        dataCountInterval = 1_000
+    }
 
     private var diagnostics: OpenVPNRuntimeDiagnostics {
         diagnosticsLock.lock()
@@ -29,6 +37,7 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
                     diagnostics.connectedAt = Date()
                 }
             }
+            publishReassertingState()
         }
     }
 
@@ -65,6 +74,7 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
                 self.logger.error("OpenVPN tunnel failed to start: \(Self.describe(error))")
             } else {
                 self.logger.info("OpenVPN tunnel connected")
+                self.beginActivityUpdates()
             }
             completionHandler(error)
         }
@@ -73,6 +83,9 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         logger.info("OpenVPN packet tunnel stop requested with reason \(reason.rawValue, privacy: .public)")
         mutateDiagnostics { $0.state = .stopping }
+        activityUpdateTask?.cancel()
+        activityUpdateTask = nil
+        publishFinalState()
         super.stopTunnel(with: reason) { [weak self] in
             self?.mutateDiagnostics { diagnostics in
                 diagnostics.state = .stopped
@@ -99,6 +112,124 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
         diagnosticsLock.lock()
         mutation(&storedDiagnostics)
         diagnosticsLock.unlock()
+    }
+
+    private func beginActivityUpdates() {
+        guard let descriptor = VPNSharedSessionStore.loadDescriptor() else { return }
+        trafficAccumulator = VPNTrafficAccumulator(existingTraffic: VPNSharedSessionStore.loadTraffic())
+        activityUpdateTask?.cancel()
+        activityUpdateTask = Task { [weak self] in
+            guard let self else { return }
+            await VPNNotificationEmitter.emit(VPNNotificationPayload(
+                event: .connected,
+                descriptor: descriptor,
+                traffic: VPNSharedSessionStore.loadTraffic()
+            ))
+
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled else { return }
+                await self.publishCurrentTraffic(descriptor: descriptor)
+            }
+        }
+    }
+
+    private func publishReassertingState() {
+        guard reasserting,
+              let descriptor = VPNSharedSessionStore.loadDescriptor() else { return }
+        let previous = VPNSharedSessionStore.loadTraffic() ?? .zero()
+        let reconnecting = VPNSessionTraffic(
+            state: .reconnecting,
+            downloadedBytes: previous.downloadedBytes,
+            uploadedBytes: previous.uploadedBytes,
+            downloadBitsPerSecond: 0,
+            uploadBitsPerSecond: 0,
+            sampledAt: Date()
+        )
+        VPNSharedSessionStore.save(traffic: reconnecting)
+        Task {
+            await updateActivity(descriptor: descriptor, traffic: reconnecting)
+            if descriptor.killSwitchEnabled {
+                await VPNNotificationEmitter.emit(VPNNotificationPayload(
+                    event: .killSwitch,
+                    descriptor: descriptor,
+                    traffic: reconnecting
+                ))
+            }
+        }
+    }
+
+    private func publishFinalState() {
+        guard let descriptor = VPNSharedSessionStore.loadDescriptor() else { return }
+        let previous = VPNSharedSessionStore.loadTraffic() ?? .zero()
+        let final = VPNSessionTraffic(
+            state: .disconnected,
+            downloadedBytes: previous.downloadedBytes,
+            uploadedBytes: previous.uploadedBytes,
+            downloadBitsPerSecond: 0,
+            uploadBitsPerSecond: 0,
+            sampledAt: Date()
+        )
+        let intent = VPNSharedSessionStore.loadDisconnectIntent()
+        Task {
+            await endActivity(descriptor: descriptor, traffic: final)
+            guard intent != .suppress else { return }
+            let event: VPNNotificationEvent = descriptor.killSwitchEnabled && intent == nil
+                ? .killSwitch
+                : .disconnected
+            await VPNNotificationEmitter.emit(VPNNotificationPayload(
+                event: event,
+                descriptor: descriptor,
+                traffic: final
+            ))
+        }
+    }
+
+    private func publishCurrentTraffic(descriptor: VPNSessionDescriptor) async {
+        guard let defaults = UserDefaults(suiteName: VPNSharedConstants.appGroupIdentifier),
+              let counts = defaults.array(forKey: "TunnelKitDataCount") as? [Int],
+              counts.count == 2 else { return }
+
+        let now = Date()
+        let snapshot = TunnelTrafficSnapshot(
+            downloadedBytes: Int64(max(0, counts[0])),
+            uploadedBytes: Int64(max(0, counts[1]))
+        )
+        let state: VPNActivityConnectionState = reasserting ? .reconnecting : .connected
+        let traffic = trafficAccumulator.consume(snapshot, at: now, state: state)
+        VPNSharedSessionStore.save(traffic: traffic)
+        await updateActivity(descriptor: descriptor, traffic: traffic)
+    }
+
+    private func updateActivity(
+        descriptor: VPNSessionDescriptor,
+        traffic: VPNSessionTraffic
+    ) async {
+        guard let activity = Activity<VPNActivityAttributes>.activities.first(where: {
+            $0.attributes.sessionID == descriptor.sessionID
+        }) else { return }
+        await activity.update(ActivityContent(
+            state: VPNActivityAttributes.ContentState(traffic: traffic),
+            staleDate: traffic.sampledAt.addingTimeInterval(15),
+            relevanceScore: traffic.state == .reconnecting ? 110 : 100
+        ))
+    }
+
+    private func endActivity(
+        descriptor: VPNSessionDescriptor,
+        traffic: VPNSessionTraffic
+    ) async {
+        guard let activity = Activity<VPNActivityAttributes>.activities.first(where: {
+            $0.attributes.sessionID == descriptor.sessionID
+        }) else { return }
+        await activity.end(
+            ActivityContent(
+                state: VPNActivityAttributes.ContentState(traffic: traffic),
+                staleDate: nil,
+                relevanceScore: 0
+            ),
+            dismissalPolicy: .immediate
+        )
     }
 
     private static func describe(_ error: Error) -> String {

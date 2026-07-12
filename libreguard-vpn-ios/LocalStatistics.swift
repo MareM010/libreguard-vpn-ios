@@ -122,18 +122,6 @@ extension ByteCountFormatter {
     }
 }
 
-struct TunnelTrafficSnapshot: Equatable {
-    let downloadedBytes: Int64
-    let uploadedBytes: Int64
-
-    func delta(from baseline: TunnelTrafficSnapshot) -> TunnelTrafficSnapshot {
-        TunnelTrafficSnapshot(
-            downloadedBytes: max(0, downloadedBytes - baseline.downloadedBytes),
-            uploadedBytes: max(0, uploadedBytes - baseline.uploadedBytes)
-        )
-    }
-}
-
 protocol TunnelTrafficSampling {
     func currentSnapshot() -> TunnelTrafficSnapshot?
 }

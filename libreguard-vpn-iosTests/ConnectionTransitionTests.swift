@@ -309,11 +309,66 @@ struct ConnectionTransitionTests {
         }
     }
 
+    @Test func connectionLifecycleEmitsConnectedAndDisconnectedEvents() async throws {
+        let manager = ControlledVPNManager()
+        let notifier = RecordingVPNEventNotifier()
+        let sampler = ScriptedTrafficSampler([
+            TunnelTrafficSnapshot(downloadedBytes: 100, uploadedBytes: 40),
+            TunnelTrafficSnapshot(downloadedBytes: 460, uploadedBytes: 160)
+        ])
+        let app = makeApp(
+            manager: manager,
+            servers: [try makeServer(id: 12)],
+            sampler: sampler,
+            eventNotifier: notifier
+        )
+        app.session = makeSession(userId: "events-user")
+
+        app.requestConnectionToSelectedServer()
+        await settle()
+        manager.emit(.connected)
+        await settle()
+        await app.disconnectVPN()
+        await settle()
+
+        #expect(notifier.events == [.connected, .disconnected])
+        #expect(notifier.payloads.last?.traffic?.downloadedBytes == 360)
+        #expect(notifier.payloads.last?.traffic?.uploadedBytes == 120)
+    }
+
+    @Test func autoConnectAndKillSwitchIncidentsEmitDedicatedEvents() async throws {
+        let manager = ControlledVPNManager()
+        let notifier = RecordingVPNEventNotifier()
+        let app = makeApp(
+            manager: manager,
+            servers: [try makeServer(id: 13)],
+            sampler: ScriptedTrafficSampler([
+                TunnelTrafficSnapshot(downloadedBytes: 0, uploadedBytes: 0)
+            ]),
+            eventNotifier: notifier
+        )
+        app.session = makeSession(userId: "safety-user")
+        app.subscription = try makeSubscription(isPro: true)
+        await app.setKillSwitchEnabled(true)
+
+        app.requestQuickConnect(origin: .autoConnect)
+        await settle()
+        manager.emit(.connected)
+        await settle()
+        manager.emit(.reasserting)
+        await settle()
+
+        #expect(notifier.events.contains(.autoConnect))
+        #expect(notifier.events.contains(.connected))
+        #expect(notifier.events.contains(.killSwitch))
+    }
+
     private func makeApp(
         manager: VPNManaging,
         servers: [VPNServer],
         recorder: LocalStatisticsRecording? = nil,
         sampler: TunnelTrafficSampling = ScriptedTrafficSampler([]),
+        eventNotifier: VPNEventNotifying? = nil,
         defaults: UserDefaults? = nil
     ) -> AppModel {
         let defaults = defaults ?? UserDefaults(suiteName: UUID().uuidString)!
@@ -321,6 +376,7 @@ struct ConnectionTransitionTests {
             vpnManager: manager,
             statisticsRecorder: recorder,
             trafficSampler: sampler,
+            eventNotifier: eventNotifier,
             defaults: defaults
         )
         app.servers = servers
@@ -519,5 +575,15 @@ private final class ScriptedTrafficSampler: TunnelTrafficSampling {
         let snapshot = snapshots[min(index, snapshots.count - 1)]
         index += 1
         return snapshot
+    }
+}
+
+@MainActor
+private final class RecordingVPNEventNotifier: VPNEventNotifying {
+    private(set) var payloads: [VPNNotificationPayload] = []
+    var events: [VPNNotificationEvent] { payloads.map(\.event) }
+
+    func emit(_ payload: VPNNotificationPayload) async {
+        payloads.append(payload)
     }
 }

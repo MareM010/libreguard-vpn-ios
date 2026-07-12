@@ -178,6 +178,26 @@ final class OpenVPNManager: VPNManaging {
         return response.diagnostics
     }
 
+    func currentTrafficSnapshot() async -> TunnelTrafficSnapshot? {
+        guard status.isConnected,
+              let providerSession = manager.connection as? NETunnelProviderSession else {
+            return nil
+        }
+
+        do {
+            let data = try await sendProviderMessage(Data([0xfe]), through: providerSession)
+            guard data.count == 16 else { return nil }
+            let inbound = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0, as: UInt64.self) }
+            let outbound = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt64.self) }
+            return TunnelTrafficSnapshot(
+                downloadedBytes: Int64(clamping: inbound),
+                uploadedBytes: Int64(clamping: outbound)
+            )
+        } catch {
+            return nil
+        }
+    }
+
     private func observeStatusChanges() {
         statusObserver = NotificationCenter.default.addObserver(
             forName: Notification.Name.NEVPNStatusDidChange,
@@ -210,8 +230,15 @@ final class OpenVPNManager: VPNManaging {
         guard let providerSession = manager.connection as? NETunnelProviderSession else {
             throw OpenVPNProviderMessageError.invalidMessage
         }
+        let responseData = try await sendProviderMessage(requestData, through: providerSession)
+        return try OpenVPNProviderMessageCodec.decodeResponse(from: responseData)
+    }
 
-        let responseData = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+    private func sendProviderMessage(
+        _ requestData: Data,
+        through providerSession: NETunnelProviderSession
+    ) async throws -> Data {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
             do {
                 try providerSession.sendProviderMessage(requestData) { data in
                     guard let data else {
@@ -224,8 +251,6 @@ final class OpenVPNManager: VPNManaging {
                 continuation.resume(throwing: error)
             }
         }
-
-        return try OpenVPNProviderMessageCodec.decodeResponse(from: responseData)
     }
 
     private func updateStatus(from neStatus: NEVPNStatus) {

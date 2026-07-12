@@ -8,6 +8,7 @@
 import SwiftUI
 import SwiftData
 import CoreImage.CIFilterBuiltins
+import UserNotifications
 
 struct ContentView: View {
     @EnvironmentObject private var app: AppModel
@@ -107,6 +108,7 @@ struct ContentView: View {
                 await app.refreshAccountData(showErrors: false)
                 app.refreshServers()
                 await app.refreshVPNStatus()
+                await app.refreshNotificationAuthorizationStatus()
             }
         }
     }
@@ -763,10 +765,46 @@ private struct DashboardView: View {
     private var connectedStats: some View {
         if status.isConnected {
             VStack(spacing: 22) {
-                HStack(spacing: 10) {
-                    StatMini(icon: "clock", value: "00:12:48", label: "Duration")
-                    StatMini(icon: "speedometer", value: "12.8 Mbps", label: "Speed")
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
+                    SessionDurationStat(connectedAt: app.sessionMetrics?.descriptor.connectedAt)
+                    StatMini(
+                        icon: "arrow.down",
+                        value: VPNTrafficFormatting.bitRate(app.sessionMetrics?.traffic.downloadBitsPerSecond ?? 0),
+                        label: "Download"
+                    )
+                    StatMini(
+                        icon: "arrow.up",
+                        value: VPNTrafficFormatting.bitRate(app.sessionMetrics?.traffic.uploadBitsPerSecond ?? 0),
+                        label: "Upload"
+                    )
                     StatMini(icon: "globe", value: selectedServer?.city ?? selectedServer?.country ?? "Auto", label: "Location")
+                }
+
+                CardContainer {
+                    VStack(spacing: 12) {
+                        HStack {
+                            Text("Current Session Traffic")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            Text(app.sessionMetrics?.descriptor.protocolName ?? app.selectedVPNProtocol.displayName)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        HStack(spacing: 20) {
+                            SessionTrafficTotal(
+                                icon: "arrow.down.circle.fill",
+                                title: "Downloaded",
+                                bytes: app.sessionMetrics?.traffic.downloadedBytes ?? 0,
+                                color: Theme.blueBar
+                            )
+                            SessionTrafficTotal(
+                                icon: "arrow.up.circle.fill",
+                                title: "Uploaded",
+                                bytes: app.sessionMetrics?.traffic.uploadedBytes ?? 0,
+                                color: Theme.purpleBar
+                            )
+                        }
+                    }
                 }
 
                 CardContainer {
@@ -1126,7 +1164,6 @@ private struct SettingsView: View {
     @State private var showTwoFactorManagement = false
     @State private var showProtocolSelection = false
     @State private var threatProtection = true
-    @State private var notifications = true
 
     let onUpgrade: () -> Void
     let onSignOut: () -> Void
@@ -1206,7 +1243,17 @@ private struct SettingsView: View {
 
                     SettingsSection(title: "Preferences") {
                         ToggleRow(icon: "moon", title: "Dark Mode", subtitle: "Toggle dark theme", isOn: $isDarkMode)
-                        ToggleRow(icon: "bell", title: "Notifications", subtitle: "Connection status alerts", isOn: $notifications)
+                        NavigationRow(
+                            icon: "bell",
+                            title: "Notifications",
+                            subtitle: notificationSubtitle
+                        ) {
+                            if app.notificationAuthorizationStatus == .notDetermined {
+                                Task { await app.requestNotificationAuthorizationIfNeeded() }
+                            } else {
+                                app.openNotificationSettings()
+                            }
+                        }
                     }
 
                     SettingsSection(title: "Support") {
@@ -1253,6 +1300,7 @@ private struct SettingsView: View {
             }
         }
         .background(Theme.background)
+        .task { await app.refreshNotificationAuthorizationStatus() }
         .sheet(isPresented: $showTwoFactorManagement) {
             TwoFactorManagementView()
         }
@@ -1275,6 +1323,19 @@ private struct SettingsView: View {
             return "Armed • Activates on your next VPN connection"
         case .active:
             return "Active • Traffic is blocked if the VPN drops"
+        }
+    }
+
+    private var notificationSubtitle: String {
+        switch app.notificationAuthorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            return "Enabled • Connection and safety alerts"
+        case .denied:
+            return "Disabled • Tap to open system settings"
+        case .notDetermined:
+            return "Tap to enable connection and safety alerts"
+        @unknown default:
+            return "Manage in system settings"
         }
     }
 }
@@ -2057,6 +2118,50 @@ private struct StatMini: View {
             Text(label)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private struct SessionDurationStat: View {
+    let connectedAt: Date?
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            StatMini(
+                icon: "clock",
+                value: durationString(at: context.date),
+                label: "Duration"
+            )
+        }
+    }
+
+    private func durationString(at date: Date) -> String {
+        guard let connectedAt else { return "00:00:00" }
+        let seconds = max(0, Int(date.timeIntervalSince(connectedAt)))
+        return String(format: "%02d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+    }
+}
+
+private struct SessionTrafficTotal: View {
+    let icon: String
+    let title: String
+    let bytes: Int64
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: icon)
+                .foregroundStyle(color)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(VPNTrafficFormatting.byteCount(bytes))
+                    .font(.subheadline.weight(.semibold))
+                    .monospacedDigit()
+                Text(title)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity)
     }

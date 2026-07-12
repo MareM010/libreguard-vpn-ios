@@ -138,6 +138,11 @@ final class VPNManagerCoordinator: VPNManaging {
         reconcileStatus()
     }
 
+    func currentTrafficSnapshot() async -> TunnelTrafficSnapshot? {
+        guard let activeProtocol else { return nil }
+        return await manager(for: activeProtocol).currentTrafficSnapshot()
+    }
+
     private func handleStatusChange(from protocolName: VPNConfigurationProtocol) {
         if let activeProtocol,
            manager(for: activeProtocol) !== manager(for: protocolName),

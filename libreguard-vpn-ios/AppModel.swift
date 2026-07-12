@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import UserNotifications
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -28,6 +29,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var killSwitchActivationState: KillSwitchActivationState
     @Published private(set) var isUpdatingKillSwitch = false
     @Published var isKillSwitchDisconnectConfirmationPresented = false
+    @Published private(set) var sessionMetrics: VPNSessionMetrics?
+    @Published private(set) var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
     @Published var retryAfterSeconds = 0
 
     private let api: BackendServicing
@@ -38,6 +41,9 @@ final class AppModel: ObservableObject {
     private let protocolSelectionStore: VPNProtocolSelectionStoring
     private let statisticsRecorder: LocalStatisticsRecording?
     private let trafficSampler: TunnelTrafficSampling
+    private let notificationService: VPNNotificationService
+    private let eventNotifier: VPNEventNotifying
+    private let liveActivityController: VPNLiveActivityControlling
     private let pendingRegistrationKey = "pending.registration"
     private let cachedPlanNameKey = "cached.plan.name"
     private let cachedPlanIsProKey = "cached.plan.isPro"
@@ -49,10 +55,14 @@ final class AppModel: ObservableObject {
     private var serverRefreshTask: Task<Void, Never>?
     private var retryCountdownTask: Task<Void, Never>?
     private var vpnTransitionTask: Task<Void, Never>?
+    private var trafficMonitorTask: Task<Void, Never>?
+    private var liveActivityUpdateCounter = 0
     private var vpnTransitionGeneration: UInt = 0
     private var activeVPNTransition: VPNTransitionRequest?
     private var pendingStatisticsRequest: VPNConnectRequest?
     private var activeStatisticsSession: ActiveStatisticsSession?
+    private var isExplicitDisconnectInProgress = false
+    private var killSwitchIncidentSessionID: UUID?
     private var queuedVPNConnectRequest: VPNConnectRequest? {
         didSet {
             hasQueuedVPNReconnect = queuedVPNConnectRequest != nil
@@ -67,6 +77,9 @@ final class AppModel: ObservableObject {
         protocolSelectionStore: VPNProtocolSelectionStoring? = nil,
         statisticsRecorder: LocalStatisticsRecording? = nil,
         trafficSampler: TunnelTrafficSampling = SystemTunnelTrafficSampler(),
+        notificationService: VPNNotificationService? = nil,
+        eventNotifier: VPNEventNotifying? = nil,
+        liveActivityController: VPNLiveActivityControlling? = nil,
         defaults: UserDefaults = .standard
     ) {
         let resolvedAPI = api ?? APIClient()
@@ -76,6 +89,12 @@ final class AppModel: ObservableObject {
         self.protocolSelectionStore = protocolSelectionStore ?? UserDefaultsVPNProtocolSelectionStore(defaults: defaults)
         self.statisticsRecorder = statisticsRecorder
         self.trafficSampler = trafficSampler
+        self.notificationService = notificationService ?? VPNNotificationService()
+        let isTesting = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        self.eventNotifier = eventNotifier ?? (isTesting ? NoOpVPNEventNotifier() : SystemVPNEventNotifier())
+        self.liveActivityController = liveActivityController ?? (isTesting
+            ? NoOpVPNLiveActivityController()
+            : VPNLiveActivityController())
         self.selectedVPNProtocol = self.protocolSelectionStore.selectedProtocol
         self.isAutoConnectEnabled = defaults.bool(forKey: "vpn.autoConnect.enabled")
         self.isKillSwitchEnabled = defaults.bool(forKey: "vpn.killSwitch.enabled")
@@ -102,6 +121,7 @@ final class AppModel: ObservableObject {
 
     func start() async {
         guard case .launching = route else { return }
+        await refreshNotificationAuthorizationStatus()
         if ProcessInfo.processInfo.arguments.contains("--uitesting-reset") {
             api.clearLocalSession()
             clearCachedPlan()
@@ -109,15 +129,26 @@ final class AppModel: ObservableObject {
             persistAutoConnectEnabled(false)
             persistKillSwitch(enabled: false, activation: .off)
             await vpn.disconnectAndForget()
+            await liveActivityController.endAll()
+            VPNSharedSessionStore.clear()
             route = .login
             return
         }
         await vpn.refreshStatus()
+        if vpnStatus == .disconnected || vpnStatus == .invalid {
+            await liveActivityController.endAll()
+            VPNSharedSessionStore.clear()
+        }
         if api.storedSession != nil {
             do {
                 session = try await api.restoreSession()
                 route = .authenticated
                 await refreshAccountData(showErrors: false)
+                if vpnStatus.isConnected {
+                    refreshServers()
+                    await serverRefreshTask?.value
+                    restoreActiveSessionIfNeeded()
+                }
                 await reconcileKillSwitchOnLaunch()
                 await reconcileAutoConnectOnLaunch()
                 return
@@ -360,6 +391,7 @@ final class AppModel: ObservableObject {
 
         do {
             if enabled {
+                await requestNotificationAuthorizationIfNeeded()
                 if vpnStatus.isConnected || vpnStatus.isBusy {
                     let configured = try await vpn.apply(policy: currentConnectionPolicy(autoConnectOverride: true))
                     if isKillSwitchEnabled, configured {
@@ -381,7 +413,8 @@ final class AppModel: ObservableObject {
                             server: server,
                             protocolName: effectiveConnectionProtocol(),
                             onDemandEnabled: true,
-                            killSwitchEnabled: isKillSwitchEnabled
+                            killSwitchEnabled: isKillSwitchEnabled,
+                            origin: .autoConnect
                         )
                     )
                     await vpnTransitionTask?.value
@@ -496,11 +529,13 @@ final class AppModel: ObservableObject {
     }
 
     func signOut() async {
+        isExplicitDisconnectInProgress = true
+        await refreshTrafficMetricsOnce(updateLiveActivity: true)
         cancelActiveVPNTransition()
         persistAutoConnectEnabled(false)
         persistKillSwitch(enabled: false, activation: .off)
         await vpn.disconnectAndForget()
-        persistActiveStatisticsSessionIfNeeded(endedAt: Date())
+        persistActiveStatisticsSessionIfNeeded(endedAt: Date(), notifyDisconnect: true)
         await api.logout()
         google.signOut()
         clearSessionState()
@@ -539,12 +574,13 @@ final class AppModel: ObservableObject {
                 server: server,
                 protocolName: effectiveConnectionProtocol(),
                 onDemandEnabled: currentConnectionPolicy().onDemandEnabled,
-                killSwitchEnabled: isKillSwitchEnabled
+                killSwitchEnabled: isKillSwitchEnabled,
+                origin: .manual
             )
         )
     }
 
-    func requestQuickConnect() {
+    func requestQuickConnect(origin: VPNConnectionOrigin = .quickConnect) {
         guard let server = QuickConnectRanker.bestServer(
             in: servers,
             latencies: serverLatencies,
@@ -559,7 +595,8 @@ final class AppModel: ObservableObject {
                 server: server,
                 protocolName: effectiveConnectionProtocol(),
                 onDemandEnabled: currentConnectionPolicy().onDemandEnabled,
-                killSwitchEnabled: isKillSwitchEnabled
+                killSwitchEnabled: isKillSwitchEnabled,
+                origin: origin
             )
         )
         refreshServers()
@@ -613,6 +650,9 @@ final class AppModel: ObservableObject {
     func handleOpenURL(_ url: URL) {
         guard url.scheme?.lowercased() == "libreguardvpn" else {
             _ = google.handle(url: url)
+            return
+        }
+        if url.host?.lowercased() == "vpn", url.path == "/status" {
             return
         }
         guard url.host?.lowercased() == "account",
@@ -706,10 +746,11 @@ final class AppModel: ObservableObject {
     }
 
     private func forceSignOut() {
+        isExplicitDisconnectInProgress = true
         cancelActiveVPNTransition()
         persistAutoConnectEnabled(false)
         persistKillSwitch(enabled: false, activation: .off)
-        persistActiveStatisticsSessionIfNeeded(endedAt: Date())
+        persistActiveStatisticsSessionIfNeeded(endedAt: Date(), notifyDisconnect: true)
         Task { await vpn.disconnectAndForget() }
         clearSessionState()
     }
@@ -720,6 +761,8 @@ final class AppModel: ObservableObject {
         cancelActiveVPNTransition()
         serverRefreshTask = nil
         retryCountdownTask = nil
+        trafficMonitorTask?.cancel()
+        trafficMonitorTask = nil
         clearCachedPlan()
         api.clearLocalSession()
         session = nil
@@ -739,6 +782,8 @@ final class AppModel: ObservableObject {
         deviceLimitContext = nil
         pendingStatisticsRequest = nil
         activeStatisticsSession = nil
+        sessionMetrics = nil
+        VPNSharedSessionStore.clear()
         route = .login
     }
 
@@ -749,7 +794,7 @@ final class AppModel: ObservableObject {
         await serverRefreshTask?.value
         guard isAutoConnectEnabled,
               vpnStatus == .disconnected || vpnStatus == .invalid else { return }
-        requestQuickConnect()
+        requestQuickConnect(origin: .autoConnect)
     }
 
     private func reconcileKillSwitchOnLaunch() async {
@@ -833,11 +878,26 @@ final class AppModel: ObservableObject {
         let generation = vpnTransitionGeneration
         activeVPNTransition = .connect(request)
         pendingStatisticsRequest = request
+        isExplicitDisconnectInProgress = false
+        killSwitchIncidentSessionID = nil
         vpnStatus = .connecting
+        VPNSharedSessionStore.saveDisconnectIntent(nil)
+        VPNSharedSessionStore.save(
+            descriptor: makeSessionDescriptor(for: request, connectedAt: Date())
+        )
 
         vpnTransitionTask = Task { [weak self] in
             guard let self else { return }
             do {
+                await requestNotificationAuthorizationIfNeeded()
+                if request.origin == .autoConnect || request.origin == .onDemand {
+                    let descriptor = makeSessionDescriptor(for: request, connectedAt: Date())
+                    await eventNotifier.emit(VPNNotificationPayload(
+                        event: .autoConnect,
+                        descriptor: descriptor,
+                        traffic: nil
+                    ))
+                }
                 try await vpn.connect(
                     to: request.server,
                     protocol: request.protocolName,
@@ -872,10 +932,13 @@ final class AppModel: ObservableObject {
         vpnTransitionGeneration &+= 1
         let generation = vpnTransitionGeneration
         activeVPNTransition = .disconnect
+        isExplicitDisconnectInProgress = true
+        VPNSharedSessionStore.saveDisconnectIntent(preservingQueuedConnection ? .suppress : .notify)
         vpnStatus = .disconnecting
 
         vpnTransitionTask = Task { [weak self] in
             guard let self else { return }
+            await refreshTrafficMetricsOnce(updateLiveActivity: true)
             await vpn.disconnect()
             guard generation == vpnTransitionGeneration, !Task.isCancelled else { return }
             activeVPNTransition = nil
@@ -898,19 +961,56 @@ final class AppModel: ObservableObject {
             return
         }
 
+        let previousStatus = vpnStatus
         vpnStatus = status
 
         switch status {
         case .invalid, .disconnected:
             activeVPNTransition = nil
-            persistActiveStatisticsSessionIfNeeded(endedAt: Date())
+            if let active = activeStatisticsSession,
+               active.descriptor.killSwitchEnabled,
+               !isExplicitDisconnectInProgress,
+               killSwitchIncidentSessionID != active.descriptor.sessionID {
+                triggerKillSwitchNotification(for: active)
+            }
+            let hasQueuedConnection = queuedVPNConnectRequest != nil
+            let suppressDisconnect = hasQueuedConnection
+                || killSwitchIncidentSessionID == activeStatisticsSession?.descriptor.sessionID
+            persistActiveStatisticsSessionIfNeeded(
+                endedAt: Date(),
+                notifyDisconnect: !suppressDisconnect
+            )
+            isExplicitDisconnectInProgress = false
             guard let queuedRequest = queuedVPNConnectRequest else { return }
             queuedVPNConnectRequest = nil
             beginConnect(queuedRequest)
         case .connected:
             activeVPNTransition = nil
-            beginStatisticsSessionIfNeeded()
-        case .connecting, .reasserting, .disconnecting:
+            if previousStatus == .reasserting, let metrics = sessionMetrics {
+                publishSessionMetrics(metrics.replacingState(.connected))
+            } else {
+                beginStatisticsSessionIfNeeded()
+            }
+        case .reasserting:
+            if let active = activeStatisticsSession {
+                let reconnecting = VPNSessionMetrics(
+                    descriptor: active.descriptor,
+                    traffic: active.traffic
+                ).replacingState(.reconnecting)
+                publishSessionMetrics(reconnecting)
+                Task { [liveActivityController] in
+                    await liveActivityController.update(
+                        descriptor: reconnecting.descriptor,
+                        traffic: reconnecting.traffic
+                    )
+                }
+                if active.descriptor.killSwitchEnabled,
+                   !isExplicitDisconnectInProgress,
+                   killSwitchIncidentSessionID != active.descriptor.sessionID {
+                    triggerKillSwitchNotification(for: active)
+                }
+            }
+        case .connecting, .disconnecting:
             break
         }
     }
@@ -922,6 +1022,11 @@ final class AppModel: ObservableObject {
         activeVPNTransition = nil
         queuedVPNConnectRequest = nil
         pendingStatisticsRequest = nil
+        trafficMonitorTask?.cancel()
+        trafficMonitorTask = nil
+        if activeStatisticsSession == nil {
+            VPNSharedSessionStore.clear()
+        }
     }
 
     private func cachePlan(name: String, isPro: Bool) {
@@ -967,8 +1072,9 @@ private extension AppModel {
         let userId: String
         let server: VPNServer
         let protocolName: VPNConfigurationProtocol
-        let connectedAt: Date
-        let baselineSnapshot: TunnelTrafficSnapshot?
+        let descriptor: VPNSessionDescriptor
+        var accumulator: VPNTrafficAccumulator
+        var traffic: VPNSessionTraffic
     }
 
     func beginStatisticsSessionIfNeeded() {
@@ -978,44 +1084,217 @@ private extension AppModel {
             return
         }
 
+        let descriptor: VPNSessionDescriptor
+        if let storedDescriptor = VPNSharedSessionStore.loadDescriptor(),
+           storedDescriptor.sessionID == request.sessionID {
+            descriptor = storedDescriptor
+        } else {
+            descriptor = makeSessionDescriptor(for: request, connectedAt: Date())
+        }
+        let connectedAt = descriptor.connectedAt
+        let initialTraffic = VPNSessionTraffic.zero(at: connectedAt)
         activeStatisticsSession = ActiveStatisticsSession(
             userId: userId,
             server: request.server,
             protocolName: request.protocolName,
-            connectedAt: Date(),
-            baselineSnapshot: trafficSampler.currentSnapshot()
+            descriptor: descriptor,
+            accumulator: VPNTrafficAccumulator(),
+            traffic: initialTraffic
         )
         pendingStatisticsRequest = nil
+        publishSessionMetrics(VPNSessionMetrics(descriptor: descriptor, traffic: initialTraffic))
+        startTrafficMonitoring(emitConnectedNotification: true)
     }
 
-    func persistActiveStatisticsSessionIfNeeded(endedAt: Date) {
+    func restoreActiveSessionIfNeeded() {
+        guard activeStatisticsSession == nil,
+              vpnStatus.isConnected,
+              let userId = session?.userId,
+              let descriptor = VPNSharedSessionStore.loadDescriptor(),
+              let server = servers.first(where: { $0.id == descriptor.serverID }) else { return }
+
+        let traffic = VPNSharedSessionStore.loadTraffic() ?? .zero(at: descriptor.connectedAt)
+        let protocolName = VPNConfigurationProtocol.allCases.first(where: {
+            $0.displayName.caseInsensitiveCompare(descriptor.protocolName) == .orderedSame
+                || ($0 == .ikev2 && descriptor.protocolName == "IKEv2/IPSec")
+        }) ?? .ikev2
+        activeStatisticsSession = ActiveStatisticsSession(
+            userId: userId,
+            server: server,
+            protocolName: protocolName,
+            descriptor: descriptor,
+            accumulator: VPNTrafficAccumulator(existingTraffic: traffic),
+            traffic: traffic
+        )
+        publishSessionMetrics(VPNSessionMetrics(descriptor: descriptor, traffic: traffic))
+        startTrafficMonitoring(emitConnectedNotification: false)
+    }
+
+    func startTrafficMonitoring(emitConnectedNotification: Bool) {
+        trafficMonitorTask?.cancel()
+        liveActivityUpdateCounter = 0
+        trafficMonitorTask = Task { [weak self] in
+            guard let self else { return }
+            await refreshTrafficMetricsOnce(updateLiveActivity: false)
+            guard let active = activeStatisticsSession else { return }
+            await liveActivityController.start(descriptor: active.descriptor, traffic: active.traffic)
+            if emitConnectedNotification {
+                await eventNotifier.emit(VPNNotificationPayload(
+                    event: .connected,
+                    descriptor: active.descriptor,
+                    traffic: active.traffic
+                ))
+            }
+
+            while !Task.isCancelled, vpnStatus.isConnected {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                liveActivityUpdateCounter += 1
+                await refreshTrafficMetricsOnce(
+                    updateLiveActivity: liveActivityUpdateCounter.isMultiple(of: 5)
+                )
+            }
+        }
+    }
+
+    func refreshTrafficMetricsOnce(updateLiveActivity: Bool) async {
+        guard let sessionID = activeStatisticsSession?.descriptor.sessionID else { return }
+        let snapshot = await vpn.currentTrafficSnapshot() ?? trafficSampler.currentSnapshot()
+        guard let snapshot,
+              var active = activeStatisticsSession,
+              active.descriptor.sessionID == sessionID else { return }
+
+        active.traffic = active.accumulator.consume(snapshot, at: Date())
+        activeStatisticsSession = active
+        let metrics = VPNSessionMetrics(descriptor: active.descriptor, traffic: active.traffic)
+        publishSessionMetrics(metrics)
+        if updateLiveActivity {
+            await liveActivityController.update(descriptor: active.descriptor, traffic: active.traffic)
+        }
+    }
+
+    func publishSessionMetrics(_ metrics: VPNSessionMetrics) {
+        sessionMetrics = metrics
+        if var active = activeStatisticsSession,
+           active.descriptor.sessionID == metrics.descriptor.sessionID {
+            active.traffic = metrics.traffic
+            activeStatisticsSession = active
+        }
+        VPNSharedSessionStore.save(descriptor: metrics.descriptor)
+        VPNSharedSessionStore.save(traffic: metrics.traffic)
+    }
+
+    func persistActiveStatisticsSessionIfNeeded(
+        endedAt: Date,
+        notifyDisconnect: Bool = true
+    ) {
         guard let activeStatisticsSession else {
             pendingStatisticsRequest = nil
+            VPNSharedSessionStore.clear()
             return
         }
 
-        defer {
-            self.activeStatisticsSession = nil
-            self.pendingStatisticsRequest = nil
-        }
+        trafficMonitorTask?.cancel()
+        trafficMonitorTask = nil
+        let finalTraffic = VPNSessionTraffic(
+            state: .disconnected,
+            downloadedBytes: activeStatisticsSession.traffic.downloadedBytes,
+            uploadedBytes: activeStatisticsSession.traffic.uploadedBytes,
+            downloadBitsPerSecond: 0,
+            uploadBitsPerSecond: 0,
+            sampledAt: endedAt
+        )
+        let finalMetrics = VPNSessionMetrics(
+            descriptor: activeStatisticsSession.descriptor,
+            traffic: finalTraffic
+        )
+        sessionMetrics = finalMetrics
 
-        guard let statisticsRecorder else { return }
-
-        let snapshot = trafficSampler.currentSnapshot()
-        let totals = if let baseline = activeStatisticsSession.baselineSnapshot, let snapshot {
-            snapshot.delta(from: baseline)
-        } else {
-            TunnelTrafficSnapshot(downloadedBytes: 0, uploadedBytes: 0)
-        }
-
-        try? statisticsRecorder.record(
+        if let statisticsRecorder {
+            try? statisticsRecorder.record(
             userId: activeStatisticsSession.userId,
-            connectedAt: activeStatisticsSession.connectedAt,
-            disconnectedAt: max(endedAt, activeStatisticsSession.connectedAt),
+            connectedAt: activeStatisticsSession.descriptor.connectedAt,
+            disconnectedAt: max(endedAt, activeStatisticsSession.descriptor.connectedAt),
             server: activeStatisticsSession.server,
             protocolName: activeStatisticsSession.protocolName,
-            downloadedBytes: totals.downloadedBytes,
-            uploadedBytes: totals.uploadedBytes
+            downloadedBytes: finalTraffic.downloadedBytes,
+            uploadedBytes: finalTraffic.uploadedBytes
+            )
+        }
+
+        Task { [liveActivityController, eventNotifier] in
+            await liveActivityController.end(
+                descriptor: activeStatisticsSession.descriptor,
+                traffic: finalTraffic
+            )
+            if notifyDisconnect {
+                await eventNotifier.emit(VPNNotificationPayload(
+                    event: .disconnected,
+                    descriptor: activeStatisticsSession.descriptor,
+                    traffic: finalTraffic
+                ))
+            }
+        }
+
+        VPNSharedSessionStore.clear()
+        self.activeStatisticsSession = nil
+        pendingStatisticsRequest = nil
+    }
+
+    func triggerKillSwitchNotification(for active: ActiveStatisticsSession) {
+        killSwitchIncidentSessionID = active.descriptor.sessionID
+        let reconnecting = VPNSessionMetrics(
+            descriptor: active.descriptor,
+            traffic: active.traffic
+        ).replacingState(.reconnecting)
+        publishSessionMetrics(reconnecting)
+        Task { [liveActivityController, eventNotifier] in
+            await liveActivityController.update(
+                descriptor: reconnecting.descriptor,
+                traffic: reconnecting.traffic
+            )
+            await eventNotifier.emit(VPNNotificationPayload(
+                event: .killSwitch,
+                descriptor: reconnecting.descriptor,
+                traffic: reconnecting.traffic
+            ))
+        }
+    }
+
+    func makeSessionDescriptor(
+        for request: VPNConnectRequest,
+        connectedAt: Date
+    ) -> VPNSessionDescriptor {
+        VPNSessionDescriptor(
+            sessionID: request.sessionID,
+            serverID: request.server.id,
+            serverName: request.server.serverName,
+            country: request.server.country,
+            countryFlag: request.server.flagEmoji,
+            protocolName: request.protocolName == .ikev2 ? "IKEv2/IPSec" : request.protocolName.displayName,
+            connectedAt: connectedAt,
+            origin: request.origin,
+            killSwitchEnabled: request.killSwitchEnabled,
+            onDemandEnabled: request.onDemandEnabled
         )
+    }
+}
+
+extension AppModel {
+    func refreshNotificationAuthorizationStatus() async {
+        await notificationService.refreshAuthorizationStatus()
+        notificationAuthorizationStatus = notificationService.authorizationStatus
+    }
+
+    func requestNotificationAuthorizationIfNeeded() async {
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            return
+        }
+        await notificationService.requestAuthorizationIfNeeded()
+        notificationAuthorizationStatus = notificationService.authorizationStatus
+    }
+
+    func openNotificationSettings() {
+        notificationService.openSystemSettings()
     }
 }

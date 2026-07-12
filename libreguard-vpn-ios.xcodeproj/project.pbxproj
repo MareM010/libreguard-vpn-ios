@@ -13,6 +13,7 @@
 		A30000012FE7000000000001 /* TunnelKitOpenVPN in Frameworks */ = {isa = PBXBuildFile; productRef = A30000032FE7000000000001 /* TunnelKitOpenVPN */; };
 		A30000012FE7000000000002 /* TunnelKitOpenVPNAppExtension in Frameworks */ = {isa = PBXBuildFile; productRef = A30000032FE7000000000002 /* TunnelKitOpenVPNAppExtension */; };
 		A20000012FE700000000000B /* OpenVPNPacketTunnel.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A20000032FE700000000000A /* OpenVPNPacketTunnel.appex */; };
+		B10000012FEA000000000001 /* VPNStatusWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = B10000022FEA000000000002 /* VPNStatusWidget.appex */; };
 		E686F16A2FE9A7770072FD83 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000005 /* NetworkExtension.framework */; };
 		E686F16B2FE9A7770072FD83 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000007 /* Security.framework */; };
 /* End PBXBuildFile section */
@@ -39,6 +40,13 @@
 			remoteGlobalIDString = E67858D02FE6EBD9000CF95E;
 			remoteInfo = OpenVPNPacketTunnel;
 		};
+		B100000C2FEA00000000000C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E67858942FE6EBD7000CF95E /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B10000052FEA000000000005;
+			remoteInfo = VPNStatusWidget;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -49,6 +57,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				A20000012FE700000000000B /* OpenVPNPacketTunnel.appex in Embed App Extensions */,
+				B10000012FEA000000000001 /* VPNStatusWidget.appex in Embed App Extensions */,
 			);
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -59,6 +68,7 @@
 		A10000032FE7000000000005 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
 		A10000032FE7000000000007 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		A20000032FE700000000000A /* OpenVPNPacketTunnel.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = OpenVPNPacketTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		B10000022FEA000000000002 /* VPNStatusWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = VPNStatusWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		E678589C2FE6EBD7000CF95E /* libreguard-vpn-ios.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "libreguard-vpn-ios.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		E67858A92FE6EBD9000CF95E /* libreguard-vpn-iosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "libreguard-vpn-iosTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		E67858B32FE6EBD9000CF95E /* libreguard-vpn-iosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "libreguard-vpn-iosUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -88,6 +98,16 @@
 		E686EEA82FE8C5970072FD84 /* OpenVPNPacketTunnel */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = OpenVPNPacketTunnel;
+			sourceTree = "<group>";
+		};
+		B10000032FEA000000000003 /* SharedStatus */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SharedStatus;
+			sourceTree = "<group>";
+		};
+		B10000042FEA000000000004 /* VPNStatusWidget */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = VPNStatusWidget;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -128,12 +148,21 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B100000A2FEA00000000000A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		E67858932FE6EBD7000CF95E = {
 			isa = PBXGroup;
 			children = (
+				B10000032FEA000000000003 /* SharedStatus */,
+				B10000042FEA000000000004 /* VPNStatusWidget */,
 				E686EEA72FE8C5970072FD83 /* SharedVPN */,
 				E686EEA82FE8C5970072FD84 /* OpenVPNPacketTunnel */,
 				E678589E2FE6EBD7000CF95E /* libreguard-vpn-ios */,
@@ -149,6 +178,7 @@
 			children = (
 				E678589C2FE6EBD7000CF95E /* libreguard-vpn-ios.app */,
 				A20000032FE700000000000A /* OpenVPNPacketTunnel.appex */,
+				B10000022FEA000000000002 /* VPNStatusWidget.appex */,
 				E67858A92FE6EBD9000CF95E /* libreguard-vpn-iosTests.xctest */,
 				E67858B32FE6EBD9000CF95E /* libreguard-vpn-iosUITests.xctest */,
 			);
@@ -180,10 +210,12 @@
 			);
 			dependencies = (
 				E67858D92FE6EBD9000CF95E /* PBXTargetDependency */,
+				B100000D2FEA00000000000D /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				E678589E2FE6EBD7000CF95E /* libreguard-vpn-ios */,
 				E686EEA72FE8C5970072FD83 /* SharedVPN */,
+				B10000032FEA000000000003 /* SharedStatus */,
 			);
 			name = "libreguard-vpn-ios";
 			packageProductDependencies = (
@@ -255,6 +287,7 @@
 			fileSystemSynchronizedGroups = (
 				E686EEA72FE8C5970072FD83 /* SharedVPN */,
 				E686EEA82FE8C5970072FD84 /* OpenVPNPacketTunnel */,
+				B10000032FEA000000000003 /* SharedStatus */,
 			);
 			name = OpenVPNPacketTunnel;
 			packageProductDependencies = (
@@ -262,6 +295,29 @@
 			);
 			productName = OpenVPNPacketTunnel;
 			productReference = A20000032FE700000000000A /* OpenVPNPacketTunnel.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		B10000052FEA000000000005 /* VPNStatusWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B10000062FEA000000000006 /* Build configuration list for PBXNativeTarget "VPNStatusWidget" */;
+			buildPhases = (
+				B10000092FEA000000000009 /* Sources */,
+				B100000A2FEA00000000000A /* Frameworks */,
+				B100000B2FEA00000000000B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				B10000032FEA000000000003 /* SharedStatus */,
+				B10000042FEA000000000004 /* VPNStatusWidget */,
+			);
+			name = VPNStatusWidget;
+			packageProductDependencies = (
+			);
+			productName = VPNStatusWidget;
+			productReference = B10000022FEA000000000002 /* VPNStatusWidget.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
@@ -288,6 +344,9 @@
 					E67858D02FE6EBD9000CF95E = {
 						CreatedOnToolsVersion = 26.5;
 					};
+					B10000052FEA000000000005 = {
+						CreatedOnToolsVersion = 26.5;
+					};
 				};
 			};
 			buildConfigurationList = E67858972FE6EBD7000CF95E /* Build configuration list for PBXProject "libreguard-vpn-ios" */;
@@ -312,6 +371,7 @@
 				E67858A82FE6EBD9000CF95E /* libreguard-vpn-iosTests */,
 				E67858B22FE6EBD9000CF95E /* libreguard-vpn-iosUITests */,
 				E67858D02FE6EBD9000CF95E /* OpenVPNPacketTunnel */,
+				B10000052FEA000000000005 /* VPNStatusWidget */,
 			);
 		};
 /* End PBXProject section */
@@ -339,6 +399,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		E67858D32FE6EBD9000CF95E /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B100000B2FEA00000000000B /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -376,6 +443,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B10000092FEA000000000009 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -393,6 +467,11 @@
 			isa = PBXTargetDependency;
 			target = E67858D02FE6EBD9000CF95E /* OpenVPNPacketTunnel */;
 			targetProxy = E67858D82FE6EBD9000CF95E /* PBXContainerItemProxy */;
+		};
+		B100000D2FEA00000000000D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B10000052FEA000000000005 /* VPNStatusWidget */;
+			targetProxy = B100000C2FEA00000000000C /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -722,6 +801,50 @@
 			};
 			name = Release;
 		};
+		B10000072FEA000000000007 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = VPNStatusWidget/VPNStatusWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "VPNStatusWidget-Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "net.libreguard.libreguard-vpn-ios.status-widget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		B10000082FEA000000000008 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = VPNStatusWidget/VPNStatusWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "VPNStatusWidget-Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "net.libreguard.libreguard-vpn-ios.status-widget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -766,6 +889,15 @@
 			buildConfigurations = (
 				E67858D52FE6EBD9000CF95E /* Debug */,
 				E67858D62FE6EBD9000CF95E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B10000062FEA000000000006 /* Build configuration list for PBXNativeTarget "VPNStatusWidget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B10000072FEA000000000007 /* Debug */,
+				B10000082FEA000000000008 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

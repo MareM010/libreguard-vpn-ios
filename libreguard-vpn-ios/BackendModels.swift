@@ -448,21 +448,27 @@ enum VPNConfigurationProtocol: String, Codable, CaseIterable {
 }
 
 struct VPNConnectRequest: Equatable {
+    let sessionID: UUID
     let server: VPNServer
     let protocolName: VPNConfigurationProtocol
     let onDemandEnabled: Bool
     let killSwitchEnabled: Bool
+    let origin: VPNConnectionOrigin
 
     init(
+        sessionID: UUID = UUID(),
         server: VPNServer,
         protocolName: VPNConfigurationProtocol,
         onDemandEnabled: Bool = false,
-        killSwitchEnabled: Bool = false
+        killSwitchEnabled: Bool = false,
+        origin: VPNConnectionOrigin = .manual
     ) {
+        self.sessionID = sessionID
         self.server = server
         self.protocolName = protocolName
         self.onDemandEnabled = onDemandEnabled
         self.killSwitchEnabled = killSwitchEnabled
+        self.origin = origin
     }
 }
 

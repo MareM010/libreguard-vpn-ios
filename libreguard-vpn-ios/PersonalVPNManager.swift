@@ -13,6 +13,11 @@ protocol VPNManaging: AnyObject {
     @discardableResult func apply(policy: VPNConnectionPolicy) async throws -> Bool
     func disconnect() async
     func disconnectAndForget() async
+    func currentTrafficSnapshot() async -> TunnelTrafficSnapshot?
+}
+
+extension VPNManaging {
+    func currentTrafficSnapshot() async -> TunnelTrafficSnapshot? { nil }
 }
 
 struct VPNConnectionPolicy: Equatable {
@@ -49,6 +54,7 @@ final class PersonalVPNManager: VPNManaging {
         category: "VPN"
     )
     private var statusObserver: NSObjectProtocol?
+    private let trafficSampler = SystemTunnelTrafficSampler()
 
     var status: VPNConnectionState = .disconnected {
         didSet {
@@ -179,6 +185,10 @@ final class PersonalVPNManager: VPNManaging {
             // Clearing the session should not be blocked by preference cleanup.
         }
         status = .disconnected
+    }
+
+    func currentTrafficSnapshot() async -> TunnelTrafficSnapshot? {
+        trafficSampler.currentSnapshot()
     }
 
     private func observeStatusChanges() {
