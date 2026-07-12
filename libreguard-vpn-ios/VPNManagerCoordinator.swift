@@ -21,11 +21,10 @@ final class VPNManagerCoordinator: VPNManaging {
     init(
         api: BackendServicing,
         translator: VPNConfigurationTranslator? = nil,
-        deviceKeyStore: VPNDeviceKeyProviding = VPNDeviceKeyStore(),
-        profileStore: OpenVPNProfileEnvelopeStoring = OpenVPNProfileEnvelopeStore()
+        deviceKeyStore: VPNDeviceKeyProviding = VPNDeviceKeyStore()
     ) {
         self.ikev2Manager = PersonalVPNManager(api: api, translator: translator)
-        self.openVPNManager = OpenVPNManager(api: api, deviceKeyStore: deviceKeyStore, profileStore: profileStore)
+        self.openVPNManager = OpenVPNManager(api: api, deviceKeyStore: deviceKeyStore)
         configureCallbacks()
         reconcileStatus()
     }
@@ -54,20 +53,25 @@ final class VPNManagerCoordinator: VPNManaging {
         reconcileStatus()
     }
 
-    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, onDemandEnabled: Bool) async throws {
+    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, policy: VPNConnectionPolicy) async throws {
         requestGeneration &+= 1
         let generation = requestGeneration
         activeProtocol = protocolName
         let selectedManager = manager(for: protocolName)
 
         do {
-            if onDemandEnabled {
+            try await selectedManager.connect(to: server, protocol: protocolName, policy: policy)
+            try Task.checkCancellation()
+            if policy.onDemandEnabled {
                 let inactiveProtocol: VPNConfigurationProtocol = protocolName == .openVPN ? .ikev2 : .openVPN
                 let inactiveManager = manager(for: inactiveProtocol)
-                try await inactiveManager.setOnDemandEnabled(false)
+                _ = try await inactiveManager.apply(
+                    policy: VPNConnectionPolicy(
+                        killSwitchEnabled: policy.killSwitchEnabled,
+                        onDemandEnabled: false
+                    )
+                )
             }
-            try await selectedManager.connect(to: server, protocol: protocolName, onDemandEnabled: onDemandEnabled)
-            try Task.checkCancellation()
             guard generation == requestGeneration else {
                 await stopIfActive(selectedManager)
                 throw CancellationError()
@@ -89,16 +93,28 @@ final class VPNManagerCoordinator: VPNManaging {
         }
     }
 
-    func setOnDemandEnabled(_ enabled: Bool) async throws {
-        if enabled, let activeProtocol {
+    @discardableResult
+    func apply(policy: VPNConnectionPolicy) async throws -> Bool {
+        if let activeProtocol {
             let inactiveProtocol: VPNConfigurationProtocol = activeProtocol == .openVPN ? .ikev2 : .openVPN
-            try await manager(for: inactiveProtocol).setOnDemandEnabled(false)
-            try await manager(for: activeProtocol).setOnDemandEnabled(true)
-            return
+            let activeConfigured = try await manager(for: activeProtocol).apply(policy: policy)
+            _ = try await manager(for: inactiveProtocol).apply(
+                policy: VPNConnectionPolicy(
+                    killSwitchEnabled: policy.killSwitchEnabled,
+                    onDemandEnabled: false
+                )
+            )
+            return activeConfigured
         }
 
-        try await ikev2Manager.setOnDemandEnabled(false)
-        try await openVPNManager.setOnDemandEnabled(false)
+        let ikev2Configured = try await ikev2Manager.apply(policy: policy)
+        let openVPNConfigured = try await openVPNManager.apply(
+            policy: VPNConnectionPolicy(
+                killSwitchEnabled: policy.killSwitchEnabled,
+                onDemandEnabled: false
+            )
+        )
+        return ikev2Configured || openVPNConfigured
     }
 
     func disconnect() async {

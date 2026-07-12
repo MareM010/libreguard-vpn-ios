@@ -9,7 +9,11 @@ final class VPNConfigurationTranslator {
         self.deviceKeyStore = deviceKeyStore
     }
 
-    func makeProtocol(server: VPNServer, response: VPNConfigResponse) throws -> NEVPNProtocolIKEv2 {
+    func makeProtocol(
+        server: VPNServer,
+        response: VPNConfigResponse,
+        policy: VPNConnectionPolicy = .disabled
+    ) throws -> NEVPNProtocolIKEv2 {
         let profile = try decodeProfile(from: response.configContent)
         let passphrase = try deviceKeyStore.decryptPassphrase(from: response.encryptedPassphrase)
         try validateSanitizedPassword(profile.localPassword)
@@ -33,9 +37,7 @@ final class VPNConfigurationTranslator {
         vpnProtocol.enableRevocationCheck = false
         vpnProtocol.strictRevocationCheck = false
         vpnProtocol.useConfigurationAttributeInternalIPSubnet = false
-        vpnProtocol.includeAllNetworks = true
-        vpnProtocol.excludeLocalNetworks = false
-        vpnProtocol.enforceRoutes = true
+        policy.apply(to: vpnProtocol)
 
         if let ikeParameters = vpnProtocol.value(forKey: "IKESecurityAssociationParameters") as? NEVPNIKEv2SecurityAssociationParameters
             ?? vpnProtocol.value(forKey: "ikeSecurityAssociationParameters") as? NEVPNIKEv2SecurityAssociationParameters {

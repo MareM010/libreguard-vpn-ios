@@ -5,6 +5,22 @@ import Testing
 
 @MainActor
 struct OpenVPNTests {
+    @Test func killSwitchPolicyAppliesStrictRoutingToTunnelProtocols() {
+        let tunnelProtocol = NETunnelProviderProtocol()
+        VPNConnectionPolicy(killSwitchEnabled: true, onDemandEnabled: true).apply(to: tunnelProtocol)
+
+        #expect(tunnelProtocol.includeAllNetworks)
+        #expect(tunnelProtocol.excludeLocalNetworks == false)
+        #expect(tunnelProtocol.excludeAPNs == false)
+        #expect(tunnelProtocol.excludeCellularServices == false)
+        #expect(tunnelProtocol.excludeDeviceCommunication == false)
+        #expect(tunnelProtocol.enforceRoutes)
+        #expect(tunnelProtocol.disconnectOnSleep == false)
+
+        VPNConnectionPolicy.disabled.apply(to: tunnelProtocol)
+        #expect(tunnelProtocol.includeAllNetworks == false)
+    }
+
     @Test func vpnConfigRequestEncodesOpenVPNProtocolAndDecodesRawProfile() async throws {
         try await withSerializedRequests {
             let client = makeClient { request in
@@ -40,59 +56,27 @@ struct OpenVPNTests {
         }
     }
 
-    @Test func openVPNProfileParserRecognizesRepresentativeConfiguration() throws {
-        let profile = try OpenVPNProfileConfiguration.parse(openVPNSampleConfig())
-        #expect(profile.deviceType == "tun")
-        #expect(profile.transportProtocol == "udp")
-        #expect(profile.remoteEndpoints.first?.host == "23.2.3.2")
-        #expect(profile.remoteEndpoints.first?.port == 1194)
-        #expect(profile.usesTLSCrypt)
-        #expect(profile.hasClientCertificateBlocks)
-        #expect(profile.inlineBlocks["tls-crypt"]?.contains("OpenVPN Static key V1") == true)
-        #expect(profile.inlineBlocks["ca"]?.contains("Content_Here") == true)
-        try profile.validateMobileCompatibility()
-    }
-
-    @Test func openVPNProfileParserRejectsUnsupportedDirectives() throws {
-        let unsupportedProfiles: [(String, String)] = [
-            ("dev tap\nremote 1.2.3.4 1194\nclient", "tap"),
-            ("client\ndev tun\nremote 1.2.3.4 1194\nfragment 1400", "fragment"),
-            ("client\ndev tun\nremote 1.2.3.4 1194\nsecret static.key", "secret")
-        ]
-
-        for (profileText, expectedDirective) in unsupportedProfiles {
-            do {
-                let profile = try OpenVPNProfileConfiguration.parse(profileText)
-                try profile.validateMobileCompatibility()
-                Issue.record("Expected \(expectedDirective) to be rejected")
-            } catch let error as OpenVPNProfileError {
-                #expect(error.errorDescription?.contains(expectedDirective) == true)
-            }
+    @Test func tunnelKitRejectsIncompleteOpenVPNConfiguration() {
+        let builder = TunnelKitOpenVPNProtocolBuilder()
+        #expect(throws: (any Error).self) {
+            _ = try builder.makeTunnelProtocol(
+                configuration: "client\ndev tun\nproto udp\nremote vpn.example.com 1194",
+                privateKeyPassphrase: "not-serialized"
+            )
         }
     }
 
-    @Test func openVPNProfileEnvelopeStoreRoundTripsAndClears() throws {
-        let keychain = InMemorySharedKeychainStore()
-        let store = OpenVPNProfileEnvelopeStore(keychain: keychain, account: "active")
-        let envelope = OpenVPNProfileEnvelope(
-            serverId: 12,
-            serverName: "DE-1",
-            serverAddress: "vpn.example.com",
-            certificateName: "OVPN_client891",
-            issueDate: Date(timeIntervalSince1970: 1_717_000_000),
-            expirationDate: Date(timeIntervalSince1970: 1_820_000_000),
-            configContent: openVPNSampleConfig(),
-            privateKeyPassphrase: "test-passphrase",
-            storedAt: Date(timeIntervalSince1970: 1_717_000_100)
-        )
+    @Test func openVPNPreflightRequiresInlineClientIdentityAndTLSCrypt() throws {
+        try OpenVPNProfilePreflightValidator.validate(openVPNSampleConfig())
 
-        let persistentReference = try store.save(envelope)
-        #expect(persistentReference.isEmpty == false)
-        #expect(try store.load() == envelope)
-        #expect(try store.load(persistentReference: persistentReference) == envelope)
-
-        store.clear()
-        #expect(try store.load() == nil)
+        for (directive, expectedError) in [
+            ("fragment 1400", OpenVPNConfigurationError.unsupportedDirective("fragment")),
+            ("secret static.key", OpenVPNConfigurationError.unsupportedDirective("secret"))
+        ] {
+            #expect(throws: expectedError) {
+                try OpenVPNProfilePreflightValidator.validate(openVPNSampleConfig() + "\n" + directive)
+            }
+        }
     }
 
     @Test func openVPNProviderMessageCodecRoundTripsDiagnostics() throws {
@@ -102,7 +86,7 @@ struct OpenVPNTests {
             serverName: "DE-1",
             serverAddress: "vpn.example.com",
             connectedAt: Date(timeIntervalSince1970: 1_820_000_000),
-            engine: .openVPNCore,
+            engine: .tunnelKit,
             canStartConnections: true
         )
         let requestData = try JSONEncoder().encode(OpenVPNProviderRequest(type: .diagnostics))
@@ -121,36 +105,16 @@ struct OpenVPNTests {
         #expect(response.error == nil)
     }
 
-    @Test func unavailableOpenVPNRuntimeReportsMissingEngineDiagnostics() {
-        let runtime = UnavailableOpenVPNRuntime()
-        let envelope = OpenVPNProfileEnvelope(
+    @Test func openVPNMetadataRoundTripsWithoutSecrets() throws {
+        let metadata = OpenVPNConnectionMetadata(
             serverId: 12,
             serverName: "DE-1",
-            serverAddress: "vpn.example.com",
-            certificateName: "OVPN_client891",
-            issueDate: nil,
-            expirationDate: nil,
-            configContent: openVPNSampleConfig(),
-            privateKeyPassphrase: "test-passphrase",
-            storedAt: Date(timeIntervalSince1970: 1_717_000_100)
+            serverAddress: "vpn.example.com"
         )
-        let provider = NEPacketTunnelProvider()
-        var capturedResult: Result<Void, Error>?
-
-        runtime.start(envelope: envelope, provider: provider) { result in
-            capturedResult = result
-        }
-
-        guard case .failure(let error) = capturedResult else {
-            Issue.record("Expected unavailable runtime to fail")
-            return
-        }
-
-        #expect((error as? OpenVPNRuntimeError) == .missingEngine)
-        #expect(runtime.diagnostics.state == .failed)
-        #expect(runtime.diagnostics.serverId == 12)
-        #expect(runtime.diagnostics.engine == .missing)
-        #expect(runtime.diagnostics.canStartConnections == false)
+        try OpenVPNConnectionMetadataStore.save(metadata)
+        #expect(OpenVPNConnectionMetadataStore.load() == metadata)
+        OpenVPNConnectionMetadataStore.clear()
+        #expect(OpenVPNConnectionMetadataStore.load() == nil)
     }
 
     @Test func appModelFallsBackToIKEv2WhenOpenVPNIsLocked() async throws {
@@ -338,36 +302,6 @@ struct OpenVPNTests {
     }
 }
 
-private final class InMemorySharedKeychainStore: SharedKeychainDataStoring {
-    private var values: [String: Data] = [:]
-    private var references: [String: Data] = [:]
-
-    func data(for account: String) -> Data? {
-        values[account]
-    }
-
-    func set(_ data: Data, for account: String) throws {
-        values[account] = data
-        if references[account] == nil {
-            references[account] = Data(UUID().uuidString.utf8)
-        }
-    }
-
-    func remove(_ account: String) {
-        values.removeValue(forKey: account)
-        references.removeValue(forKey: account)
-    }
-
-    func persistentReference(for account: String) throws -> Data? {
-        references[account]
-    }
-
-    func data(forPersistentReference persistentReference: Data) throws -> Data? {
-        guard let match = references.first(where: { $0.value == persistentReference }) else { return nil }
-        return values[match.key]
-    }
-}
-
 @MainActor
 private final class SpyVPNManager: VPNManaging {
     struct Call: Equatable {
@@ -382,13 +316,13 @@ private final class SpyVPNManager: VPNManaging {
 
     func refreshStatus() async {}
 
-    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, onDemandEnabled: Bool) async throws {
+    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, policy: VPNConnectionPolicy) async throws {
         connectCalls.append(Call(serverID: server.id, protocolName: protocolName))
         status = .connected
         onStatusChange?(status)
     }
 
-    func setOnDemandEnabled(_ enabled: Bool) async throws {}
+    func apply(policy: VPNConnectionPolicy) async throws -> Bool { true }
 
     func disconnect() async {
         status = .disconnected

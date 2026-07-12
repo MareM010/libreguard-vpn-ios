@@ -10,6 +10,8 @@
 		A10000012FE7000000000001 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = A10000032FE7000000000003 /* GoogleSignIn */; };
 		A10000022FE7000000000004 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000005 /* NetworkExtension.framework */; };
 		A10000022FE7000000000006 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000007 /* Security.framework */; };
+		A30000012FE7000000000001 /* TunnelKitOpenVPN in Frameworks */ = {isa = PBXBuildFile; productRef = A30000032FE7000000000001 /* TunnelKitOpenVPN */; };
+		A30000012FE7000000000002 /* TunnelKitOpenVPNAppExtension in Frameworks */ = {isa = PBXBuildFile; productRef = A30000032FE7000000000002 /* TunnelKitOpenVPNAppExtension */; };
 		A20000012FE700000000000B /* OpenVPNPacketTunnel.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A20000032FE700000000000A /* OpenVPNPacketTunnel.appex */; };
 		E686F16A2FE9A7770072FD83 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000005 /* NetworkExtension.framework */; };
 		E686F16B2FE9A7770072FD83 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000007 /* Security.framework */; };
@@ -95,6 +97,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A30000012FE7000000000001 /* TunnelKitOpenVPN in Frameworks */,
 				A10000012FE7000000000001 /* GoogleSignIn in Frameworks */,
 				E686F16A2FE9A7770072FD83 /* NetworkExtension.framework in Frameworks */,
 				E686F16B2FE9A7770072FD83 /* Security.framework in Frameworks */,
@@ -119,6 +122,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A30000012FE7000000000002 /* TunnelKitOpenVPNAppExtension in Frameworks */,
 				A10000022FE7000000000004 /* NetworkExtension.framework in Frameworks */,
 				A10000022FE7000000000006 /* Security.framework in Frameworks */,
 			);
@@ -184,6 +188,7 @@
 			name = "libreguard-vpn-ios";
 			packageProductDependencies = (
 				A10000032FE7000000000003 /* GoogleSignIn */,
+				A30000032FE7000000000001 /* TunnelKitOpenVPN */,
 			);
 			productName = "libreguard-vpn-ios";
 			productReference = E678589C2FE6EBD7000CF95E /* libreguard-vpn-ios.app */;
@@ -253,6 +258,7 @@
 			);
 			name = OpenVPNPacketTunnel;
 			packageProductDependencies = (
+				A30000032FE7000000000002 /* TunnelKitOpenVPNAppExtension */,
 			);
 			productName = OpenVPNPacketTunnel;
 			productReference = A20000032FE700000000000A /* OpenVPNPacketTunnel.appex */;
@@ -295,6 +301,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				A10000022FE7000000000002 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,
+				A30000022FE7000000000001 /* XCLocalSwiftPackageReference "TunnelKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = E678589D2FE6EBD7000CF95E /* Products */;
@@ -677,10 +684,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(PROJECT_DIR)/Vendor/OpenVPNCore",
-				);
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "OpenVPNPacketTunnel-Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
@@ -690,7 +693,6 @@
 				SKIP_INSTALL = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG OPENVPN_PACKET_TUNNEL $(inherited)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -705,10 +707,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(PROJECT_DIR)/Vendor/OpenVPNCore",
-				);
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "OpenVPNPacketTunnel-Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
@@ -718,7 +716,6 @@
 				SKIP_INSTALL = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "OPENVPN_PACKET_TUNNEL $(inherited)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -786,11 +783,28 @@
 		};
 /* End XCRemoteSwiftPackageReference section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		A30000022FE7000000000001 /* XCLocalSwiftPackageReference "TunnelKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Vendor/TunnelKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		A10000032FE7000000000003 /* GoogleSignIn */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A10000022FE7000000000002 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
 			productName = GoogleSignIn;
+		};
+		A30000032FE7000000000001 /* TunnelKitOpenVPN */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A30000022FE7000000000001 /* XCLocalSwiftPackageReference "TunnelKit" */;
+			productName = TunnelKitOpenVPN;
+		};
+		A30000032FE7000000000002 /* TunnelKitOpenVPNAppExtension */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A30000022FE7000000000001 /* XCLocalSwiftPackageReference "TunnelKit" */;
+			productName = TunnelKitOpenVPNAppExtension;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -9,10 +9,34 @@ protocol VPNManaging: AnyObject {
     var onDisconnectError: ((Error) -> Void)? { get set }
 
     func refreshStatus() async
-    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, onDemandEnabled: Bool) async throws
-    func setOnDemandEnabled(_ enabled: Bool) async throws
+    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, policy: VPNConnectionPolicy) async throws
+    @discardableResult func apply(policy: VPNConnectionPolicy) async throws -> Bool
     func disconnect() async
     func disconnectAndForget() async
+}
+
+struct VPNConnectionPolicy: Equatable {
+    let killSwitchEnabled: Bool
+    let onDemandEnabled: Bool
+
+    static let disabled = VPNConnectionPolicy(killSwitchEnabled: false, onDemandEnabled: false)
+
+    static func appPolicy(autoConnectEnabled: Bool, killSwitchEnabled: Bool) -> VPNConnectionPolicy {
+        VPNConnectionPolicy(
+            killSwitchEnabled: killSwitchEnabled,
+            onDemandEnabled: autoConnectEnabled || killSwitchEnabled
+        )
+    }
+
+    func apply(to protocolConfiguration: NEVPNProtocol) {
+        protocolConfiguration.includeAllNetworks = killSwitchEnabled
+        protocolConfiguration.excludeLocalNetworks = false
+        protocolConfiguration.excludeAPNs = false
+        protocolConfiguration.excludeCellularServices = false
+        protocolConfiguration.excludeDeviceCommunication = false
+        protocolConfiguration.enforceRoutes = true
+        protocolConfiguration.disconnectOnSleep = false
+    }
 }
 
 @MainActor
@@ -71,7 +95,7 @@ final class PersonalVPNManager: VPNManaging {
         }
     }
 
-    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol = .ikev2, onDemandEnabled: Bool = false) async throws {
+    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol = .ikev2, policy: VPNConnectionPolicy = .disabled) async throws {
         logger.info("VPN connect requested for server \(server.id, privacy: .public) using protocol \(protocolName.rawValue, privacy: .public)")
 
         guard !isRunningInSimulator else {
@@ -87,7 +111,7 @@ final class PersonalVPNManager: VPNManaging {
             let response = try await api.fetchVPNConfig(serverId: server.id, protocol: protocolName)
             try Task.checkCancellation()
             logger.debug("Backend VPN configuration received for server \(server.id, privacy: .public)")
-            let vpnProtocol = try translator.makeProtocol(server: server, response: response)
+            let vpnProtocol = try translator.makeProtocol(server: server, response: response, policy: policy)
             try Task.checkCancellation()
             let serverAddress = String(describing: vpnProtocol.serverAddress)
             let remoteIdentifier = String(describing: vpnProtocol.remoteIdentifier)
@@ -101,7 +125,7 @@ final class PersonalVPNManager: VPNManaging {
             manager.localizedDescription = "LibreGuard"
             manager.protocolConfiguration = vpnProtocol
             manager.isEnabled = true
-            applyOnDemandConfiguration(enabled: onDemandEnabled)
+            applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
             logger.debug("Saving VPN preferences")
             try await savePreferences()
             try Task.checkCancellation()
@@ -126,13 +150,16 @@ final class PersonalVPNManager: VPNManaging {
         }
     }
 
-    func setOnDemandEnabled(_ enabled: Bool) async throws {
-        guard !isRunningInSimulator else { return }
+    @discardableResult
+    func apply(policy: VPNConnectionPolicy) async throws -> Bool {
+        guard !isRunningInSimulator else { return false }
         try await loadPreferences()
-        guard manager.protocolConfiguration != nil else { return }
-        applyOnDemandConfiguration(enabled: enabled)
+        guard let vpnProtocol = manager.protocolConfiguration else { return false }
+        policy.apply(to: vpnProtocol)
+        applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
         try await savePreferences()
         try await loadPreferences()
+        return manager.protocolConfiguration?.includeAllNetworks == policy.killSwitchEnabled
     }
 
     func disconnect() async {

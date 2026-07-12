@@ -83,6 +83,23 @@ struct ContentView: View {
                 dismissButton: .default(Text("OK"))
             )
         }
+        .confirmationDialog(
+            "Disable Kill Switch and disconnect?",
+            isPresented: Binding(
+                get: { app.isKillSwitchDisconnectConfirmationPresented },
+                set: { if !$0 { app.cancelKillSwitchDisconnect() } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Disable Kill Switch & Disconnect", role: .destructive) {
+                Task { await app.confirmKillSwitchDisableAndDisconnect() }
+            }
+            Button("Keep VPN Connected", role: .cancel) {
+                app.cancelKillSwitchDisconnect()
+            }
+        } message: {
+            Text("Your internet traffic will no longer be blocked when the VPN is unavailable.")
+        }
         .onOpenURL { app.handleOpenURL($0) }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active, case .authenticated = app.route else { return }
@@ -114,16 +131,10 @@ private enum MainTab: String, CaseIterable, Identifiable {
 }
 
 private enum OverlayScreen: Identifiable {
-    case help
-    case privacy
-    case terms
     case upgrade
 
     var id: String {
         switch self {
-        case .help: "help"
-        case .privacy: "privacy"
-        case .terms: "terms"
         case .upgrade: "upgrade"
         }
     }
@@ -185,7 +196,6 @@ private struct MainAppView: View {
                     case .settings:
                         SettingsView(
                             isDarkMode: $isDarkMode,
-                            onNavigate: { overlayScreen = $0 },
                             onUpgrade: { overlayScreen = .upgrade },
                             onSignOut: onSignOut
                         )
@@ -208,39 +218,6 @@ private struct MainAppView: View {
     @ViewBuilder
     private func overlayView(for screen: OverlayScreen) -> some View {
         switch screen {
-        case .help:
-            LegalInfoView(
-                title: "Help & Support",
-                subtitle: "Answers for common LibreGuard questions.",
-                sections: [
-                    ("Connection", "Use Quick Connect to select the fastest available server. The new IKEv2 tunnel path is being wired in now."),
-                    ("Account", "Account controls, billing, and some settings screens are still placeholders while we finish the VPN integration."),
-                    ("Contact", "Support messaging will be connected once backend services are available.")
-                ],
-                onBack: { overlayScreen = nil }
-            )
-        case .privacy:
-            LegalInfoView(
-                title: "Privacy Policy",
-                subtitle: "A placeholder policy screen matching the reference flow.",
-                sections: [
-                    ("No Activity Logs", "LibreGuard is designed around private browsing and minimal account data."),
-                    ("Payments", "The Pro plan UI highlights privacy-friendly payment options such as Monero."),
-                    ("Transparency", "Final legal copy should replace this mock text before release.")
-                ],
-                onBack: { overlayScreen = nil }
-            )
-        case .terms:
-            LegalInfoView(
-                title: "Terms of Service",
-                subtitle: "A placeholder terms page for app navigation.",
-                sections: [
-                    ("Service", "The VPN service screens are being connected to the live backend and Apple Personal VPN APIs."),
-                    ("Usage", "Users are responsible for following applicable laws and platform policies."),
-                    ("Updates", "Final terms should be reviewed before production distribution.")
-                ],
-                onBack: { overlayScreen = nil }
-            )
         case .upgrade:
             UpgradeView(onBack: { overlayScreen = nil })
         }
@@ -1145,13 +1122,11 @@ private struct SettingsView: View {
     @EnvironmentObject private var app: AppModel
     @Environment(\.openURL) private var openURL
     @Binding var isDarkMode: Bool
-    @State private var killSwitch = false
     @State private var splitTunneling = false
     @State private var showTwoFactorManagement = false
     @State private var threatProtection = true
     @State private var notifications = true
 
-    let onNavigate: (OverlayScreen) -> Void
     let onUpgrade: () -> Void
     let onSignOut: () -> Void
 
@@ -1198,7 +1173,22 @@ private struct SettingsView: View {
                             )
                         )
                         .disabled(app.isUpdatingAutoConnect)
-                        ToggleRow(icon: "shield", title: "Kill Switch", subtitle: "Block internet if VPN drops", isOn: $killSwitch)
+                        ToggleRow(
+                            icon: "shield",
+                            title: "Kill Switch",
+                            subtitle: killSwitchSubtitle,
+                            isOn: Binding(
+                                get: { app.isKillSwitchEnabled },
+                                set: { enabled in
+                                    if enabled, !app.isProUser {
+                                        onUpgrade()
+                                    } else {
+                                        Task { await app.setKillSwitchEnabled(enabled) }
+                                    }
+                                }
+                            )
+                        )
+                        .disabled(app.isUpdatingKillSwitch)
                         ToggleRow(icon: "wifi", title: "Split Tunneling", subtitle: "Exclude apps from VPN", isOn: $splitTunneling)
                     }
 
@@ -1223,8 +1213,11 @@ private struct SettingsView: View {
                         NavigationRow(icon: "doc.text", title: "Terms of Service") {
                             _ = openURL(URL(string: "https://libreguard.net/Terms")!)
                         }
+                        NavigationRow(icon: "chevron.left.forwardslash.chevron.right", title: "Source Code") {
+                            _ = openURL(URL(string: "https://github.com/MareM010/libreguard-vpn-ios")!)
+                        }
                         NavigationRow(icon: "chevron.left.forwardslash.chevron.right", title: "Open Source Licenses") {
-                            _ = openURL(URL(string: "https://github.com/LibreGuard-Developer/libreguard-vpn-ios")!)
+                            _ = openURL(URL(string: "https://github.com/MareM010/libreguard-vpn-ios/blob/main/THIRD_PARTY_NOTICES.md")!)
                         }
                     }
 
@@ -1259,6 +1252,20 @@ private struct SettingsView: View {
         }
         .task {
             if app.twoFactorStatus == nil { await app.refreshAccountData(showErrors: false) }
+        }
+    }
+
+    private var killSwitchSubtitle: String {
+        if app.isUpdatingKillSwitch {
+            return "Updating protected network configuration…"
+        }
+        switch app.killSwitchActivationState {
+        case .off:
+            return app.isProUser ? "Block traffic while the VPN reconnects" : "Pro • Block traffic if the VPN drops"
+        case .armed:
+            return "Armed • Activates on your next VPN connection"
+        case .active:
+            return "Active • Traffic is blocked if the VPN drops"
         }
     }
 }
@@ -1582,49 +1589,6 @@ private struct PlanDetailRow: View {
                 .multilineTextAlignment(.trailing)
         }
         .font(.subheadline)
-    }
-}
-
-private struct LegalInfoView: View {
-    let title: String
-    let subtitle: String
-    let sections: [(String, String)]
-    let onBack: () -> Void
-
-    var body: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 22) {
-                Button(action: onBack) {
-                    Label("Back", systemImage: "arrow.left")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(title)
-                        .font(.system(size: 28, weight: .semibold))
-                    Text(subtitle)
-                        .foregroundStyle(.secondary)
-                }
-
-                ForEach(sections, id: \.0) { section in
-                    CardContainer {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(section.0)
-                                .font(.headline)
-                            Text(section.1)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-            }
-            .padding(24)
-            .frame(maxWidth: 560)
-            .frame(maxWidth: .infinity)
-        }
-        .background(Theme.background.ignoresSafeArea())
     }
 }
 

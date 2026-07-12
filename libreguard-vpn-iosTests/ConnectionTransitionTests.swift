@@ -166,16 +166,94 @@ struct ConnectionTransitionTests {
         #expect(coordinator.status == .connected)
     }
 
-    @Test func coordinatorDisablesOnDemandForBothProtocols() async throws {
+    @Test func coordinatorAppliesDisabledPolicyToBothProtocols() async throws {
         let ikev2 = ControlledVPNManager(status: .connected)
         let openVPN = ControlledVPNManager(status: .disconnected)
         let coordinator = VPNManagerCoordinator(ikev2Manager: ikev2, openVPNManager: openVPN)
 
-        try await coordinator.setOnDemandEnabled(false)
+        _ = try await coordinator.apply(policy: .disabled)
 
-        #expect(ikev2.onDemandUpdates == [false])
-        #expect(openVPN.onDemandUpdates == [false])
+        #expect(ikev2.policyUpdates == [.disabled])
+        #expect(openVPN.policyUpdates == [.disabled])
         #expect(ikev2.disconnectCalls == 0)
+    }
+
+    @Test func killSwitchPolicyAlwaysEnablesOnDemand() {
+        #expect(VPNConnectionPolicy.appPolicy(autoConnectEnabled: false, killSwitchEnabled: false) == .disabled)
+        #expect(VPNConnectionPolicy.appPolicy(autoConnectEnabled: true, killSwitchEnabled: false).onDemandEnabled)
+        #expect(VPNConnectionPolicy.appPolicy(autoConnectEnabled: false, killSwitchEnabled: true).onDemandEnabled)
+        #expect(VPNConnectionPolicy.appPolicy(autoConnectEnabled: true, killSwitchEnabled: true).onDemandEnabled)
+    }
+
+    @Test func proUserCanArmKillSwitchWhileDisconnected() async throws {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let manager = ControlledVPNManager()
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)], defaults: defaults)
+        app.subscription = try makeSubscription(isPro: true)
+
+        await app.setKillSwitchEnabled(true)
+
+        #expect(app.isKillSwitchEnabled)
+        #expect(app.killSwitchActivationState == .armed)
+        #expect(manager.policyUpdates.isEmpty)
+        #expect(defaults.bool(forKey: "vpn.killSwitch.enabled"))
+    }
+
+    @Test func freeUserCannotEnableKillSwitch() async {
+        let manager = ControlledVPNManager()
+        let app = makeApp(manager: manager, servers: [])
+
+        await app.setKillSwitchEnabled(true)
+
+        #expect(app.isKillSwitchEnabled == false)
+        #expect(app.presentedError?.message == "Kill Switch requires a Pro plan.")
+    }
+
+    @Test func planDowngradeKeepsExistingKillSwitchButPreventsReenable() async throws {
+        let manager = ControlledVPNManager()
+        let app = makeApp(manager: manager, servers: [])
+        app.subscription = try makeSubscription(isPro: true)
+        await app.setKillSwitchEnabled(true)
+
+        app.subscription = try makeSubscription(isPro: false)
+        #expect(app.isKillSwitchEnabled)
+
+        await app.setKillSwitchEnabled(false)
+        await app.setKillSwitchEnabled(true)
+
+        #expect(app.isKillSwitchEnabled == false)
+        #expect(app.presentedError?.message == "Kill Switch requires a Pro plan.")
+    }
+
+    @Test func nextConnectionActivatesArmedKillSwitch() async throws {
+        let manager = ControlledVPNManager()
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)])
+        app.subscription = try makeSubscription(isPro: true)
+        await app.setKillSwitchEnabled(true)
+
+        app.requestConnectionToSelectedServer()
+        await settle()
+
+        #expect(manager.connectCalls.first?.policy.killSwitchEnabled == true)
+        #expect(manager.connectCalls.first?.policy.onDemandEnabled == true)
+        #expect(app.killSwitchActivationState == .active)
+    }
+
+    @Test func activeKillSwitchRequiresConfirmationBeforeDisconnect() async throws {
+        let manager = ControlledVPNManager(status: .connected)
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)])
+        app.subscription = try makeSubscription(isPro: true)
+        await app.setKillSwitchEnabled(true)
+
+        app.requestVPNDisconnect()
+
+        #expect(app.isKillSwitchDisconnectConfirmationPresented)
+        #expect(manager.disconnectCalls == 0)
+
+        await app.confirmKillSwitchDisableAndDisconnect()
+
+        #expect(app.isKillSwitchEnabled == false)
+        #expect(manager.disconnectCalls == 1)
     }
 
     @Test func disconnectPersistsStatisticsForTheActiveUser() async throws {
@@ -235,9 +313,10 @@ struct ConnectionTransitionTests {
         manager: VPNManaging,
         servers: [VPNServer],
         recorder: LocalStatisticsRecording? = nil,
-        sampler: TunnelTrafficSampling = ScriptedTrafficSampler([])
+        sampler: TunnelTrafficSampling = ScriptedTrafficSampler([]),
+        defaults: UserDefaults? = nil
     ) -> AppModel {
-        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let defaults = defaults ?? UserDefaults(suiteName: UUID().uuidString)!
         let app = AppModel(
             vpnManager: manager,
             statisticsRecorder: recorder,
@@ -247,6 +326,24 @@ struct ConnectionTransitionTests {
         app.servers = servers
         app.selectedServerID = servers.first?.id
         return app
+    }
+
+    private func makeSubscription(isPro: Bool) throws -> SubscriptionStatus {
+        try JSONDecoder().decode(
+            SubscriptionStatus.self,
+            from: JSONSerialization.data(withJSONObject: [
+                "plan": isPro ? "Pro" : "Free",
+                "isPro": isPro,
+                "status": "active",
+                "paymentType": NSNull(),
+                "currentPeriodEnd": NSNull(),
+                "cancelAtPeriodEnd": false,
+                "billingCycle": "monthly",
+                "activeDevices": 1,
+                "maxDevices": isPro ? 3 : 1,
+                "canAddDevice": true
+            ])
+        )
     }
 
     private func makeServer(id: Int, load: Int = 20) throws -> VPNServer {
@@ -290,6 +387,7 @@ private final class ControlledVPNManager: VPNManaging {
     struct ConnectCall: Equatable {
         let serverID: Int
         let protocolName: VPNConfigurationProtocol
+        let policy: VPNConnectionPolicy
     }
 
     var status: VPNConnectionState
@@ -299,7 +397,7 @@ private final class ControlledVPNManager: VPNManaging {
     var connectError: Error?
     private(set) var connectCalls: [ConnectCall] = []
     private(set) var disconnectCalls = 0
-    private(set) var onDemandUpdates: [Bool] = []
+    private(set) var policyUpdates: [VPNConnectionPolicy] = []
     private var disconnectContinuation: CheckedContinuation<Void, Never>?
 
     init(status: VPNConnectionState = .disconnected) {
@@ -310,8 +408,8 @@ private final class ControlledVPNManager: VPNManaging {
         onStatusChange?(status)
     }
 
-    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, onDemandEnabled: Bool) async throws {
-        connectCalls.append(ConnectCall(serverID: server.id, protocolName: protocolName))
+    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, policy: VPNConnectionPolicy) async throws {
+        connectCalls.append(ConnectCall(serverID: server.id, protocolName: protocolName, policy: policy))
         status = .connecting
         onStatusChange?(status)
         if let connectError {
@@ -321,8 +419,9 @@ private final class ControlledVPNManager: VPNManaging {
         }
     }
 
-    func setOnDemandEnabled(_ enabled: Bool) async throws {
-        onDemandUpdates.append(enabled)
+    func apply(policy: VPNConnectionPolicy) async throws -> Bool {
+        policyUpdates.append(policy)
+        return true
     }
 
     func disconnect() async {

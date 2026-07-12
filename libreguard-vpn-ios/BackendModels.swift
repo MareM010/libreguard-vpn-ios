@@ -451,16 +451,25 @@ struct VPNConnectRequest: Equatable {
     let server: VPNServer
     let protocolName: VPNConfigurationProtocol
     let onDemandEnabled: Bool
+    let killSwitchEnabled: Bool
 
     init(
         server: VPNServer,
         protocolName: VPNConfigurationProtocol,
-        onDemandEnabled: Bool = false
+        onDemandEnabled: Bool = false,
+        killSwitchEnabled: Bool = false
     ) {
         self.server = server
         self.protocolName = protocolName
         self.onDemandEnabled = onDemandEnabled
+        self.killSwitchEnabled = killSwitchEnabled
     }
+}
+
+enum KillSwitchActivationState: String, Equatable {
+    case off
+    case armed
+    case active
 }
 
 enum VPNTransitionRequest: Equatable {

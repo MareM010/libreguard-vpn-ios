@@ -36,6 +36,18 @@ final class libreguard_vpn_iosUITests: XCTestCase {
     }
 
     @MainActor
+    func testForgotPasswordOpensResetRequestScreen() throws {
+        let app = XCUIApplication()
+        app.launchArguments.append("--uitesting-reset")
+        app.launch()
+
+        XCTAssertTrue(app.buttons["Forgot password?"].waitForExistence(timeout: 20))
+        app.buttons["Forgot password?"].tap()
+        XCTAssertTrue(app.scrollViews["forgot-password-screen"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["forgot-password-send-button"].exists)
+    }
+
+    @MainActor
     func testLaunchPerformance() throws {
         // This measures how long it takes to launch your application.
         measure(metrics: [XCTApplicationLaunchMetric()]) {

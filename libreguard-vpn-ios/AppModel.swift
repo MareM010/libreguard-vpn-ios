@@ -24,6 +24,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var hasQueuedVPNReconnect = false
     @Published private(set) var isAutoConnectEnabled: Bool
     @Published private(set) var isUpdatingAutoConnect = false
+    @Published private(set) var isKillSwitchEnabled: Bool
+    @Published private(set) var killSwitchActivationState: KillSwitchActivationState
+    @Published private(set) var isUpdatingKillSwitch = false
+    @Published var isKillSwitchDisconnectConfirmationPresented = false
     @Published var retryAfterSeconds = 0
 
     private let api: BackendServicing
@@ -38,6 +42,8 @@ final class AppModel: ObservableObject {
     private let cachedPlanNameKey = "cached.plan.name"
     private let cachedPlanIsProKey = "cached.plan.isPro"
     private let autoConnectEnabledKey = "vpn.autoConnect.enabled"
+    private let killSwitchEnabledKey = "vpn.killSwitch.enabled"
+    private let killSwitchActivationKey = "vpn.killSwitch.activation"
     private var cachedPlanName: String?
     private var cachedPlanIsPro = false
     private var serverRefreshTask: Task<Void, Never>?
@@ -72,6 +78,10 @@ final class AppModel: ObservableObject {
         self.trafficSampler = trafficSampler
         self.selectedVPNProtocol = self.protocolSelectionStore.selectedProtocol
         self.isAutoConnectEnabled = defaults.bool(forKey: "vpn.autoConnect.enabled")
+        self.isKillSwitchEnabled = defaults.bool(forKey: "vpn.killSwitch.enabled")
+        self.killSwitchActivationState = KillSwitchActivationState(
+            rawValue: defaults.string(forKey: "vpn.killSwitch.activation") ?? ""
+        ) ?? (defaults.bool(forKey: "vpn.killSwitch.enabled") ? .armed : .off)
         self.vpn = vpnManager ?? VPNManagerCoordinator(api: resolvedAPI)
         self.defaults = defaults
         self.cachedPlanName = defaults.string(forKey: cachedPlanNameKey)
@@ -96,6 +106,9 @@ final class AppModel: ObservableObject {
             api.clearLocalSession()
             clearCachedPlan()
             clearPendingRegistration()
+            persistAutoConnectEnabled(false)
+            persistKillSwitch(enabled: false, activation: .off)
+            await vpn.disconnectAndForget()
             route = .login
             return
         }
@@ -105,6 +118,7 @@ final class AppModel: ObservableObject {
                 session = try await api.restoreSession()
                 route = .authenticated
                 await refreshAccountData(showErrors: false)
+                await reconcileKillSwitchOnLaunch()
                 await reconcileAutoConnectOnLaunch()
                 return
             } catch let error as APIError where error.code == "APP_VERSION_BLOCKED" || error.code == "APP_VERSION_REQUIRED" {
@@ -114,6 +128,10 @@ final class AppModel: ObservableObject {
                 // A stale session falls through to registration or login.
             }
         }
+
+        persistAutoConnectEnabled(false)
+        persistKillSwitch(enabled: false, activation: .off)
+        await vpn.disconnectAndForget()
 
         if let pending = loadPendingRegistration() {
             prefilledEmail = pending.email
@@ -343,7 +361,10 @@ final class AppModel: ObservableObject {
         do {
             if enabled {
                 if vpnStatus.isConnected || vpnStatus.isBusy {
-                    try await vpn.setOnDemandEnabled(true)
+                    let configured = try await vpn.apply(policy: currentConnectionPolicy(autoConnectOverride: true))
+                    if isKillSwitchEnabled, configured {
+                        persistKillSwitch(enabled: true, activation: .active)
+                    }
                 } else {
                     refreshServers()
                     await serverRefreshTask?.value
@@ -359,27 +380,78 @@ final class AppModel: ObservableObject {
                         VPNConnectRequest(
                             server: server,
                             protocolName: effectiveConnectionProtocol(),
-                            onDemandEnabled: true
+                            onDemandEnabled: true,
+                            killSwitchEnabled: isKillSwitchEnabled
                         )
                     )
                     await vpnTransitionTask?.value
                     guard vpnStatus != .disconnected, vpnStatus != .invalid else {
-                        try? await vpn.setOnDemandEnabled(false)
+                        _ = try? await vpn.apply(policy: currentConnectionPolicy(autoConnectOverride: false))
                         return
                     }
                 }
             } else {
-                try await vpn.setOnDemandEnabled(false)
+                let configured = try await vpn.apply(policy: currentConnectionPolicy(autoConnectOverride: false))
+                if isKillSwitchEnabled, configured {
+                    persistKillSwitch(enabled: true, activation: .active)
+                }
             }
 
             persistAutoConnectEnabled(enabled)
         } catch {
             if enabled {
-                try? await vpn.setOnDemandEnabled(false)
+                _ = try? await vpn.apply(policy: currentConnectionPolicy(autoConnectOverride: false))
             }
             persistAutoConnectEnabled(false)
             present(error)
         }
+    }
+
+    func setKillSwitchEnabled(_ enabled: Bool) async {
+        guard enabled != isKillSwitchEnabled, !isUpdatingKillSwitch else { return }
+        if enabled, !isProUser {
+            presentedError = APIError(message: "Kill Switch requires a Pro plan.")
+            return
+        }
+
+        isUpdatingKillSwitch = true
+        defer { isUpdatingKillSwitch = false }
+
+        if enabled {
+            persistKillSwitch(enabled: true, activation: .armed)
+            guard vpnStatus.isConnected else { return }
+            do {
+                let configured = try await vpn.apply(policy: currentConnectionPolicy())
+                persistKillSwitch(enabled: true, activation: configured ? .active : .armed)
+            } catch {
+                present(error)
+            }
+            return
+        }
+
+        do {
+            _ = try await vpn.apply(
+                policy: VPNConnectionPolicy.appPolicy(
+                    autoConnectEnabled: isAutoConnectEnabled,
+                    killSwitchEnabled: false
+                )
+            )
+            persistKillSwitch(enabled: false, activation: .off)
+        } catch {
+            present(error)
+        }
+    }
+
+    func cancelKillSwitchDisconnect() {
+        isKillSwitchDisconnectConfirmationPresented = false
+    }
+
+    func confirmKillSwitchDisableAndDisconnect() async {
+        isKillSwitchDisconnectConfirmationPresented = false
+        await setKillSwitchEnabled(false)
+        guard !isKillSwitchEnabled else { return }
+        requestVPNDisconnect(bypassingKillSwitchConfirmation: true)
+        await vpnTransitionTask?.value
     }
 
     func refreshVPNStatus() async {
@@ -426,6 +498,7 @@ final class AppModel: ObservableObject {
     func signOut() async {
         cancelActiveVPNTransition()
         persistAutoConnectEnabled(false)
+        persistKillSwitch(enabled: false, activation: .off)
         await vpn.disconnectAndForget()
         persistActiveStatisticsSessionIfNeeded(endedAt: Date())
         await api.logout()
@@ -465,7 +538,8 @@ final class AppModel: ObservableObject {
             VPNConnectRequest(
                 server: server,
                 protocolName: effectiveConnectionProtocol(),
-                onDemandEnabled: isAutoConnectEnabled
+                onDemandEnabled: currentConnectionPolicy().onDemandEnabled,
+                killSwitchEnabled: isKillSwitchEnabled
             )
         )
     }
@@ -484,13 +558,19 @@ final class AppModel: ObservableObject {
             VPNConnectRequest(
                 server: server,
                 protocolName: effectiveConnectionProtocol(),
-                onDemandEnabled: isAutoConnectEnabled
+                onDemandEnabled: currentConnectionPolicy().onDemandEnabled,
+                killSwitchEnabled: isKillSwitchEnabled
             )
         )
         refreshServers()
     }
 
-    func requestVPNDisconnect() {
+    func requestVPNDisconnect(bypassingKillSwitchConfirmation: Bool = false) {
+        if isKillSwitchEnabled, !bypassingKillSwitchConfirmation,
+           vpnStatus != .disconnected, vpnStatus != .invalid {
+            isKillSwitchDisconnectConfirmationPresented = true
+            return
+        }
         queuedVPNConnectRequest = nil
 
         switch vpnStatus {
@@ -628,6 +708,7 @@ final class AppModel: ObservableObject {
     private func forceSignOut() {
         cancelActiveVPNTransition()
         persistAutoConnectEnabled(false)
+        persistKillSwitch(enabled: false, activation: .off)
         persistActiveStatisticsSessionIfNeeded(endedAt: Date())
         Task { await vpn.disconnectAndForget() }
         clearSessionState()
@@ -671,9 +752,35 @@ final class AppModel: ObservableObject {
         requestQuickConnect()
     }
 
+    private func reconcileKillSwitchOnLaunch() async {
+        guard isKillSwitchEnabled, killSwitchActivationState == .active else { return }
+        do {
+            let configured = try await vpn.apply(policy: currentConnectionPolicy())
+            if !configured {
+                persistKillSwitch(enabled: true, activation: .armed)
+            }
+        } catch {
+            persistKillSwitch(enabled: true, activation: .armed)
+        }
+    }
+
     private func persistAutoConnectEnabled(_ enabled: Bool) {
         isAutoConnectEnabled = enabled
         defaults.set(enabled, forKey: autoConnectEnabledKey)
+    }
+
+    private func persistKillSwitch(enabled: Bool, activation: KillSwitchActivationState) {
+        isKillSwitchEnabled = enabled
+        killSwitchActivationState = activation
+        defaults.set(enabled, forKey: killSwitchEnabledKey)
+        defaults.set(activation.rawValue, forKey: killSwitchActivationKey)
+    }
+
+    private func currentConnectionPolicy(autoConnectOverride: Bool? = nil) -> VPNConnectionPolicy {
+        VPNConnectionPolicy.appPolicy(
+            autoConnectEnabled: autoConnectOverride ?? isAutoConnectEnabled,
+            killSwitchEnabled: isKillSwitchEnabled
+        )
     }
 
     private var selectedServer: VPNServer? {
@@ -734,9 +841,15 @@ final class AppModel: ObservableObject {
                 try await vpn.connect(
                     to: request.server,
                     protocol: request.protocolName,
-                    onDemandEnabled: request.onDemandEnabled
+                    policy: VPNConnectionPolicy(
+                        killSwitchEnabled: request.killSwitchEnabled,
+                        onDemandEnabled: request.onDemandEnabled
+                    )
                 )
                 guard generation == vpnTransitionGeneration, !Task.isCancelled else { return }
+                if request.killSwitchEnabled {
+                    persistKillSwitch(enabled: true, activation: .active)
+                }
                 activeVPNTransition = nil
                 handleVPNStatusChange(vpn.status)
             } catch is CancellationError {

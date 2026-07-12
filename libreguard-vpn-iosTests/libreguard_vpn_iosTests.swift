@@ -5,6 +5,34 @@ import Testing
 
 @MainActor
 struct libreguard_vpn_iosTests {
+    @Test func passwordResetRequestsUseUnauthenticatedAccountEndpoints() async throws {
+        try await withSerializedRequests {
+            var requestCount = 0
+            let client = makeClient { request in
+                requestCount += 1
+                #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+                let body = try requestBody(from: request)
+                let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                switch request.url?.path {
+                case "/api/account/forgot-password":
+                    #expect(json["email"] as? String == "person@example.com")
+                    return try makeResponse(request, status: 200, json: ["message": "Check your inbox."])
+                case "/api/account/reset-password":
+                    #expect(json["email"] as? String == "person@example.com")
+                    #expect(json["token"] as? String == "reset-code")
+                    #expect(json["newPassword"] as? String == "new-secret")
+                    return try makeResponse(request, status: 200, json: ["message": "Password has been reset successfully."])
+                default:
+                    throw APIError(message: "Unexpected endpoint")
+                }
+            }
+
+            _ = try await client.requestPasswordReset(email: "person@example.com")
+            _ = try await client.resetPassword(email: "person@example.com", token: "reset-code", newPassword: "new-secret")
+            #expect(requestCount == 2)
+        }
+    }
+
     @Test func loginDecodesTwoFactorChallenge() async throws {
         try await withSerializedRequests {
             let client = makeClient { request in

@@ -12,8 +12,7 @@ enum OpenVPNRuntimeConnectionState: String, Codable, Equatable {
 }
 
 enum OpenVPNRuntimeEngine: String, Codable, Equatable {
-    case openVPNCore = "OpenVPNCore"
-    case missing = "Missing"
+    case tunnelKit = "TunnelKit"
 }
 
 struct OpenVPNRuntimeDiagnostics: Codable, Equatable {

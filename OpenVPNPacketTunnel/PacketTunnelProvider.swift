@@ -1,99 +1,108 @@
 import Foundation
 import NetworkExtension
 import OSLog
+import TunnelKitOpenVPNAppExtension
 
-final class PacketTunnelProvider: NEPacketTunnelProvider {
+final class PacketTunnelProvider: OpenVPNTunnelProvider {
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? OpenVPNConstants.tunnelBundleIdentifier,
         category: "PacketTunnel"
     )
-    private let profileStore: OpenVPNProfileEnvelopeStoring = OpenVPNProfileEnvelopeStore()
-    private let runtime: OpenVPNRuntime = OpenVPNRuntimeFactory.make()
+    private let diagnosticsLock = NSLock()
+    private var storedDiagnostics = OpenVPNRuntimeDiagnostics(
+        state: .idle,
+        engine: .tunnelKit,
+        canStartConnections: true
+    )
 
-    override func startTunnel(options: [String : NSObject]? = nil, completionHandler: @escaping (Error?) -> Void) {
-        logger.info("OpenVPN packet tunnel start requested")
+    private var diagnostics: OpenVPNRuntimeDiagnostics {
+        diagnosticsLock.lock()
+        defer { diagnosticsLock.unlock() }
+        return storedDiagnostics
+    }
 
-        guard let tunnelProtocol = protocolConfiguration as? NETunnelProviderProtocol else {
-            completionHandler(OpenVPNProviderError.missingProtocolConfiguration)
-            return
-        }
-        guard let profileReference = tunnelProtocol.passwordReference else {
-            completionHandler(OpenVPNProviderError.missingProfileReference)
-            return
-        }
-
-        do {
-            guard let envelope = try profileStore.load(persistentReference: profileReference) else {
-                throw OpenVPNProviderError.profileNotFound
-            }
-            guard !envelope.isExpired else {
-                throw OpenVPNProfileError.expiredCertificate
-            }
-
-            let configuration = try OpenVPNProfileConfiguration.parse(envelope.configContent)
-            try configuration.validateMobileCompatibility()
-
-            runtime.start(envelope: envelope, provider: self) { [weak self] result in
-                guard let self else { return }
-                switch result {
-                case .success:
-                    self.logger.info("OpenVPN runtime reported a successful start")
-                    completionHandler(nil)
-                case .failure(let error):
-                    self.logger.error("OpenVPN runtime failed to start: \(Self.describe(error))")
-                    completionHandler(error)
+    override var reasserting: Bool {
+        didSet {
+            mutateDiagnostics { diagnostics in
+                diagnostics.state = reasserting ? .reconnecting : .connected
+                if !reasserting, diagnostics.connectedAt == nil {
+                    diagnostics.connectedAt = Date()
                 }
             }
-        } catch {
-            logger.error("OpenVPN packet tunnel start failed: \(Self.describe(error))")
+        }
+    }
+
+    override func startTunnel(options: [String: NSObject]? = nil, completionHandler: @escaping (Error?) -> Void) {
+        logger.info("OpenVPN packet tunnel start requested")
+        let metadata = OpenVPNConnectionMetadataStore.load()
+        mutateDiagnostics { diagnostics in
+            diagnostics = OpenVPNRuntimeDiagnostics(
+                state: .starting,
+                serverId: metadata?.serverId,
+                serverName: metadata?.serverName,
+                serverAddress: metadata?.serverAddress,
+                engine: .tunnelKit,
+                canStartConnections: true
+            )
+        }
+
+        super.startTunnel(options: options) { [weak self] error in
+            guard let self else {
+                completionHandler(error)
+                return
+            }
+            self.mutateDiagnostics { diagnostics in
+                if let error {
+                    diagnostics.state = .failed
+                    diagnostics.lastError = error.localizedDescription
+                } else {
+                    diagnostics.state = .connected
+                    diagnostics.connectedAt = Date()
+                    diagnostics.lastError = nil
+                }
+            }
+            if let error {
+                self.logger.error("OpenVPN tunnel failed to start: \(Self.describe(error))")
+            } else {
+                self.logger.info("OpenVPN tunnel connected")
+            }
             completionHandler(error)
         }
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         logger.info("OpenVPN packet tunnel stop requested with reason \(reason.rawValue, privacy: .public)")
-        runtime.stop()
-        completionHandler()
+        mutateDiagnostics { $0.state = .stopping }
+        super.stopTunnel(with: reason) { [weak self] in
+            self?.mutateDiagnostics { diagnostics in
+                diagnostics.state = .stopped
+                diagnostics.connectedAt = nil
+            }
+            completionHandler()
+        }
     }
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)? = nil) {
-        guard let completionHandler else { return }
-
-        do {
-            let request = try OpenVPNProviderMessageCodec.decodeRequest(from: messageData)
-            let response = try OpenVPNProviderMessageCodec.encodeResponse(
-                type: request.type,
-                diagnostics: runtime.diagnostics
-            )
-            completionHandler(response)
-        } catch {
-            logger.error("OpenVPN app message handling failed: \(Self.describe(error))")
-            let response = try? OpenVPNProviderMessageCodec.encodeInvalidMessageResponse(
-                diagnostics: runtime.diagnostics
-            )
-            completionHandler(response)
+        guard let request = try? OpenVPNProviderMessageCodec.decodeRequest(from: messageData) else {
+            super.handleAppMessage(messageData, completionHandler: completionHandler)
+            return
         }
+
+        let response = try? OpenVPNProviderMessageCodec.encodeResponse(
+            type: request.type,
+            diagnostics: diagnostics
+        )
+        completionHandler?(response)
+    }
+
+    private func mutateDiagnostics(_ mutation: (inout OpenVPNRuntimeDiagnostics) -> Void) {
+        diagnosticsLock.lock()
+        mutation(&storedDiagnostics)
+        diagnosticsLock.unlock()
     }
 
     private static func describe(_ error: Error) -> String {
         let nsError = error as NSError
         return "\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"
-    }
-}
-
-enum OpenVPNProviderError: LocalizedError {
-    case missingProtocolConfiguration
-    case missingProfileReference
-    case profileNotFound
-
-    var errorDescription: String? {
-        switch self {
-        case .missingProtocolConfiguration:
-            return "The OpenVPN tunnel configuration is missing."
-        case .missingProfileReference:
-            return "The OpenVPN profile reference is missing."
-        case .profileNotFound:
-            return "The OpenVPN profile could not be loaded from keychain."
-        }
     }
 }

@@ -6,7 +6,7 @@ import OSLog
 final class OpenVPNManager: VPNManaging {
     private let api: BackendServicing
     private let deviceKeyStore: VPNDeviceKeyProviding
-    private let profileStore: OpenVPNProfileEnvelopeStoring
+    private let protocolBuilder: OpenVPNTunnelProtocolBuilding
     private let manager: NETunnelProviderManager
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "libreguard-vpn-ios",
@@ -28,13 +28,13 @@ final class OpenVPNManager: VPNManaging {
     init(
         api: BackendServicing,
         deviceKeyStore: VPNDeviceKeyProviding = VPNDeviceKeyStore(),
-        profileStore: OpenVPNProfileEnvelopeStoring = OpenVPNProfileEnvelopeStore(),
+        protocolBuilder: OpenVPNTunnelProtocolBuilding = TunnelKitOpenVPNProtocolBuilder(),
         manager: NETunnelProviderManager = NETunnelProviderManager(),
         providerBundleIdentifier: String = OpenVPNConstants.tunnelBundleIdentifier
     ) {
         self.api = api
         self.deviceKeyStore = deviceKeyStore
-        self.profileStore = profileStore
+        self.protocolBuilder = protocolBuilder
         self.manager = manager
         self.providerBundleIdentifier = providerBundleIdentifier
         observeStatusChanges()
@@ -64,7 +64,7 @@ final class OpenVPNManager: VPNManaging {
         }
     }
 
-    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol = .openVPN, onDemandEnabled: Bool = false) async throws {
+    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol = .openVPN, policy: VPNConnectionPolicy = .disabled) async throws {
         logger.info("OpenVPN connect requested for server \(server.id, privacy: .public) using protocol \(protocolName.rawValue, privacy: .public)")
 
         guard protocolName == .openVPN else {
@@ -84,48 +84,38 @@ final class OpenVPNManager: VPNManaging {
             let response = try await api.fetchVPNConfig(serverId: server.id, protocol: .openVPN)
             try Task.checkCancellation()
             logger.debug("Backend OpenVPN configuration received for server \(server.id, privacy: .public)")
-            let profile = try OpenVPNProfileConfiguration.parse(response.configContent)
-            try profile.validateMobileCompatibility()
-            try Task.checkCancellation()
 
             if let expirationDate = response.expirationDate, expirationDate <= Date() {
-                throw OpenVPNProfileError.expiredCertificate
+                throw OpenVPNManagerError.expiredCertificate
             }
 
             let passphrase = try deviceKeyStore.decryptPassphrase(from: response.encryptedPassphrase)
             try Task.checkCancellation()
-            let serverAddress = Self.resolveServerAddress(from: profile, response: response, server: server)
-            let envelope = OpenVPNProfileEnvelope(
-                serverId: server.id,
-                serverName: response.serverName,
-                serverAddress: serverAddress,
-                certificateName: response.certificateName,
-                issueDate: response.issueDate,
-                expirationDate: response.expirationDate,
-                configContent: response.configContent,
+            let tunnelProtocol = try protocolBuilder.makeTunnelProtocol(
+                configuration: response.configContent,
                 privateKeyPassphrase: passphrase
             )
-
-            let persistentReference = try profileStore.save(envelope)
             try Task.checkCancellation()
+
+            let serverAddress = tunnelProtocol.serverAddress ?? Self.fallbackServerAddress(response: response, server: server)
+            tunnelProtocol.serverAddress = serverAddress
+            try OpenVPNConnectionMetadataStore.save(
+                OpenVPNConnectionMetadata(
+                    serverId: server.id,
+                    serverName: response.serverName,
+                    serverAddress: serverAddress
+                )
+            )
 
             try await loadPreferences()
             try Task.checkCancellation()
-            let tunnelProtocol = NETunnelProviderProtocol()
             tunnelProtocol.providerBundleIdentifier = providerBundleIdentifier
-            tunnelProtocol.serverAddress = serverAddress
-            tunnelProtocol.passwordReference = persistentReference
-            tunnelProtocol.providerConfiguration = [
-                "schemaVersion": NSNumber(value: envelope.schemaVersion),
-                "serverId": NSNumber(value: envelope.serverId),
-                "serverName": envelope.serverName as NSString,
-                "serverAddress": envelope.serverAddress as NSString
-            ]
+            policy.apply(to: tunnelProtocol)
 
             manager.localizedDescription = "LibreGuard OpenVPN"
             manager.protocolConfiguration = tunnelProtocol
             manager.isEnabled = true
-            applyOnDemandConfiguration(enabled: onDemandEnabled)
+            applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
 
             logger.debug("Saving OpenVPN preferences")
             try await savePreferences()
@@ -146,18 +136,22 @@ final class OpenVPNManager: VPNManaging {
             throw CancellationError()
         } catch {
             logger.error("OpenVPN connect failed: \(Self.describe(error))")
+            OpenVPNConnectionMetadataStore.clear()
             status = .disconnected
             throw error
         }
     }
 
-    func setOnDemandEnabled(_ enabled: Bool) async throws {
-        guard !isRunningInSimulator else { return }
+    @discardableResult
+    func apply(policy: VPNConnectionPolicy) async throws -> Bool {
+        guard !isRunningInSimulator else { return false }
         try await loadPreferences()
-        guard manager.protocolConfiguration != nil else { return }
-        applyOnDemandConfiguration(enabled: enabled)
+        guard let tunnelProtocol = manager.protocolConfiguration else { return false }
+        policy.apply(to: tunnelProtocol)
+        applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
         try await savePreferences()
         try await loadPreferences()
+        return manager.protocolConfiguration?.includeAllNetworks == policy.killSwitchEnabled
     }
 
     func disconnect() async {
@@ -175,7 +169,7 @@ final class OpenVPNManager: VPNManaging {
         } catch {
             logger.error("Failed to remove OpenVPN preferences during disconnect: \(Self.describe(error))")
         }
-        profileStore.clear()
+        OpenVPNConnectionMetadataStore.clear()
         status = .disconnected
     }
 
@@ -288,12 +282,7 @@ final class OpenVPNManager: VPNManaging {
         #endif
     }
 
-    private static func resolveServerAddress(from profile: OpenVPNProfileConfiguration, response: VPNConfigResponse, server: VPNServer) -> String {
-        if let remoteHost = profile.remoteEndpoints.first?.host.trimmingCharacters(in: .whitespacesAndNewlines),
-           !remoteHost.isEmpty {
-            return remoteHost
-        }
-
+    private static func fallbackServerAddress(response: VPNConfigResponse, server: VPNServer) -> String {
         if let hostname = server.serverHostname?.trimmingCharacters(in: .whitespacesAndNewlines),
            !hostname.isEmpty {
             return hostname
@@ -346,11 +335,14 @@ private extension VPNConnectionState {
 
 enum OpenVPNManagerError: LocalizedError {
     case unsupportedProtocol(String)
+    case expiredCertificate
 
     var errorDescription: String? {
         switch self {
         case let .unsupportedProtocol(protocolName):
             return "OpenVPNManager only supports OpenVPN. Received \(protocolName)."
+        case .expiredCertificate:
+            return "The OpenVPN certificate has expired."
         }
     }
 }

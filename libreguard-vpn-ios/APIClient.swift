@@ -11,6 +11,8 @@ protocol BackendServicing: AnyObject {
     func verifyTwoFactor(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse
     func verifyRecoveryCode(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse
     func register(email: String, password: String) async throws -> RegistrationResponse
+    func requestPasswordReset(email: String) async throws -> MessageResponse
+    func resetPassword(email: String, token: String, newPassword: String) async throws -> MessageResponse
     func confirmationStatus(userId: String) async throws -> ConfirmationStatusResponse
     func resendConfirmation(email: String) async throws
     func removePasswordDevice(email: String, password: String, deviceId: Int) async throws
@@ -139,6 +141,24 @@ final class APIClient: BackendServicing {
     func register(email: String, password: String) async throws -> RegistrationResponse {
         let response: RegistrationResponse = try await send(.post, path: "/api/register", body: RegistrationRequest(email: email, password: password), authorized: false)
         return response
+    }
+
+    func requestPasswordReset(email: String) async throws -> MessageResponse {
+        try await send(
+            .post,
+            path: "/api/account/forgot-password",
+            body: ForgotPasswordRequest(email: email),
+            authorized: false
+        )
+    }
+
+    func resetPassword(email: String, token: String, newPassword: String) async throws -> MessageResponse {
+        try await send(
+            .post,
+            path: "/api/account/reset-password",
+            body: ResetPasswordRequest(email: email, token: token, newPassword: newPassword),
+            authorized: false
+        )
     }
 
     func confirmationStatus(userId: String) async throws -> ConfirmationStatusResponse {
