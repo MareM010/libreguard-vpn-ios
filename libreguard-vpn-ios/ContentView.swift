@@ -1124,6 +1124,7 @@ private struct SettingsView: View {
     @Binding var isDarkMode: Bool
     @State private var splitTunneling = false
     @State private var showTwoFactorManagement = false
+    @State private var showProtocolSelection = false
     @State private var threatProtection = true
     @State private var notifications = true
 
@@ -1193,7 +1194,13 @@ private struct SettingsView: View {
                     }
 
                     SettingsSection(title: "Protocol") {
-                        NavigationRow(icon: "lock", title: "VPN Protocol", subtitle: app.selectedVPNProtocol.displayName)
+                        NavigationRow(
+                            icon: "lock",
+                            title: "VPN Protocol",
+                            subtitle: app.selectedVPNProtocol.displayName
+                        ) {
+                            showProtocolSelection = true
+                        }
                         NavigationRow(icon: "globe", title: "DNS Settings", subtitle: "Custom DNS servers")
                     }
 
@@ -1249,6 +1256,9 @@ private struct SettingsView: View {
         .sheet(isPresented: $showTwoFactorManagement) {
             TwoFactorManagementView()
         }
+        .sheet(isPresented: $showProtocolSelection) {
+            VPNProtocolSelectionView(onUpgrade: onUpgrade)
+        }
         .task {
             if app.twoFactorStatus == nil { await app.refreshAccountData(showErrors: false) }
         }
@@ -1266,6 +1276,55 @@ private struct SettingsView: View {
         case .active:
             return "Active • Traffic is blocked if the VPN drops"
         }
+    }
+}
+
+private struct VPNProtocolSelectionView: View {
+    @EnvironmentObject private var app: AppModel
+    @Environment(\.dismiss) private var dismiss
+    let onUpgrade: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Choose the protocol used for new VPN connections.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                ProtocolButton(
+                    title: "IKEv2/IPSec",
+                    isSelected: app.selectedVPNProtocol == .ikev2 || app.selectedVPNProtocol == .ikev2IPSec
+                ) {
+                    app.selectVPNProtocol(.ikev2)
+                    dismiss()
+                }
+
+                ProtocolButton(
+                    title: "OpenVPN",
+                    isSelected: app.selectedVPNProtocol == .openVPN,
+                    badge: app.isOpenVPNAvailable ? nil : "PRO"
+                ) {
+                    guard app.isOpenVPNAvailable else {
+                        dismiss()
+                        onUpgrade()
+                        return
+                    }
+                    app.selectVPNProtocol(.openVPN)
+                    dismiss()
+                }
+
+                Spacer()
+            }
+            .padding(24)
+            .navigationTitle("VPN Protocol")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium])
     }
 }
 
