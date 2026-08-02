@@ -10,6 +10,15 @@ struct ConnectionTransitionTests {
         #expect(disconnected.description == "Your connection is not secure")
         #expect(disconnected.actionTitle == "Connect")
 
+        let preparing = ConnectionHeroPresentation.make(
+            for: .disconnected,
+            hasQueuedReconnect: false,
+            preparationMessage: "Your OpenVPN certificate is still being prepared. Try Connect again in a moment."
+        )
+        #expect(preparing.title == "Certificate preparing")
+        #expect(preparing.progressLabel == "Preparation continues")
+        #expect(preparing.actionTitle == "Connect")
+
         let connecting = ConnectionHeroPresentation.make(for: .connecting, hasQueuedReconnect: false)
         #expect(connecting.title == "Connecting")
         #expect(connecting.progressLabel == "Securing tunnel")

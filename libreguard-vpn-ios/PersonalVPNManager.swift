@@ -8,6 +8,8 @@ protocol VPNManaging: AnyObject {
     var onStatusChange: ((VPNConnectionState) -> Void)? { get set }
     var onDisconnectError: ((Error) -> Void)? { get set }
 
+    func setCertificatePreparationHandler(_ handler: ((String?) -> Void)?)
+
     func refreshStatus() async
     func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, policy: VPNConnectionPolicy) async throws
     @discardableResult func apply(policy: VPNConnectionPolicy) async throws -> Bool
@@ -18,6 +20,7 @@ protocol VPNManaging: AnyObject {
 
 extension VPNManaging {
     func currentTrafficSnapshot() async -> TunnelTrafficSnapshot? { nil }
+    func setCertificatePreparationHandler(_ handler: ((String?) -> Void)?) {}
 }
 
 struct VPNConnectionPolicy: Equatable {
@@ -47,6 +50,7 @@ struct VPNConnectionPolicy: Equatable {
 @MainActor
 final class PersonalVPNManager: VPNManaging {
     private let api: BackendServicing
+    private let configurationResolver: VPNConfigurationResolving
     private let translator: VPNConfigurationTranslator
     private let manager: NEVPNManager
     private let logger = Logger(
@@ -68,13 +72,19 @@ final class PersonalVPNManager: VPNManaging {
 
     init(
         api: BackendServicing,
+        resolver: VPNConfigurationResolving? = nil,
         translator: VPNConfigurationTranslator? = nil,
         manager: NEVPNManager = .shared()
     ) {
         self.api = api
+        self.configurationResolver = resolver ?? VPNConfigurationResolver(api: api)
         self.translator = translator ?? VPNConfigurationTranslator()
         self.manager = manager
         observeStatusChanges()
+    }
+
+    func setCertificatePreparationHandler(_ handler: ((String?) -> Void)?) {
+        configurationResolver.onPreparationStateChange = handler
     }
 
     deinit {
@@ -113,8 +123,8 @@ final class PersonalVPNManager: VPNManaging {
         status = .connecting
 
         do {
-            logger.debug("Fetching VPN configuration from backend")
-            let response = try await api.fetchVPNConfig(serverId: server.id, protocol: protocolName)
+            logger.debug("Resolving VPN configuration from backend")
+            let response = try await configurationResolver.resolve(serverId: server.id, protocol: protocolName)
             try Task.checkCancellation()
             logger.debug("Backend VPN configuration received for server \(server.id, privacy: .public)")
             let vpnProtocol = try translator.makeProtocol(server: server, response: response, policy: policy)

@@ -56,6 +56,303 @@ struct OpenVPNTests {
         }
     }
 
+    @Test func certificateRequestUsesCanonicalIKEv2ProtocolValue() async throws {
+        try await withSerializedRequests {
+            let client = makeClient { request in
+                #expect(request.url?.path == "/api/certificates/request")
+                let body = try self.requestBody(from: request)
+                let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                #expect(json["serverId"] as? Int == 12)
+                #expect(json["vpnType"] as? String == "IKEV2/IPSec")
+                return try self.makeResponse(request, status: 200, json: [
+                    "jobId": 90,
+                    "requestedName": "IKEV2_client90",
+                    "status": "Pending"
+                ])
+            }
+
+            let response = try await client.requestCertificate(serverId: 12, protocol: .ikev2)
+            #expect(response.jobId == 90)
+        }
+    }
+
+    @Test func certificateResolverCreatesAndWaitsBeforeRefetchingOpenVPNConfig() async throws {
+        try await withSerializedRequests {
+            var configAttempts = 0
+            var requestedJob = false
+            let client = makeClient { request in
+                switch request.url?.path {
+                case "/api/vpn/config":
+                    configAttempts += 1
+                    if configAttempts == 1 {
+                        return try self.makeResponse(request, status: 404, json: [
+                            "message": "No valid OpenVPN certificate found.",
+                            "errorCode": "CERTIFICATE_NOT_FOUND"
+                        ])
+                    }
+                    return try self.makeResponse(request, status: 200, json: [
+                        "success": true,
+                        "protocol": "OpenVPN",
+                        "serverName": "DE-1",
+                        "serverIp": "203.0.113.10",
+                        "certificateName": "OVPN_client91",
+                        "configContent": self.openVPNSampleConfig(),
+                        "encryptedPassphrase": [
+                            "algorithm": "RSA-OAEP-256",
+                            "keyId": "device-key-id",
+                            "ciphertext": "YQ=="
+                        ],
+                        "issueDate": "2026-05-29T09:43:34Z",
+                        "expirationDate": "2028-08-31T09:43:34Z",
+                        "clientIp": "198.51.100.45",
+                        "deviceId": "test-device"
+                    ])
+                case "/api/certificates/request":
+                    requestedJob = true
+                    let body = try self.requestBody(from: request)
+                    let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                    #expect(json["serverId"] as? Int == 12)
+                    #expect(json["vpnType"] as? String == "OPENVPN")
+                    return try self.makeResponse(request, status: 200, json: [
+                        "jobId": 91,
+                        "requestedName": "OVPN_client91",
+                        "status": "Pending"
+                    ])
+                case "/api/certificates/jobs/91":
+                    return try self.makeResponse(request, status: 200, json: [
+                        "id": 91,
+                        "status": "Success",
+                        "jobType": "OPENVPN_CREATE",
+                        "requestedName": "OVPN_client91",
+                        "outputCertificateId": 7
+                    ])
+                default:
+                    throw APIError(message: "Unexpected endpoint: \(request.url?.absoluteString ?? "nil")")
+                }
+            }
+
+            let resolver = VPNConfigurationResolver(api: client, preparationTimeout: 2)
+            var preparationMessages: [String] = []
+            var preparationCleared = false
+            resolver.onPreparationStateChange = { message in
+                if let message {
+                    preparationMessages.append(message)
+                } else {
+                    preparationCleared = true
+                }
+            }
+            let response = try await resolver.resolve(serverId: 12, protocol: .openVPN)
+
+            #expect(requestedJob)
+            #expect(configAttempts == 2)
+            #expect(response.certificateName == "OVPN_client91")
+            #expect(preparationMessages.first?.contains("Preparing your OpenVPN certificate") == true)
+            #expect(preparationCleared)
+        }
+    }
+
+    @Test func certificateResolverUsesExistingConfigurationWithoutRequestingAJob() async throws {
+        try await withSerializedRequests {
+            var requestCount = 0
+            let client = makeClient { request in
+                requestCount += 1
+                #expect(request.url?.path == "/api/vpn/config")
+                return try self.makeResponse(request, status: 200, json: [
+                    "success": true,
+                    "protocol": "OpenVPN",
+                    "serverName": "DE-1",
+                    "serverIp": "203.0.113.10",
+                    "certificateName": "OVPN_existing",
+                    "configContent": self.openVPNSampleConfig(),
+                    "encryptedPassphrase": ["algorithm": "RSA-OAEP-256", "keyId": "device-key-id", "ciphertext": "YQ=="],
+                    "issueDate": "2026-05-29T09:43:34Z",
+                    "expirationDate": "2028-08-31T09:43:34Z"
+                ])
+            }
+
+            let resolver = VPNConfigurationResolver(api: client)
+            let response = try await resolver.resolve(serverId: 12, protocol: .openVPN)
+
+            #expect(requestCount == 1)
+            #expect(response.certificateName == "OVPN_existing")
+        }
+    }
+
+    @Test func certificateResolverSurfacesTerminalJobFailureWithoutRefetchingConfig() async throws {
+        try await withSerializedRequests {
+            var configAttempts = 0
+            let client = makeClient { request in
+                switch request.url?.path {
+                case "/api/vpn/config":
+                    configAttempts += 1
+                    return try self.makeResponse(request, status: 404, json: ["errorCode": "CERTIFICATE_NOT_FOUND"])
+                case "/api/certificates/request":
+                    return try self.makeResponse(request, status: 200, json: ["jobId": 94, "status": "Pending"])
+                case "/api/certificates/jobs/94":
+                    return try self.makeResponse(request, status: 200, json: [
+                        "id": 94,
+                        "status": "Failed",
+                        "errorMessage": "The certificate worker could not provision this certificate."
+                    ])
+                default:
+                    throw APIError(message: "Unexpected endpoint")
+                }
+            }
+
+            let resolver = VPNConfigurationResolver(api: client, preparationTimeout: 1)
+            do {
+                _ = try await resolver.resolve(serverId: 12, protocol: .openVPN)
+                Issue.record("Expected certificate generation to fail")
+            } catch let error as APIError {
+                #expect(error.code == "CERTIFICATE_GENERATION_FAILED")
+                #expect(error.message == "The certificate worker could not provision this certificate.")
+            }
+            #expect(configAttempts == 1)
+        }
+    }
+
+    @Test func certificateResolverRetainsPreparationMessageAfterTimeout() async throws {
+        try await withSerializedRequests {
+            var configAttempts = 0
+            var preparationMessage: String?
+            let client = makeClient { request in
+                switch request.url?.path {
+                case "/api/vpn/config":
+                    configAttempts += 1
+                    return try self.makeResponse(request, status: 404, json: ["errorCode": "CERTIFICATE_NOT_FOUND"])
+                case "/api/certificates/request":
+                    return try self.makeResponse(request, status: 200, json: ["jobId": 95, "status": "Pending"])
+                case "/api/certificates/jobs/95":
+                    return try self.makeResponse(request, status: 200, json: ["id": 95, "status": "Running"])
+                default:
+                    throw APIError(message: "Unexpected endpoint")
+                }
+            }
+
+            let resolver = VPNConfigurationResolver(api: client, preparationTimeout: 0.01)
+            resolver.onPreparationStateChange = { message in
+                if message?.contains("still being prepared") == true {
+                    preparationMessage = message
+                }
+            }
+
+            do {
+                _ = try await resolver.resolve(serverId: 12, protocol: .openVPN)
+                Issue.record("Expected certificate preparation to time out")
+            } catch let error as APIError {
+                #expect(error.code == "CERTIFICATE_PREPARATION_TIMEOUT")
+            }
+            #expect(configAttempts == 1)
+            #expect(preparationMessage?.contains("still being prepared") == true)
+        }
+    }
+
+    @Test func certificateResolverStopsPollingWhenConnectTaskIsCancelled() async throws {
+        try await withSerializedRequests {
+            let client = makeClient { request in
+                switch request.url?.path {
+                case "/api/vpn/config":
+                    return try self.makeResponse(request, status: 404, json: ["errorCode": "CERTIFICATE_NOT_FOUND"])
+                case "/api/certificates/request":
+                    return try self.makeResponse(request, status: 200, json: ["jobId": 96, "status": "Pending"])
+                case "/api/certificates/jobs/96":
+                    return try self.makeResponse(request, status: 200, json: ["id": 96, "status": "Running"])
+                default:
+                    throw APIError(message: "Unexpected endpoint")
+                }
+            }
+
+            let resolver = VPNConfigurationResolver(api: client, preparationTimeout: 10)
+            let task = Task { @MainActor in
+                try await resolver.resolve(serverId: 12, protocol: .openVPN)
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            task.cancel()
+
+            do {
+                _ = try await task.value
+                Issue.record("Expected certificate resolution to be cancelled")
+            } catch is CancellationError {
+                // Expected: polling must stop with the connect task.
+            }
+        }
+    }
+
+    @Test func certificateResolverDoesNotProvisionForOtherConfigErrors() async {
+        await withSerializedRequests {
+            var requestCount = 0
+            let client = makeClient { request in
+                requestCount += 1
+                #expect(request.url?.path == "/api/vpn/config")
+                return try self.makeResponse(request, status: 404, json: [
+                    "message": "Configuration file not found.",
+                    "errorCode": "CONFIGURATION_NOT_FOUND"
+                ])
+            }
+
+            let resolver = VPNConfigurationResolver(api: client, preparationTimeout: 1)
+            await #expect(throws: APIError.self) {
+                try await resolver.resolve(serverId: 12, protocol: .ikev2)
+            }
+            #expect(requestCount == 1)
+        }
+    }
+
+    @Test func certificateResolverJoinsAnExistingPendingJob() async throws {
+        try await withSerializedRequests {
+            var configAttempts = 0
+            var requestAttempts = 0
+            let client = makeClient { request in
+                switch request.url?.path {
+                case "/api/vpn/config":
+                    configAttempts += 1
+                    if configAttempts == 1 {
+                        return try self.makeResponse(request, status: 404, json: ["errorCode": "CERTIFICATE_NOT_FOUND"])
+                    }
+                    return try self.makeResponse(request, status: 200, json: [
+                        "success": true,
+                        "protocol": "OpenVPN",
+                        "serverName": "DE-1",
+                        "serverIp": "203.0.113.10",
+                        "certificateName": "OVPN_client92",
+                        "configContent": self.openVPNSampleConfig(),
+                        "encryptedPassphrase": ["algorithm": "RSA-OAEP-256", "keyId": "device-key-id", "ciphertext": "YQ=="],
+                        "issueDate": "2026-05-29T09:43:34Z",
+                        "expirationDate": "2028-08-31T09:43:34Z"
+                    ])
+                case "/api/certificates/request":
+                    requestAttempts += 1
+                    return try self.makeResponse(request, status: 409, json: [
+                        "message": "You already have a pending or running job.",
+                        "errorCode": "CERTIFICATE_PENDING"
+                    ])
+                case "/api/client-certificates/check-generation-status/12":
+                    // The query must retain the protocol so IKEv2/OpenVPN jobs cannot be mixed.
+                    // The test uses OpenVPN here because it is the protocol selected by the resolver.
+                    // URLComponents decodes this query before the request reaches the handler.
+                    // swift-format-ignore:next-line
+                    #expect(request.url?.query == "vpnType=OPENVPN")
+                    return try self.makeResponse(request, status: 200, json: [
+                        "canGenerate": false,
+                        "certificateExists": false,
+                        "jobPending": true,
+                        "vpnType": "OpenVPN",
+                        "pendingJob": ["id": 92, "status": "Pending"]
+                    ])
+                case "/api/certificates/jobs/92":
+                    return try self.makeResponse(request, status: 200, json: ["id": 92, "status": "Success"])
+                default:
+                    throw APIError(message: "Unexpected endpoint")
+                }
+            }
+
+            let resolver = VPNConfigurationResolver(api: client, preparationTimeout: 2)
+            _ = try await resolver.resolve(serverId: 12, protocol: .openVPN)
+            #expect(requestAttempts == 1)
+            #expect(configAttempts == 2)
+        }
+    }
+
     @Test func tunnelKitRejectsIncompleteOpenVPNConfiguration() {
         let builder = TunnelKitOpenVPNProtocolBuilder()
         #expect(throws: (any Error).self) {
@@ -64,6 +361,26 @@ struct OpenVPNTests {
                 privateKeyPassphrase: "not-serialized"
             )
         }
+    }
+
+    @Test func tunnelKitReplacesProfileDNSWithLibreGuardPrivateResolver() throws {
+        let publicResolver = "8.8.8.8"
+        let filteredResolver = "10.254.0.54"
+        let builder = TunnelKitOpenVPNProtocolBuilder()
+        let tunnelProtocol = try builder.makeTunnelProtocol(
+            configuration: openVPNSampleConfig() + "\ndhcp-option DNS \(publicResolver)",
+            privateKeyPassphrase: "test-passphrase"
+        )
+        let providerConfiguration = try #require(tunnelProtocol.providerConfiguration)
+        let serialized = try PropertyListSerialization.data(
+            fromPropertyList: providerConfiguration,
+            format: .binary,
+            options: 0
+        )
+
+        #expect(serialized.range(of: Data(LibreGuardDNS.regularResolverAddress.utf8)) != nil)
+        #expect(serialized.range(of: Data(publicResolver.utf8)) == nil)
+        #expect(serialized.range(of: Data(filteredResolver.utf8)) == nil)
     }
 
     @Test func openVPNPreflightRequiresInlineClientIdentityAndTLSCrypt() throws {

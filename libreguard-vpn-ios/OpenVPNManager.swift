@@ -5,6 +5,7 @@ import OSLog
 @MainActor
 final class OpenVPNManager: VPNManaging {
     private let api: BackendServicing
+    private let configurationResolver: VPNConfigurationResolving
     private let deviceKeyStore: VPNDeviceKeyProviding
     private let protocolBuilder: OpenVPNTunnelProtocolBuilding
     private let manager: NETunnelProviderManager
@@ -27,17 +28,23 @@ final class OpenVPNManager: VPNManaging {
 
     init(
         api: BackendServicing,
+        resolver: VPNConfigurationResolving? = nil,
         deviceKeyStore: VPNDeviceKeyProviding = VPNDeviceKeyStore(),
         protocolBuilder: OpenVPNTunnelProtocolBuilding = TunnelKitOpenVPNProtocolBuilder(),
         manager: NETunnelProviderManager = NETunnelProviderManager(),
         providerBundleIdentifier: String = OpenVPNConstants.tunnelBundleIdentifier
     ) {
         self.api = api
+        self.configurationResolver = resolver ?? VPNConfigurationResolver(api: api)
         self.deviceKeyStore = deviceKeyStore
         self.protocolBuilder = protocolBuilder
         self.manager = manager
         self.providerBundleIdentifier = providerBundleIdentifier
         observeStatusChanges()
+    }
+
+    func setCertificatePreparationHandler(_ handler: ((String?) -> Void)?) {
+        configurationResolver.onPreparationStateChange = handler
     }
 
     deinit {
@@ -80,8 +87,8 @@ final class OpenVPNManager: VPNManaging {
         status = .connecting
 
         do {
-            logger.debug("Fetching OpenVPN configuration from backend")
-            let response = try await api.fetchVPNConfig(serverId: server.id, protocol: .openVPN)
+            logger.debug("Resolving OpenVPN configuration from backend")
+            let response = try await configurationResolver.resolve(serverId: server.id, protocol: .openVPN)
             try Task.checkCancellation()
             logger.debug("Backend OpenVPN configuration received for server \(server.id, privacy: .public)")
 

@@ -2,6 +2,7 @@ import Foundation
 import NetworkExtension
 import TunnelKitOpenVPNCore
 import TunnelKitOpenVPNManager
+internal import TunnelKitCore
 
 protocol OpenVPNTunnelProtocolBuilding {
     nonisolated func makeTunnelProtocol(configuration: String, privateKeyPassphrase: String) throws -> NETunnelProviderProtocol
@@ -17,8 +18,13 @@ struct TunnelKitOpenVPNProtocolBuilder: OpenVPNTunnelProtocolBuilding {
             isClient: true,
             passphrase: privateKeyPassphrase
         )
+        var sessionBuilder = parsed.configuration.builder()
+        sessionBuilder.dnsProtocol = .plain
+        sessionBuilder.dnsServers = [LibreGuardDNS.regularResolverAddress]
+        sessionBuilder.dnsHTTPSURL = nil
+        sessionBuilder.dnsTLSServerName = nil
         let providerConfiguration = OpenVPNProvider.ConfigurationBuilder(
-            sessionConfiguration: parsed.configuration
+            sessionConfiguration: sessionBuilder.build()
         ).build()
         let tunnelProtocol = try providerConfiguration.generatedTunnelProtocol(
             withBundleIdentifier: OpenVPNConstants.tunnelBundleIdentifier,

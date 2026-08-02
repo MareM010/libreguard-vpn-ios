@@ -3,6 +3,11 @@ import Foundation
 enum HTTPMethod: String {
     case get = "GET"
     case post = "POST"
+    case put = "PUT"
+}
+
+enum LibreGuardDNS {
+    static let regularResolverAddress = "10.254.0.53"
 }
 
 struct APIError: LocalizedError, Identifiable {
@@ -47,6 +52,47 @@ struct APIErrorEnvelope: Decodable {
     let retryAfterSeconds: Int?
     let requiresLogin: Bool?
     let requiresDeviceRegistration: Bool?
+}
+
+struct CertificateJobCreatedResponse: Decodable, Equatable {
+    let jobId: Int
+    let requestedName: String?
+    let status: String
+}
+
+struct CertificateGenerationStatusResponse: Decodable, Equatable {
+    let canGenerate: Bool?
+    let certificateExists: Bool?
+    let jobPending: Bool?
+    let vpnType: String?
+    let pendingJob: PendingCertificateJob?
+    let existingCertificate: ExistingCertificateSummary?
+}
+
+struct PendingCertificateJob: Decodable, Equatable {
+    let id: Int
+    let status: String?
+}
+
+struct ExistingCertificateSummary: Decodable, Equatable {
+    let id: Int
+    let name: String?
+    let vpnType: String?
+    let expirationDate: Date?
+}
+
+struct CertificateJobStatusResponse: Decodable, Equatable {
+    let id: Int
+    let status: String
+    let jobType: String?
+    let requestedName: String?
+    let errorMessage: String?
+    let outputCertificateId: Int?
+}
+
+struct CertificateRequestPayload: Encodable {
+    let serverId: Int
+    let vpnType: String
 }
 
 struct AuthSession: Codable, Equatable {
@@ -445,6 +491,10 @@ enum VPNConfigurationProtocol: String, Codable, CaseIterable {
     var requiresProSubscription: Bool {
         self == .openVPN
     }
+
+    var certificateRequestValue: String {
+        self == .openVPN ? "OPENVPN" : "IKEV2/IPSec"
+    }
 }
 
 struct VPNConnectRequest: Equatable {
@@ -687,6 +737,32 @@ struct SubscriptionStatus: Decodable, Equatable {
     var isAppleBilled: Bool {
         paymentType?.caseInsensitiveCompare("Apple") == .orderedSame
     }
+}
+
+struct DNSPreference: Decodable, Equatable {
+    let requestedEnabled: Bool
+    let canUseAdBlocking: Bool
+    let effectiveEnabled: Bool
+    let effectiveMode: String
+    let propagationSeconds: Int
+
+    var normalizedEffectiveMode: String {
+        effectiveMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    func optimisticallyRequesting(_ enabled: Bool) -> DNSPreference {
+        DNSPreference(
+            requestedEnabled: enabled,
+            canUseAdBlocking: canUseAdBlocking,
+            effectiveEnabled: enabled ? effectiveEnabled : false,
+            effectiveMode: enabled ? effectiveMode : "regular",
+            propagationSeconds: propagationSeconds
+        )
+    }
+}
+
+struct UpdateDNSPreferenceRequest: Encodable, Equatable {
+    let adBlockingEnabled: Bool
 }
 
 struct AppleAccountTokenResponse: Decodable, Equatable {

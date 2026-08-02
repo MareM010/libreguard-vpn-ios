@@ -5,6 +5,197 @@ import Testing
 
 @MainActor
 struct libreguard_vpn_iosTests {
+    @Test func dnsPreferenceEndpointsUseAuthenticatedAccountContract() async throws {
+        try await withSerializedRequests {
+            let session = AuthSession(
+                accessToken: "dns-access",
+                refreshToken: "refresh",
+                email: "person@example.com",
+                userId: "user-1",
+                deviceId: "test-device"
+            )
+            var requestCount = 0
+            let client = makeClient(sessionStore: InMemorySessionStore(session: session)) { request in
+                requestCount += 1
+                #expect(request.url?.path == "/api/dns/settings")
+                #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer dns-access")
+
+                if request.httpMethod == "GET" {
+                    return try makeResponse(request, status: 200, json: [
+                        "requestedEnabled": false,
+                        "canUseAdBlocking": true,
+                        "effectiveEnabled": false,
+                        "effectiveMode": "regular",
+                        "propagationSeconds": 15
+                    ])
+                }
+
+                #expect(request.httpMethod == "PUT")
+                let body = try requestBody(from: request)
+                let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                #expect(json["adBlockingEnabled"] as? Bool == true)
+                return try makeResponse(request, status: 200, json: [
+                    "requestedEnabled": true,
+                    "canUseAdBlocking": true,
+                    "effectiveEnabled": true,
+                    "effectiveMode": "filtered",
+                    "propagationSeconds": 15
+                ])
+            }
+
+            let initial = try await client.fetchDNSPreference()
+            #expect(initial.requestedEnabled == false)
+            #expect(initial.normalizedEffectiveMode == "regular")
+
+            let updated = try await client.updateDNSPreference(adBlockingEnabled: true)
+            #expect(updated.requestedEnabled)
+            #expect(updated.canUseAdBlocking)
+            #expect(updated.effectiveEnabled)
+            #expect(updated.normalizedEffectiveMode == "filtered")
+            #expect(updated.propagationSeconds == 15)
+            #expect(requestCount == 2)
+        }
+    }
+
+    @Test func freeUserCanDisableSavedAdBlockingButCannotEnableIt() async throws {
+        try await withSerializedRequests {
+            let session = AuthSession(
+                accessToken: "dns-access",
+                refreshToken: "refresh",
+                email: "person@example.com",
+                userId: "user-1",
+                deviceId: "test-device"
+            )
+            var putValues: [Bool] = []
+            var requestedEnabled = true
+            let client = makeClient(sessionStore: InMemorySessionStore(session: session)) { request in
+                if request.httpMethod == "PUT" {
+                    let body = try requestBody(from: request)
+                    let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                    let enabled = try #require(json["adBlockingEnabled"] as? Bool)
+                    putValues.append(enabled)
+                    requestedEnabled = enabled
+                }
+                return try makeResponse(request, status: 200, json: [
+                    "requestedEnabled": requestedEnabled,
+                    "canUseAdBlocking": false,
+                    "effectiveEnabled": false,
+                    "effectiveMode": "regular",
+                    "propagationSeconds": 15
+                ])
+            }
+            let app = AppModel(
+                api: client,
+                vpnManager: DNSSettingsTestVPNManager(),
+                defaults: UserDefaults(suiteName: UUID().uuidString)!
+            )
+
+            await app.refreshDNSPreference()
+            #expect(app.dnsPreference?.requestedEnabled == true)
+            #expect(app.dnsPreference?.effectiveEnabled == false)
+
+            await app.setAdBlockingEnabled(false)
+            #expect(app.dnsPreference?.requestedEnabled == false)
+            #expect(putValues == [false])
+
+            app.presentedError = nil
+            await app.setAdBlockingEnabled(true)
+            #expect(app.dnsPreference?.requestedEnabled == false)
+            #expect(putValues == [false])
+            #expect(app.presentedError?.code == "PRO_REQUIRED")
+        }
+    }
+
+    @Test func failedAdBlockingUpdateRestoresTheConfirmedPreference() async throws {
+        try await withSerializedRequests {
+            let session = AuthSession(
+                accessToken: "dns-access",
+                refreshToken: "refresh",
+                email: "person@example.com",
+                userId: "user-1",
+                deviceId: "test-device"
+            )
+            let client = makeClient(sessionStore: InMemorySessionStore(session: session)) { request in
+                if request.httpMethod == "PUT" {
+                    return try makeResponse(request, status: 503, json: ["message": "DNS update unavailable"])
+                }
+                return try makeResponse(request, status: 200, json: [
+                    "requestedEnabled": false,
+                    "canUseAdBlocking": true,
+                    "effectiveEnabled": false,
+                    "effectiveMode": "regular",
+                    "propagationSeconds": 15
+                ])
+            }
+            let app = AppModel(
+                api: client,
+                vpnManager: DNSSettingsTestVPNManager(),
+                defaults: UserDefaults(suiteName: UUID().uuidString)!
+            )
+
+            await app.refreshDNSPreference()
+            await app.setAdBlockingEnabled(true)
+
+            #expect(app.dnsPreference?.requestedEnabled == false)
+            #expect(app.dnsPreference?.effectiveEnabled == false)
+            #expect(app.isUpdatingAdBlocking == false)
+            #expect(app.presentedError?.message == "DNS update unavailable")
+        }
+    }
+
+    @Test func dnsPreferenceFailureDoesNotDiscardOtherAccountData() async throws {
+        try await withSerializedRequests {
+            let session = AuthSession(
+                accessToken: "dns-access",
+                refreshToken: "refresh",
+                email: "person@example.com",
+                userId: "user-1",
+                deviceId: "test-device"
+            )
+            let client = makeClient(sessionStore: InMemorySessionStore(session: session)) { request in
+                switch request.url?.path {
+                case "/api/usage/quota":
+                    return try makeResponse(request, status: 200, json: quotaJSON)
+                case "/api/subscription/status":
+                    return try makeResponse(request, status: 200, json: [
+                        "plan": "Pro",
+                        "isPro": true,
+                        "status": "active",
+                        "paymentType": NSNull(),
+                        "currentPeriodEnd": NSNull(),
+                        "cancelAtPeriodEnd": false,
+                        "billingCycle": "monthly",
+                        "activeDevices": 1,
+                        "maxDevices": 3,
+                        "canAddDevice": true
+                    ])
+                case "/api/2fa/status":
+                    return try makeResponse(request, status: 200, json: [
+                        "is2faEnabled": false,
+                        "hasAuthenticator": false,
+                        "recoveryCodesLeft": 0
+                    ])
+                case "/api/dns/settings":
+                    return try makeResponse(request, status: 503, json: ["message": "DNS settings unavailable"])
+                default:
+                    throw APIError(message: "Unexpected endpoint")
+                }
+            }
+            let app = AppModel(
+                api: client,
+                vpnManager: DNSSettingsTestVPNManager(),
+                defaults: UserDefaults(suiteName: UUID().uuidString)!
+            )
+
+            await app.refreshAccountData(showErrors: false)
+
+            #expect(app.subscription?.isPro == true)
+            #expect(app.usageQuota?.bytesUsed == 1_024)
+            #expect(app.twoFactorStatus?.is2faEnabled == false)
+            #expect(app.dnsPreference == nil)
+        }
+    }
+
     @Test func appleSubscriptionEndpointsUseAuthenticatedAccountContract() async throws {
         try await withSerializedRequests {
             let token = UUID(uuidString: "4CB6C240-6A45-42B4-AD28-C54C49B43F11")!
@@ -463,6 +654,23 @@ final class StubVPNDeviceKeyStore: VPNDeviceKeyProviding {
     func decryptPassphrase(from encryptedPassphrase: EncryptedPassphrase) throws -> String {
         "test-passphrase"
     }
+}
+
+@MainActor
+private final class DNSSettingsTestVPNManager: VPNManaging {
+    var status: VPNConnectionState = .disconnected
+    var onStatusChange: ((VPNConnectionState) -> Void)?
+    var onDisconnectError: ((Error) -> Void)?
+
+    func refreshStatus() async {}
+    func connect(
+        to server: VPNServer,
+        protocol protocolName: VPNConfigurationProtocol,
+        policy: VPNConnectionPolicy
+    ) async throws {}
+    func apply(policy: VPNConnectionPolicy) async throws -> Bool { true }
+    func disconnect() async {}
+    func disconnectAndForget() async {}
 }
 
 final class URLProtocolStub: URLProtocol, @unchecked Sendable {

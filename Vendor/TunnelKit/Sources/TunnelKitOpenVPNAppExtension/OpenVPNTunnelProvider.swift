@@ -766,6 +766,12 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
                 dnsSettings?.matchDomains = dnsSettings?.searchDomains
             }
         }
+
+        // LibreGuard intentionally fails closed when the private tunnel resolver
+        // is unavailable instead of falling back to the device's public resolver.
+        if #available(iOS 26.0, macOS 26.0, macCatalyst 26.0, *) {
+            dnsSettings?.allowFailover = false
+        }
         
         // add direct routes to DNS servers
         if !isGateway {

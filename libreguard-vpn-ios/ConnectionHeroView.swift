@@ -14,7 +14,11 @@ struct ConnectionHeroPresentation: Equatable {
     let actionTitle: String
     let tone: Tone
 
-    static func make(for status: VPNConnectionState, hasQueuedReconnect: Bool) -> Self {
+    static func make(
+        for status: VPNConnectionState,
+        hasQueuedReconnect: Bool,
+        preparationMessage: String? = nil
+    ) -> Self {
         switch status {
         case .invalid:
             return Self(
@@ -25,18 +29,19 @@ struct ConnectionHeroPresentation: Equatable {
                 tone: .disconnected
             )
         case .disconnected:
+            let isPreparing = preparationMessage != nil
             return Self(
-                title: "Not Protected",
-                description: "Your connection is not secure",
-                progressLabel: "",
+                title: isPreparing ? "Certificate preparing" : "Not Protected",
+                description: preparationMessage ?? "Your connection is not secure",
+                progressLabel: isPreparing ? "Preparation continues" : "",
                 actionTitle: "Connect",
                 tone: .disconnected
             )
         case .connecting:
             return Self(
                 title: "Connecting",
-                description: "Establishing secure tunnel...",
-                progressLabel: "Securing tunnel",
+                description: preparationMessage ?? "Establishing secure tunnel...",
+                progressLabel: preparationMessage == nil ? "Securing tunnel" : "Preparing certificate",
                 actionTitle: "Cancel",
                 tone: .connecting
             )
@@ -96,6 +101,8 @@ enum ConnectionHeroMotion {
 struct ConnectionHeroView: View {
     let status: VPNConnectionState
     let hasQueuedReconnect: Bool
+    var preparationMessage: String? = nil
+    var isCompact = false
     let action: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -105,11 +112,11 @@ struct ConnectionHeroView: View {
     @State private var progressTask: Task<Void, Never>?
 
     private var presentation: ConnectionHeroPresentation {
-        .make(for: status, hasQueuedReconnect: hasQueuedReconnect)
+        .make(for: status, hasQueuedReconnect: hasQueuedReconnect, preparationMessage: preparationMessage)
     }
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: isCompact ? 10 : 20) {
             TimelineView(.animation(minimumInterval: 1 / 30, paused: scenePhase != .active)) { timeline in
                 shield(at: timeline.date)
             }
@@ -124,10 +131,10 @@ struct ConnectionHeroView: View {
                         isShimmering: status == .connecting,
                         reduceMotion: reduceMotion
                     )
-                    .frame(width: 224, height: 10)
+                    .frame(width: isCompact ? 180 : 224, height: isCompact ? 8 : 10)
 
                     Text(presentation.progressLabel)
-                        .font(.subheadline.weight(.medium))
+                        .font((isCompact ? Font.caption : Font.subheadline).weight(.medium))
                         .foregroundStyle(presentation.color.opacity(0.9))
                 }
                 .padding(.top, -6)
@@ -136,17 +143,17 @@ struct ConnectionHeroView: View {
 
             Button(action: action) {
                 Text(presentation.actionTitle)
-                    .font(.body.weight(.semibold))
+                    .font((isCompact ? Font.subheadline : Font.body).weight(.semibold))
                     .foregroundStyle(.white)
-                    .frame(maxWidth: 220)
-                    .padding(.vertical, 15)
+                    .frame(maxWidth: isCompact ? 180 : 220)
+                    .padding(.vertical, isCompact ? 11 : 15)
                     .background(Theme.primary, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                     .shadow(color: Theme.primary.opacity(0.22), radius: 12, y: 7)
             }
             .buttonStyle(ConnectionActionButtonStyle())
             .accessibilityIdentifier("vpn-primary-action")
         }
-        .padding(.top, 8)
+        .padding(.top, isCompact ? 0 : 8)
         .animation(.easeInOut(duration: 0.22), value: isProgressVisible)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(presentation.title). \(presentation.description)")
@@ -194,7 +201,7 @@ struct ConnectionHeroView: View {
                 connectedPulse: connectedPulse,
                 reduceMotion: reduceMotion
             )
-            .frame(width: 188, height: 188)
+            .frame(width: isCompact ? 120 : 188, height: isCompact ? 120 : 188)
 
             Circle()
                 .fill(
@@ -209,15 +216,15 @@ struct ConnectionHeroView: View {
                         endRadius: 77
                     )
                 )
-                .frame(width: 154, height: 154)
+                .frame(width: isCompact ? 100 : 154, height: isCompact ? 100 : 154)
 
             Button(action: action) {
                 Image(systemName: "shield.fill")
-                    .font(.system(size: 64, weight: .light))
+                    .font(.system(size: isCompact ? 42 : 64, weight: .light))
                     .foregroundStyle(presentation.color)
                     .scaleEffect(iconScale)
                     .animation(.timingCurve(0.4, 0, 0.2, 1, duration: 0.42), value: status)
-                    .frame(width: 128, height: 128)
+                    .frame(width: isCompact ? 84 : 128, height: isCompact ? 84 : 128)
                     .background(
                         LinearGradient(
                             colors: [
@@ -247,10 +254,11 @@ struct ConnectionHeroView: View {
         ZStack {
             VStack(spacing: 6) {
                 Text(presentation.title)
-                    .font(.system(size: 32, weight: .semibold))
+                    .font(.system(size: isCompact ? 24 : 32, weight: .semibold))
                     .foregroundStyle(presentation.color)
 
                 Text(presentation.description)
+                    .font(isCompact ? .subheadline : .body)
                     .foregroundStyle(.secondary)
             }
             .id(presentation.title)

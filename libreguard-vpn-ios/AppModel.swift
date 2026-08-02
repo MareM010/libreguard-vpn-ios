@@ -14,6 +14,9 @@ final class AppModel: ObservableObject {
     @Published var session: AuthSession?
     @Published var usageQuota: UsageQuota?
     @Published var subscription: SubscriptionStatus?
+    @Published private(set) var dnsPreference: DNSPreference?
+    @Published private(set) var isRefreshingDNSPreference = false
+    @Published private(set) var isUpdatingAdBlocking = false
     @Published private(set) var appleSubscriptionProducts: [AppleSubscriptionProduct] = []
     @Published var selectedAppleProductID = AppleSubscriptionCatalog.annualProductID
     @Published private(set) var isLoadingAppleSubscriptions = false
@@ -29,6 +32,7 @@ final class AppModel: ObservableObject {
     @Published var selectedServerID: Int?
     @Published var selectedVPNProtocol: VPNConfigurationProtocol
     @Published var vpnStatus: VPNConnectionState = .disconnected
+    @Published private(set) var certificatePreparationMessage: String?
     @Published private(set) var hasQueuedVPNReconnect = false
     @Published private(set) var isAutoConnectEnabled: Bool
     @Published private(set) var isUpdatingAutoConnect = false
@@ -125,6 +129,11 @@ final class AppModel: ObservableObject {
         }
         self.vpn.onDisconnectError = { [weak self] error in
             self?.present(error)
+        }
+        self.vpn.setCertificatePreparationHandler { [weak self] message in
+            Task { @MainActor [weak self] in
+                self?.certificatePreparationMessage = message
+            }
         }
         if let concrete = resolvedAPI as? APIClient {
             concrete.onSessionInvalidated = { [weak self] in self?.forceSignOut() }
@@ -362,6 +371,9 @@ final class AppModel: ObservableObject {
         guard session != nil || api.storedSession != nil else { return }
         isRefreshingAccount = true
         defer { isRefreshingAccount = false }
+
+        async let dnsPreference = api.fetchDNSPreference()
+        var accountErrorWasPresented = false
         do {
             async let usage = api.fetchUsage()
             async let subscription = api.fetchSubscription()
@@ -371,6 +383,28 @@ final class AppModel: ObservableObject {
             self.subscription = values.1
             cachePlan(name: values.1.displayName, isPro: values.1.isPro)
             twoFactorStatus = values.2
+        } catch {
+            if showErrors {
+                accountErrorWasPresented = true
+                present(error)
+            }
+        }
+
+        do {
+            self.dnsPreference = try await dnsPreference
+        } catch {
+            if showErrors, !accountErrorWasPresented { present(error) }
+        }
+    }
+
+    func refreshDNSPreference(showErrors: Bool = true) async {
+        guard session != nil || api.storedSession != nil,
+              !isRefreshingDNSPreference else { return }
+        isRefreshingDNSPreference = true
+        defer { isRefreshingDNSPreference = false }
+
+        do {
+            dnsPreference = try await api.fetchDNSPreference()
         } catch {
             if showErrors { present(error) }
         }
@@ -558,6 +592,35 @@ final class AppModel: ObservableObject {
             )
             persistKillSwitch(enabled: false, activation: .off)
         } catch {
+            present(error)
+        }
+    }
+
+    func setAdBlockingEnabled(_ enabled: Bool) async {
+        guard !isUpdatingAdBlocking else { return }
+
+        if dnsPreference == nil {
+            await refreshDNSPreference(showErrors: true)
+        }
+        guard let current = dnsPreference,
+              current.requestedEnabled != enabled else { return }
+
+        if enabled, !current.canUseAdBlocking {
+            presentedError = APIError(message: "Ad Blocking requires a Pro plan.", code: "PRO_REQUIRED")
+            return
+        }
+
+        isUpdatingAdBlocking = true
+        dnsPreference = current.optimisticallyRequesting(enabled)
+        defer { isUpdatingAdBlocking = false }
+
+        do {
+            dnsPreference = try await api.updateDNSPreference(adBlockingEnabled: enabled)
+        } catch {
+            dnsPreference = current
+            if let apiError = error as? APIError, apiError.code == "PRO_REQUIRED" {
+                await refreshDNSPreference(showErrors: false)
+            }
             present(error)
         }
     }
@@ -856,6 +919,9 @@ final class AppModel: ObservableObject {
         session = nil
         usageQuota = nil
         subscription = nil
+        dnsPreference = nil
+        isRefreshingDNSPreference = false
+        isUpdatingAdBlocking = false
         twoFactorStatus = nil
         authenticatorSetup = nil
         recoveryCodes = []
@@ -922,6 +988,7 @@ final class AppModel: ObservableObject {
             subscription = response.subscription
             cachePlan(name: response.subscription.displayName, isPro: response.subscription.isPro)
             usageQuota = try? await api.fetchUsage()
+            await refreshDNSPreference(showErrors: false)
             await appleStore.finish(transactionID: transaction.id)
             applePurchaseMessage = response.transferred
                 ? "Your Apple subscription was moved to this LibreGuard account and Pro is now active."

@@ -20,11 +20,13 @@ final class VPNManagerCoordinator: VPNManaging {
 
     init(
         api: BackendServicing,
+        resolver: VPNConfigurationResolving? = nil,
         translator: VPNConfigurationTranslator? = nil,
         deviceKeyStore: VPNDeviceKeyProviding = VPNDeviceKeyStore()
     ) {
-        self.ikev2Manager = PersonalVPNManager(api: api, translator: translator)
-        self.openVPNManager = OpenVPNManager(api: api, deviceKeyStore: deviceKeyStore)
+        let sharedResolver = resolver ?? VPNConfigurationResolver(api: api)
+        self.ikev2Manager = PersonalVPNManager(api: api, resolver: sharedResolver, translator: translator)
+        self.openVPNManager = OpenVPNManager(api: api, resolver: sharedResolver, deviceKeyStore: deviceKeyStore)
         configureCallbacks()
         reconcileStatus()
     }
@@ -34,6 +36,11 @@ final class VPNManagerCoordinator: VPNManaging {
         self.openVPNManager = openVPNManager
         configureCallbacks()
         reconcileStatus()
+    }
+
+    func setCertificatePreparationHandler(_ handler: ((String?) -> Void)?) {
+        ikev2Manager.setCertificatePreparationHandler(handler)
+        openVPNManager.setCertificatePreparationHandler(handler)
     }
 
     private func configureCallbacks() {

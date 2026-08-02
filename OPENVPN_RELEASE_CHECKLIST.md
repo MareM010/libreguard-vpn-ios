@@ -11,6 +11,15 @@
 - [ ] On a physical iPhone, validate staging OpenVPN connectivity, DNS and public
       IP, upload/download traffic, sleep/wake, Wi-Fi/cellular transitions,
       reconnect, cancellation, protocol switching, and certificate failures.
+- [ ] Before releasing this client, deploy and verify the private DNS path on every
+      selectable VPN server: `10.254.0.53` must resolve for all users, and the
+      server must transparently route opted-in Pro sessions through `10.254.0.54`.
+- [ ] Confirm both OpenVPN and IKEv2 use only `10.254.0.53` as the client-visible
+      resolver. Verify that Free accounts cannot enable Ad Blocking, Pro accounts
+      can enable and disable it, and no client profile exposes `10.254.0.54`.
+- [ ] During a staged rollout, capture DNS traffic on the VPN interface and verify
+      there is no fallback to a public resolver while connecting, reconnecting,
+      roaming between Wi-Fi and cellular, or after resolver failure.
 - [ ] With kill switch enabled, confirm no IP or DNS leak during connect,
       reconnect, network transitions, or forced server loss.
 - [ ] Archive and validate the final signed build before submission.

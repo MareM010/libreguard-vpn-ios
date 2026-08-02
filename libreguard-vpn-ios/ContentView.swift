@@ -668,51 +668,59 @@ private struct ResetPasswordView: View {
 
 private struct DashboardView: View {
     @EnvironmentObject private var app: AppModel
-    @State private var showNetworkWarning = true
     let onUpgrade: () -> Void
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 22) {
-                    header
-
-                    if showNetworkWarning && (status == .disconnected || status == .invalid) {
-                        AlertCard()
-                    }
-
-                    if status.isConnected {
-                        ProtectedIPCard(server: selectedServer)
-                        ProtectionIndicators()
-                    }
-
-                    if status == .disconnected || status == .invalid {
-                        if let selectedServer {
-                            SelectedServerCard(
-                                server: selectedServer,
-                                onClearSelection: {
-                                    app.deselectServer()
-                                }
-                            )
-                        }
-
-                        QuickConnectCard {
-                            app.requestQuickConnect()
-                        }
-                    }
-
-                    statusControl
-                    connectedStats
-                }
-                .padding(.horizontal, 24)
-                .padding(.top, 24)
-                .padding(.bottom, 150)
+        GeometryReader { proxy in
+            let compact = proxy.size.height < 720 || status.isConnected
+            let referenceHeight: CGFloat = if status.isConnected {
+                700
+            } else if selectedServer != nil {
+                compact ? 560 : 740
+            } else {
+                compact ? 500 : 680
             }
+            let scale = min(1, proxy.size.height / referenceHeight)
 
-            MonthlyUsageCard(quota: app.usageQuota)
-                .padding(.horizontal, 24)
-                .padding(.bottom, 12)
-                .background(.ultraThinMaterial.opacity(0.86))
+            VStack(spacing: compact ? 10 : 22) {
+                header(compact: compact)
+
+                if status.isConnected {
+                    ProtectedIPCard(server: selectedServer)
+                    ProtectionIndicators()
+                }
+
+                if status == .disconnected || status == .invalid {
+                    if let selectedServer {
+                        SelectedServerCard(
+                            server: selectedServer,
+                            onClearSelection: {
+                                app.deselectServer()
+                            }
+                        )
+                    }
+
+                    QuickConnectCard {
+                        app.requestQuickConnect()
+                    }
+                }
+
+                statusControl(compact: compact)
+                connectedStats(compact: compact)
+
+                Spacer(minLength: compact ? 2 : 8)
+
+                MonthlyUsageCard(quota: app.usageQuota)
+            }
+            .padding(.horizontal, compact ? 16 : 24)
+            .padding(.top, compact ? 10 : 24)
+            .padding(.bottom, compact ? 8 : 12)
+            .frame(
+                width: proxy.size.width / scale,
+                height: proxy.size.height / scale,
+                alignment: .top
+            )
+            .scaleEffect(scale, anchor: .topLeading)
         }
         .background(Theme.background)
         .task {
@@ -722,9 +730,6 @@ private struct DashboardView: View {
             app.refreshServers()
             await app.refreshVPNStatus()
         }
-        .onChange(of: app.vpnStatus) { _, newValue in
-            showNetworkWarning = newValue == .disconnected || newValue == .invalid
-        }
     }
 
     private var status: VPNConnectionState { app.vpnStatus }
@@ -733,13 +738,13 @@ private struct DashboardView: View {
         return app.servers.first(where: { $0.id == selectedServerID })
     }
 
-    private var header: some View {
+    private func header(compact: Bool) -> some View {
         VStack(spacing: 12) {
             HStack {
                 HStack(spacing: 12) {
-                    LibreGuardLogo(size: 40)
+                    LibreGuardLogo(size: compact ? 34 : 40)
                     Text("LibreGuard")
-                        .font(.system(size: 24, weight: .semibold, design: .rounded))
+                        .font(.system(size: compact ? 21 : 24, weight: .semibold, design: .rounded))
                 }
                 Spacer()
                 Text("\(app.currentPlanDisplayName) Plan")
@@ -752,21 +757,29 @@ private struct DashboardView: View {
         }
     }
 
-    private var statusControl: some View {
+    private func statusControl(compact: Bool) -> some View {
         ConnectionHeroView(
             status: status,
             hasQueuedReconnect: app.hasQueuedVPNReconnect,
+            preparationMessage: app.certificatePreparationMessage,
+            isCompact: compact,
             action: app.performVPNPrimaryAction
         )
         .animation(.easeInOut(duration: 0.25), value: app.hasQueuedVPNReconnect)
-        .padding(.top, 8)
+        .padding(.top, compact ? 0 : 8)
     }
 
     @ViewBuilder
-    private var connectedStats: some View {
+    private func connectedStats(compact: Bool) -> some View {
         if status.isConnected {
-            VStack(spacing: 22) {
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
+            VStack(spacing: compact ? 10 : 22) {
+                LazyVGrid(
+                    columns: Array(
+                        repeating: GridItem(.flexible(), spacing: compact ? 4 : 16),
+                        count: compact ? 4 : 2
+                    ),
+                    spacing: compact ? 8 : 16
+                ) {
                     SessionDurationStat(connectedAt: app.sessionMetrics?.descriptor.connectedAt)
                     StatMini(
                         icon: "arrow.down",
@@ -782,7 +795,7 @@ private struct DashboardView: View {
                 }
 
                 CardContainer {
-                    VStack(spacing: 12) {
+                    VStack(spacing: compact ? 8 : 12) {
                         HStack {
                             Text("Current Session Traffic")
                                 .font(.subheadline.weight(.semibold))
@@ -805,31 +818,6 @@ private struct DashboardView: View {
                                 color: Theme.purpleBar
                             )
                         }
-                    }
-                }
-
-                CardContainer {
-                    VStack(spacing: 14) {
-                        HStack {
-                            Text("Monthly Data Usage")
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            Text(app.usageQuota?.dashboardUsageHeadline ?? "Loading…")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        ProgressBar(
-                            progress: app.usageQuota?.displayProgress ?? 0,
-                            color: app.usageQuota?.usageTint ?? Theme.primary,
-                            height: 10
-                        )
-                        HStack {
-                            Label(app.usageQuota?.usageSummaryText ?? "Loading usage", systemImage: "arrow.up.arrow.down")
-                            Spacer()
-                            Text(app.usageQuota?.usageDetailText ?? "Waiting for backend data")
-                        }
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -1164,7 +1152,7 @@ private struct SettingsView: View {
     @State private var splitTunneling = false
     @State private var showTwoFactorManagement = false
     @State private var showProtocolSelection = false
-    @State private var threatProtection = true
+    @State private var showDNSSettings = false
 
     let onUpgrade: () -> Void
     let onSignOut: () -> Void
@@ -1194,7 +1182,22 @@ private struct SettingsView: View {
                                 ? "Enabled • \(app.twoFactorStatus?.recoveryCodesLeft ?? 0) recovery codes"
                                 : "Not enabled"
                         ) { showTwoFactorManagement = true }
-                        ToggleRow(icon: "shield.checkered", title: "Threat Protection", subtitle: "Block ads, trackers & malware", isOn: $threatProtection)
+                        ToggleRow(
+                            icon: "shield.checkered",
+                            title: "Ad Blocking",
+                            subtitle: adBlockingSubtitle,
+                            isOn: Binding(
+                                get: { app.dnsPreference?.requestedEnabled ?? false },
+                                set: { enabled in
+                                    if enabled, app.dnsPreference?.canUseAdBlocking == false {
+                                        onUpgrade()
+                                    } else {
+                                        Task { await app.setAdBlockingEnabled(enabled) }
+                                    }
+                                }
+                            )
+                        )
+                        .disabled(app.dnsPreference == nil || app.isUpdatingAdBlocking)
                     }
 
                     SettingsSection(title: "Connection") {
@@ -1239,7 +1242,13 @@ private struct SettingsView: View {
                         ) {
                             showProtocolSelection = true
                         }
-                        NavigationRow(icon: "globe", title: "DNS Settings", subtitle: "Custom DNS servers")
+                        NavigationRow(
+                            icon: "globe",
+                            title: "LibreGuard DNS",
+                            subtitle: dnsSettingsSubtitle
+                        ) {
+                            showDNSSettings = true
+                        }
                     }
 
                     SettingsSection(title: "Preferences") {
@@ -1308,9 +1317,41 @@ private struct SettingsView: View {
         .sheet(isPresented: $showProtocolSelection) {
             VPNProtocolSelectionView(onUpgrade: onUpgrade)
         }
+        .sheet(isPresented: $showDNSSettings) {
+            LibreGuardDNSSettingsView(onUpgrade: onUpgrade)
+        }
         .task {
+            await app.refreshDNSPreference(showErrors: false)
             if app.twoFactorStatus == nil { await app.refreshAccountData(showErrors: false) }
         }
+    }
+
+    private var adBlockingSubtitle: String {
+        guard let preference = app.dnsPreference else {
+            return app.isRefreshingDNSPreference ? "Loading DNS preference…" : "Checking account availability…"
+        }
+        if app.isUpdatingAdBlocking {
+            return preference.requestedEnabled ? "Enabling protected DNS…" : "Disabling protected DNS…"
+        }
+        if !preference.canUseAdBlocking {
+            return preference.requestedEnabled
+                ? "Paused • Saved preference requires Pro"
+                : "Pro • Block ads and trackers"
+        }
+        if preference.requestedEnabled, preference.effectiveEnabled {
+            return "Enabled • Applies within \(preference.propagationSeconds) seconds"
+        }
+        if preference.requestedEnabled {
+            return "Requested • Regular DNS is currently active"
+        }
+        return "Off • Private DNS remains active"
+    }
+
+    private var dnsSettingsSubtitle: String {
+        guard let preference = app.dnsPreference else { return "Automatic private resolver" }
+        return preference.effectiveEnabled
+            ? "Automatic • Ad blocking enabled"
+            : "Automatic • Private resolver"
     }
 
     private var killSwitchSubtitle: String {
@@ -1338,6 +1379,148 @@ private struct SettingsView: View {
         @unknown default:
             return "Manage in system settings"
         }
+    }
+}
+
+private struct LibreGuardDNSSettingsView: View {
+    @EnvironmentObject private var app: AppModel
+    @Environment(\.dismiss) private var dismiss
+    let onUpgrade: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 20) {
+                    CardContainer {
+                        HStack(alignment: .top, spacing: 14) {
+                            IconBox(systemName: "shield.lefthalf.filled")
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Automatic private DNS")
+                                    .font(.headline)
+                                Text("LibreGuard sends system DNS requests to its private resolver while your VPN is connected.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                    SettingsSection(title: "Resolver") {
+                        CardContainer {
+                            VStack(spacing: 12) {
+                                DNSDetailRow(title: "Address", value: LibreGuardDNS.regularResolverAddress)
+                                Divider()
+                                DNSDetailRow(title: "Selection", value: "Automatic")
+                                Divider()
+                                DNSDetailRow(title: "Account mode", value: accountMode)
+                                if let preference = app.dnsPreference {
+                                    Divider()
+                                    DNSDetailRow(
+                                        title: "Propagation",
+                                        value: "Up to \(preference.propagationSeconds) seconds"
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    SettingsSection(title: "Ad Blocking") {
+                        CardContainer {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Label(adBlockingStatus, systemImage: adBlockingStatusIcon)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(adBlockingStatusColor)
+                                Text(adBlockingExplanation)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        if app.dnsPreference?.canUseAdBlocking == false {
+                            Button(action: onUpgrade) {
+                                Label("Upgrade to Pro", systemImage: "crown.fill")
+                                    .frame(maxWidth: .infinity)
+                                    .padding(14)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Theme.primary)
+                        }
+                    }
+
+                    Text("The filtering resolver is selected securely by LibreGuard servers according to your account. It is not exposed as a custom DNS option, and no public fallback resolver is configured.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(24)
+            }
+            .background(Theme.background)
+            .navigationTitle("LibreGuard DNS")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .task { await app.refreshDNSPreference(showErrors: false) }
+    }
+
+    private var accountMode: String {
+        guard let preference = app.dnsPreference else { return "Loading…" }
+        return preference.effectiveEnabled || preference.normalizedEffectiveMode == "filtered"
+            ? "Filtered"
+            : "Regular"
+    }
+
+    private var adBlockingStatus: String {
+        guard let preference = app.dnsPreference else { return "Checking availability" }
+        if !preference.canUseAdBlocking, preference.requestedEnabled { return "Paused" }
+        if preference.effectiveEnabled { return "Enabled" }
+        if preference.requestedEnabled { return "Requested" }
+        return preference.canUseAdBlocking ? "Off" : "Pro feature"
+    }
+
+    private var adBlockingStatusIcon: String {
+        app.dnsPreference?.effectiveEnabled == true ? "checkmark.shield.fill" : "shield"
+    }
+
+    private var adBlockingStatusColor: Color {
+        app.dnsPreference?.effectiveEnabled == true ? Theme.statusConnected : .secondary
+    }
+
+    private var adBlockingExplanation: String {
+        guard let preference = app.dnsPreference else {
+            return "Loading your account DNS preference."
+        }
+        if !preference.canUseAdBlocking, preference.requestedEnabled {
+            return "Your saved preference will resume when this account has an active Pro subscription. You can turn it off from the main Settings screen."
+        }
+        if !preference.canUseAdBlocking {
+            return "Upgrade to Pro to block ads and trackers through LibreGuard DNS."
+        }
+        if preference.effectiveEnabled {
+            return "Eligible VPN sessions are routed through LibreGuard's filtered resolver."
+        }
+        if preference.requestedEnabled {
+            return "Your preference is saved, but regular DNS is currently active."
+        }
+        return "Private DNS is active without server-side ad filtering."
+    }
+}
+
+private struct DNSDetailRow: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .fontWeight(.medium)
+                .multilineTextAlignment(.trailing)
+        }
+        .font(.subheadline)
     }
 }
 
@@ -2000,27 +2183,6 @@ private struct CardContainer<Content: View>: View {
     }
 }
 
-private struct AlertCard: View {
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "exclamationmark.shield")
-                .foregroundStyle(Theme.destructive)
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Unsecured Network")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.destructive)
-                Text("Connect to VPN for protection on public WiFi")
-                    .font(.caption)
-                    .foregroundStyle(Theme.destructive.opacity(0.8))
-            }
-            Spacer()
-        }
-        .padding(14)
-        .background(Theme.destructive.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.destructive.opacity(0.45)))
-    }
-}
-
 private struct ProtectedIPCard: View {
     let server: VPNServer?
 
@@ -2050,9 +2212,11 @@ private struct ProtectedIPCard: View {
 }
 
 private struct ProtectionIndicators: View {
+    @EnvironmentObject private var app: AppModel
+
     var body: some View {
         HStack(spacing: 10) {
-            ProtectionBadge(text: "DNS Protected")
+            ProtectionBadge(text: app.dnsPreference?.effectiveEnabled == true ? "Ad Blocking" : "Private DNS")
             ProtectionBadge(text: "IPv6 Blocked")
             ProtectionBadge(text: "WebRTC Safe")
         }

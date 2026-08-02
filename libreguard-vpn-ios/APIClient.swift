@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 @MainActor
 protocol BackendServicing: AnyObject {
@@ -22,8 +23,13 @@ protocol BackendServicing: AnyObject {
     func logout() async
     func fetchServers() async throws -> [VPNServer]
     func fetchVPNConfig(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> VPNConfigResponse
+    func requestCertificate(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> CertificateJobCreatedResponse
+    func fetchCertificateGenerationStatus(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> CertificateGenerationStatusResponse
+    func fetchCertificateJob(jobId: Int) async throws -> CertificateJobStatusResponse
     func fetchUsage() async throws -> UsageQuota
     func fetchSubscription() async throws -> SubscriptionStatus
+    func fetchDNSPreference() async throws -> DNSPreference
+    func updateDNSPreference(adBlockingEnabled: Bool) async throws -> DNSPreference
     func fetchAppleAccountToken() async throws -> UUID
     func verifyAppleTransaction(_ signedTransactionInfo: String, allowTransfer: Bool) async throws -> AppleTransactionVerificationResponse
     func fetchTwoFactorStatus() async throws -> TwoFactorStatus
@@ -243,6 +249,25 @@ final class APIClient: BackendServicing {
         return response
     }
 
+    func requestCertificate(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> CertificateJobCreatedResponse {
+        try await send(
+            .post,
+            path: "/api/certificates/request",
+            body: CertificateRequestPayload(serverId: serverId, vpnType: protocolName.certificateRequestValue)
+        )
+    }
+
+    func fetchCertificateGenerationStatus(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> CertificateGenerationStatusResponse {
+        try await send(
+            .get,
+            path: "/api/client-certificates/check-generation-status/\(serverId)?vpnType=\(protocolName.certificateRequestValue.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? protocolName.certificateRequestValue)"
+        )
+    }
+
+    func fetchCertificateJob(jobId: Int) async throws -> CertificateJobStatusResponse {
+        try await send(.get, path: "/api/certificates/jobs/\(jobId)")
+    }
+
     func fetchUsage() async throws -> UsageQuota {
         let response: UsageQuota = try await send(.get, path: "/api/usage/quota")
         return response
@@ -251,6 +276,18 @@ final class APIClient: BackendServicing {
     func fetchSubscription() async throws -> SubscriptionStatus {
         let response: SubscriptionStatus = try await send(.get, path: "/api/subscription/status")
         return response
+    }
+
+    func fetchDNSPreference() async throws -> DNSPreference {
+        try await send(.get, path: "/api/dns/settings")
+    }
+
+    func updateDNSPreference(adBlockingEnabled: Bool) async throws -> DNSPreference {
+        try await send(
+            .put,
+            path: "/api/dns/settings",
+            body: UpdateDNSPreferenceRequest(adBlockingEnabled: adBlockingEnabled)
+        )
     }
 
     func fetchAppleAccountToken() async throws -> UUID {
@@ -353,7 +390,13 @@ final class APIClient: BackendServicing {
         authorized: Bool = true,
         retryAfterRefresh: Bool = true
     ) async throws -> Response {
-        var request = URLRequest(url: baseURL.appending(path: path))
+        var requestURL = baseURL.appending(path: path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? path)
+        if let query = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).dropFirst().first,
+           var components = URLComponents(url: requestURL, resolvingAgainstBaseURL: false) {
+            components.query = String(query)
+            requestURL = components.url ?? requestURL
+        }
+        var request = URLRequest(url: requestURL)
         request.httpMethod = method.rawValue
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -421,6 +464,109 @@ final class APIClient: BackendServicing {
 }
 
 private struct EmptyBody: Encodable {}
+
+@MainActor
+protocol VPNConfigurationResolving: AnyObject {
+    var onPreparationStateChange: ((String?) -> Void)? { get set }
+    func resolve(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> VPNConfigResponse
+}
+
+@MainActor
+final class VPNConfigurationResolver: VPNConfigurationResolving {
+    private let api: BackendServicing
+    private let preparationTimeout: TimeInterval
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "libreguard-vpn-ios", category: "CertificateResolution")
+
+    var onPreparationStateChange: ((String?) -> Void)?
+
+    init(api: BackendServicing, preparationTimeout: TimeInterval = 90) {
+        self.api = api
+        self.preparationTimeout = preparationTimeout
+    }
+
+    func resolve(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> VPNConfigResponse {
+        do {
+            let response = try await api.fetchVPNConfig(serverId: serverId, protocol: protocolName)
+            onPreparationStateChange?(nil)
+            return response
+        } catch let error as APIError where error.code == "CERTIFICATE_NOT_FOUND" {
+            onPreparationStateChange?("Preparing your \(protocolName.displayName) certificate…")
+            do {
+                return try await provisionAndResolve(serverId: serverId, protocol: protocolName)
+            } catch {
+                if (error as? APIError)?.code != "CERTIFICATE_PREPARATION_TIMEOUT" {
+                    onPreparationStateChange?(nil)
+                }
+                throw error
+            }
+        } catch {
+            onPreparationStateChange?(nil)
+            throw error
+        }
+    }
+
+    private func provisionAndResolve(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> VPNConfigResponse {
+        do {
+            let created = try await api.requestCertificate(serverId: serverId, protocol: protocolName)
+            try await waitForCompletion(jobId: created.jobId, protocol: protocolName)
+        } catch let error as APIError where error.code == "CERTIFICATE_PENDING" || error.code == "CERTIFICATE_EXISTS" {
+            let status = try await api.fetchCertificateGenerationStatus(serverId: serverId, protocol: protocolName)
+            if status.certificateExists == true || status.existingCertificate != nil {
+                let response = try await api.fetchVPNConfig(serverId: serverId, protocol: protocolName)
+                onPreparationStateChange?(nil)
+                return response
+            }
+
+            guard let pendingJob = status.pendingJob else {
+                throw error
+            }
+            try await waitForCompletion(jobId: pendingJob.id, protocol: protocolName)
+        } catch {
+            if (error as? APIError)?.code != "CERTIFICATE_PREPARATION_TIMEOUT" {
+                onPreparationStateChange?(nil)
+            }
+            throw error
+        }
+
+        let response = try await api.fetchVPNConfig(serverId: serverId, protocol: protocolName)
+        onPreparationStateChange?(nil)
+        return response
+    }
+
+    private func waitForCompletion(jobId: Int, protocol protocolName: VPNConfigurationProtocol) async throws {
+        let deadline = Date().addingTimeInterval(preparationTimeout)
+        var delayNanoseconds: UInt64 = 1_000_000_000
+
+        while Date() < deadline {
+            try Task.checkCancellation()
+            let job = try await api.fetchCertificateJob(jobId: jobId)
+            switch job.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "success", "succeeded", "completed":
+                return
+            case "failed", "cancelled", "canceled":
+                onPreparationStateChange?(nil)
+                throw APIError(
+                    statusCode: 422,
+                    message: job.errorMessage ?? "Your \(protocolName.displayName) certificate could not be created.",
+                    code: "CERTIFICATE_GENERATION_FAILED"
+                )
+            default:
+                break
+            }
+
+            let remaining = max(0, deadline.timeIntervalSinceNow)
+            guard remaining > 0 else { break }
+            let delay = min(TimeInterval(delayNanoseconds) / 1_000_000_000, remaining)
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            delayNanoseconds = min(delayNanoseconds * 2, 5_000_000_000)
+        }
+
+        let message = "Your \(protocolName.displayName) certificate is still being prepared. Try Connect again in a moment."
+        onPreparationStateChange?(message)
+        logger.info("Certificate preparation timed out while job \(jobId, privacy: .public) was still running")
+        throw APIError(statusCode: 408, message: message, code: "CERTIFICATE_PREPARATION_TIMEOUT")
+    }
+}
 
 private extension ISO8601DateFormatter {
     static let standard: ISO8601DateFormatter = {
