@@ -1,5 +1,4 @@
 import Foundation
-import Network
 
 @MainActor
 protocol LatencyProbing: AnyObject {
@@ -8,8 +7,19 @@ protocol LatencyProbing: AnyObject {
 
 @MainActor
 final class NetworkLatencyProbe: LatencyProbing {
+    private let urlSession: URLSession
+    private let timeoutInterval: TimeInterval
+
+    init(urlSession: URLSession = .shared, timeoutInterval: TimeInterval = 3) {
+        self.urlSession = urlSession
+        self.timeoutInterval = max(timeoutInterval, 0.1)
+    }
+
     func measure(_ servers: [VPNServer]) async -> [Int: Int] {
         var results: [Int: Int] = [:]
+        let session = urlSession
+        let timeoutInterval = timeoutInterval
+
         for start in stride(from: 0, to: servers.count, by: 4) {
             let end = min(start + 4, servers.count)
             let batch = Array(servers[start..<end])
@@ -18,7 +28,17 @@ final class NetworkLatencyProbe: LatencyProbing {
                     let id = server.id
                     let host = server.latencyHost
                     let port = server.latencyPingPort
-                    group.addTask { (id, await Self.probe(host: host, portValue: port)) }
+                    group.addTask {
+                        (
+                            id,
+                            await Self.probe(
+                                host: host,
+                                portValue: port,
+                                urlSession: session,
+                                timeoutInterval: timeoutInterval
+                            )
+                        )
+                    }
                 }
                 var values: [(Int, Int?)] = []
                 for await value in group { values.append(value) }
@@ -32,84 +52,51 @@ final class NetworkLatencyProbe: LatencyProbing {
         return results
     }
 
-    nonisolated private static func probe(host: String, portValue: Int) async -> Int? {
-        guard let port = NWEndpoint.Port(rawValue: UInt16(clamping: portValue)) else { return nil }
-        let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: .tcp)
-        let completion = ProbeCompletion()
+    nonisolated private static func probe(
+        host: String,
+        portValue: Int,
+        urlSession: URLSession,
+        timeoutInterval: TimeInterval
+    ) async -> Int? {
+        guard let url = pingURL(host: host, portValue: portValue) else { return nil }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = timeoutInterval
         let started = DispatchTime.now().uptimeNanoseconds
 
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                completion.install(continuation)
-                connection.stateUpdateHandler = { state in
-                    switch state {
-                    case .ready:
-                        let request = "GET /ping HTTP/1.1\r\nHost: \(host)\r\nConnection: close\r\n\r\n"
-                        connection.send(content: Data(request.utf8), completion: .contentProcessed { error in
-                            if error != nil {
-                                completion.finish(nil)
-                                connection.cancel()
-                                return
-                            }
-                            connection.receive(minimumIncompleteLength: 1, maximumLength: 512) { data, _, _, error in
-                                guard error == nil, data?.isEmpty == false else {
-                                    completion.finish(nil)
-                                    connection.cancel()
-                                    return
-                                }
-                                let elapsed = DispatchTime.now().uptimeNanoseconds - started
-                                completion.finish(Int((Double(elapsed) / 1_000_000).rounded()))
-                                connection.cancel()
-                            }
-                        })
-                    case .failed, .cancelled:
-                        completion.finish(nil)
-                    default:
-                        break
-                    }
-                }
-                connection.start(queue: DispatchQueue.global(qos: .utility))
-                Task {
-                    try? await Task.sleep(for: .seconds(3))
-                    completion.finish(nil)
-                    connection.cancel()
-                }
+        do {
+            let (data, response) = try await urlSession.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode),
+                  hasValidPong(in: data) else {
+                return nil
             }
-        } onCancel: {
-            completion.finish(nil)
-            connection.cancel()
+
+            let elapsed = DispatchTime.now().uptimeNanoseconds - started
+            return Int((Double(elapsed) / 1_000_000).rounded())
+        } catch is CancellationError {
+            return nil
+        } catch {
+            return nil
         }
     }
-}
 
-private final class ProbeCompletion: @unchecked Sendable {
-    private let lock = NSLock()
-    nonisolated(unsafe) private var continuation: CheckedContinuation<Int?, Never>?
-    nonisolated(unsafe) private var completedValue: Int??
+    nonisolated private static func pingURL(host: String, portValue: Int) -> URL? {
+        guard !host.isEmpty, (1...65_535).contains(portValue) else { return nil }
 
-    nonisolated init() {}
-
-    nonisolated func install(_ continuation: CheckedContinuation<Int?, Never>) {
-        lock.lock()
-        if let completedValue {
-            lock.unlock()
-            continuation.resume(returning: completedValue)
-            return
-        }
-        self.continuation = continuation
-        lock.unlock()
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = host
+        components.port = portValue
+        components.path = "/ping"
+        return components.url
     }
 
-    nonisolated func finish(_ value: Int?) {
-        lock.lock()
-        guard completedValue == nil else {
-            lock.unlock()
-            return
+    nonisolated private static func hasValidPong(in data: Data) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
         }
-        completedValue = .some(value)
-        let continuation = continuation
-        self.continuation = nil
-        lock.unlock()
-        continuation?.resume(returning: value)
+        return object["pong"] as? Bool == true
     }
 }

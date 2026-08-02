@@ -64,6 +64,7 @@ final class AppModel: ObservableObject {
     private let killSwitchActivationKey = "vpn.killSwitch.activation"
     private var cachedPlanName: String?
     private var cachedPlanIsPro = false
+    private var hasCachedPlan = false
     private var serverRefreshTask: Task<Void, Never>?
     private var retryCountdownTask: Task<Void, Never>?
     private var appleTransactionListenerTask: Task<Void, Never>?
@@ -123,6 +124,8 @@ final class AppModel: ObservableObject {
         self.cachedPlanIsPro = defaults.object(forKey: cachedPlanIsProKey) != nil
             ? defaults.bool(forKey: cachedPlanIsProKey)
             : false
+        self.hasCachedPlan = defaults.string(forKey: cachedPlanNameKey) != nil
+            || defaults.object(forKey: cachedPlanIsProKey) != nil
         self.vpnStatus = self.vpn.status
         self.vpn.onStatusChange = { [weak self] status in
             self?.handleVPNStatusChange(status)
@@ -369,31 +372,86 @@ final class AppModel: ObservableObject {
 
     func refreshAccountData(showErrors: Bool = true) async {
         guard session != nil || api.storedSession != nil else { return }
+        guard !isRefreshingAccount else { return }
         isRefreshingAccount = true
         defer { isRefreshingAccount = false }
 
-        async let dnsPreference = api.fetchDNSPreference()
-        var accountErrorWasPresented = false
-        do {
-            async let usage = api.fetchUsage()
-            async let subscription = api.fetchSubscription()
-            async let twoFactor = api.fetchTwoFactorStatus()
-            let values = try await (usage, subscription, twoFactor)
-            usageQuota = values.0
-            self.subscription = values.1
-            cachePlan(name: values.1.displayName, isPro: values.1.isPro)
-            twoFactorStatus = values.2
-        } catch {
-            if showErrors {
-                accountErrorWasPresented = true
-                present(error)
-            }
+        async let usageResult = fetchUsageResult()
+        async let subscriptionResult = fetchSubscriptionResult()
+        async let twoFactorResult = fetchTwoFactorStatusResult()
+        async let dnsPreferenceResult = fetchDNSPreferenceResult()
+        let (usage, subscription, twoFactor, dnsPreference) = await (
+            usageResult,
+            subscriptionResult,
+            twoFactorResult,
+            dnsPreferenceResult
+        )
+
+        var firstError: Error?
+
+        switch usage {
+        case let .success(value):
+            usageQuota = value
+        case let .failure(error):
+            firstError = error
         }
 
+        switch subscription {
+        case let .success(value):
+            self.subscription = value
+            cachePlan(name: value.displayName, isPro: value.isPro)
+        case let .failure(error):
+            firstError = firstError ?? error
+        }
+
+        switch twoFactor {
+        case let .success(value):
+            twoFactorStatus = value
+        case let .failure(error):
+            firstError = firstError ?? error
+        }
+
+        switch dnsPreference {
+        case let .success(value):
+            self.dnsPreference = value
+        case let .failure(error):
+            firstError = firstError ?? error
+        }
+
+        if showErrors, let firstError {
+            present(firstError)
+        }
+    }
+
+    private func fetchUsageResult() async -> Result<UsageQuota, Error> {
         do {
-            self.dnsPreference = try await dnsPreference
+            return .success(try await api.fetchUsage())
         } catch {
-            if showErrors, !accountErrorWasPresented { present(error) }
+            return .failure(error)
+        }
+    }
+
+    private func fetchSubscriptionResult() async -> Result<SubscriptionStatus, Error> {
+        do {
+            return .success(try await api.fetchSubscription())
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func fetchTwoFactorStatusResult() async -> Result<TwoFactorStatus, Error> {
+        do {
+            return .success(try await api.fetchTwoFactorStatus())
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func fetchDNSPreferenceResult() async -> Result<DNSPreference, Error> {
+        do {
+            return .success(try await api.fetchDNSPreference())
+        } catch {
+            return .failure(error)
         }
     }
 
@@ -822,16 +880,20 @@ final class AppModel: ObservableObject {
 
     var isProUser: Bool {
         if let subscription { return subscription.isPro }
+        if hasCachedPlan { return cachedPlanIsPro }
         if let usageQuota { return usageQuota.planTierHint.isPro }
-        return cachedPlanIsPro
+        return false
     }
 
     var currentPlanDisplayName: String {
         if let subscription { return subscription.displayName }
-        if let usageQuota { return usageQuota.planTierHint.rawValue }
-        if let cachedPlan = AccountPlanTier(planName: cachedPlanName) {
-            return cachedPlan.rawValue
+        if hasCachedPlan {
+            if let cachedPlan = AccountPlanTier(planName: cachedPlanName) {
+                return cachedPlan.rawValue
+            }
+            return cachedPlanIsPro ? AccountPlanTier.pro.rawValue : AccountPlanTier.free.rawValue
         }
+        if let usageQuota { return usageQuota.planTierHint.rawValue }
         return AccountPlanTier.free.rawValue
     }
 
@@ -1245,6 +1307,7 @@ final class AppModel: ObservableObject {
     private func cachePlan(name: String, isPro: Bool) {
         cachedPlanName = name
         cachedPlanIsPro = isPro
+        hasCachedPlan = true
         defaults.set(name, forKey: cachedPlanNameKey)
         defaults.set(isPro, forKey: cachedPlanIsProKey)
     }
@@ -1252,6 +1315,7 @@ final class AppModel: ObservableObject {
     private func clearCachedPlan() {
         cachedPlanName = nil
         cachedPlanIsPro = false
+        hasCachedPlan = false
         defaults.removeObject(forKey: cachedPlanNameKey)
         defaults.removeObject(forKey: cachedPlanIsProKey)
     }

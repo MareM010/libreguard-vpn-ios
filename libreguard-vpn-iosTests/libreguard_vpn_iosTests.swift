@@ -196,6 +196,133 @@ struct libreguard_vpn_iosTests {
         }
     }
 
+    @Test func accountRefreshCommitsSubscriptionWhenOtherAccountRequestsFail() async throws {
+        try await withSerializedRequests {
+            let session = AuthSession(
+                accessToken: "account-access",
+                refreshToken: "refresh",
+                email: "person@example.com",
+                userId: "user-1",
+                deviceId: "test-device"
+            )
+            let client = makeClient(sessionStore: InMemorySessionStore(session: session)) { request in
+                switch request.url?.path {
+                case "/api/usage/quota":
+                    return try self.makeResponse(request, status: 503, json: ["message": "Usage unavailable"])
+                case "/api/subscription/status":
+                    return try self.makeResponse(request, status: 200, json: self.subscriptionJSON(plan: "Pro", isPro: true))
+                case "/api/2fa/status":
+                    return try self.makeResponse(request, status: 503, json: ["message": "2FA unavailable"])
+                case "/api/dns/settings":
+                    return try self.makeResponse(request, status: 200, json: self.dnsPreferenceJSON)
+                default:
+                    throw APIError(message: "Unexpected endpoint")
+                }
+            }
+            let app = AppModel(
+                api: client,
+                vpnManager: DNSSettingsTestVPNManager(),
+                defaults: UserDefaults(suiteName: UUID().uuidString)!
+            )
+
+            await app.refreshAccountData(showErrors: false)
+
+            #expect(app.subscription?.isPro == true)
+            #expect(app.isProUser)
+            #expect(app.currentPlanDisplayName == "Pro")
+            #expect(app.dnsPreference?.requestedEnabled == false)
+        }
+    }
+
+    @Test func failedSubscriptionRefreshKeepsCachedProPlanDespiteFreeUsageQuota() async throws {
+        try await withSerializedRequests {
+            let defaults = UserDefaults(suiteName: UUID().uuidString)!
+            defaults.set("Pro", forKey: "cached.plan.name")
+            defaults.set(true, forKey: "cached.plan.isPro")
+            let session = AuthSession(
+                accessToken: "account-access",
+                refreshToken: "refresh",
+                email: "person@example.com",
+                userId: "user-1",
+                deviceId: "test-device"
+            )
+            let client = makeClient(sessionStore: InMemorySessionStore(session: session)) { request in
+                switch request.url?.path {
+                case "/api/usage/quota":
+                    return try self.makeResponse(request, status: 200, json: self.quotaJSON)
+                case "/api/subscription/status":
+                    return try self.makeResponse(request, status: 503, json: ["message": "Subscription unavailable"])
+                case "/api/2fa/status":
+                    return try self.makeResponse(request, status: 200, json: [
+                        "is2faEnabled": false,
+                        "hasAuthenticator": false,
+                        "recoveryCodesLeft": 0
+                    ])
+                case "/api/dns/settings":
+                    return try self.makeResponse(request, status: 200, json: self.dnsPreferenceJSON)
+                default:
+                    throw APIError(message: "Unexpected endpoint")
+                }
+            }
+            let app = AppModel(
+                api: client,
+                vpnManager: DNSSettingsTestVPNManager(),
+                defaults: defaults
+            )
+
+            await app.refreshAccountData(showErrors: false)
+
+            #expect(app.subscription == nil)
+            #expect(app.isProUser)
+            #expect(app.currentPlanDisplayName == "Pro")
+        }
+    }
+
+    @Test func successfulFreeSubscriptionReplacesCachedProPlan() async throws {
+        try await withSerializedRequests {
+            let defaults = UserDefaults(suiteName: UUID().uuidString)!
+            defaults.set("Pro", forKey: "cached.plan.name")
+            defaults.set(true, forKey: "cached.plan.isPro")
+            let session = AuthSession(
+                accessToken: "account-access",
+                refreshToken: "refresh",
+                email: "person@example.com",
+                userId: "user-1",
+                deviceId: "test-device"
+            )
+            let client = makeClient(sessionStore: InMemorySessionStore(session: session)) { request in
+                switch request.url?.path {
+                case "/api/usage/quota":
+                    return try self.makeResponse(request, status: 200, json: self.quotaJSON)
+                case "/api/subscription/status":
+                    return try self.makeResponse(request, status: 200, json: self.subscriptionJSON(plan: "Free", isPro: false))
+                case "/api/2fa/status":
+                    return try self.makeResponse(request, status: 200, json: [
+                        "is2faEnabled": false,
+                        "hasAuthenticator": false,
+                        "recoveryCodesLeft": 0
+                    ])
+                case "/api/dns/settings":
+                    return try self.makeResponse(request, status: 200, json: self.dnsPreferenceJSON)
+                default:
+                    throw APIError(message: "Unexpected endpoint")
+                }
+            }
+            let app = AppModel(
+                api: client,
+                vpnManager: DNSSettingsTestVPNManager(),
+                defaults: defaults
+            )
+
+            await app.refreshAccountData(showErrors: false)
+
+            #expect(app.subscription?.isPro == false)
+            #expect(app.isProUser == false)
+            #expect(app.currentPlanDisplayName == "Free")
+            #expect(defaults.bool(forKey: "cached.plan.isPro") == false)
+        }
+    }
+
     @Test func appleSubscriptionEndpointsUseAuthenticatedAccountContract() async throws {
         try await withSerializedRequests {
             let token = UUID(uuidString: "4CB6C240-6A45-42B4-AD28-C54C49B43F11")!
@@ -510,6 +637,60 @@ struct libreguard_vpn_iosTests {
         #expect(subscription.displayName == "Pro")
     }
 
+    @Test func latencyProbeUsesHTTPSPingEndpoint() async throws {
+        try await withSerializedRequests {
+            let server = makeLatencyServer(id: 1, hostname: "fra-1.example.com")
+            URLProtocolStub.handler = { request in
+                #expect(request.httpMethod == "GET")
+                #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+                #expect(request.url?.scheme == "https")
+                #expect(request.url?.host == "fra-1.example.com")
+                #expect(request.url?.port == 5001)
+                #expect(request.url?.path == "/ping")
+                return try self.makeResponse(request, status: 200, json: [
+                    "pong": true,
+                    "timestamp": 1_703_868_000_000
+                ])
+            }
+
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [URLProtocolStub.self]
+            let probe = NetworkLatencyProbe(urlSession: URLSession(configuration: configuration))
+            let latencies = await probe.measure([server])
+
+            #expect(latencies[server.id] != nil)
+        }
+    }
+
+    @Test func latencyProbeIgnoresInvalidPingResponsesAndFailures() async throws {
+        try await withSerializedRequests {
+            let valid = makeLatencyServer(id: 1, hostname: "valid.example.com")
+            let invalid = makeLatencyServer(id: 2, hostname: "invalid.example.com")
+            let failed = makeLatencyServer(id: 3, hostname: "failed.example.com")
+            URLProtocolStub.handler = { request in
+                switch request.url?.host {
+                case valid.latencyHost:
+                    return try self.makeResponse(request, status: 200, json: ["pong": true])
+                case invalid.latencyHost:
+                    return try self.makeResponse(request, status: 200, json: ["pong": false])
+                case failed.latencyHost:
+                    throw APIError(message: "Ping failed")
+                default:
+                    throw APIError(message: "Unexpected ping host")
+                }
+            }
+
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [URLProtocolStub.self]
+            let probe = NetworkLatencyProbe(urlSession: URLSession(configuration: configuration))
+            let latencies = await probe.measure([valid, invalid, failed])
+
+            #expect(latencies[valid.id] != nil)
+            #expect(latencies[invalid.id] == nil)
+            #expect(latencies[failed.id] == nil)
+        }
+    }
+
     func makeClient(
         sessionStore: SessionStoring? = nil,
         deviceKeyStore: VPNDeviceKeyProviding? = nil,
@@ -589,6 +770,48 @@ struct libreguard_vpn_iosTests {
             "cycleEnd": "2026-07-01T00:00:00Z",
             "resetDate": "2026-07-01T00:00:00Z"
         ]
+    }
+
+    private var dnsPreferenceJSON: [String: Any] {
+        [
+            "requestedEnabled": false,
+            "canUseAdBlocking": true,
+            "effectiveEnabled": false,
+            "effectiveMode": "regular",
+            "propagationSeconds": 15
+        ]
+    }
+
+    private func subscriptionJSON(plan: String, isPro: Bool) -> [String: Any] {
+        [
+            "plan": plan,
+            "isPro": isPro,
+            "status": isPro ? "active" : "inactive",
+            "paymentType": NSNull(),
+            "currentPeriodEnd": NSNull(),
+            "cancelAtPeriodEnd": false,
+            "billingCycle": isPro ? "monthly" : "none",
+            "activeDevices": 1,
+            "maxDevices": isPro ? 3 : 1,
+            "canAddDevice": isPro
+        ]
+    }
+
+    private func makeLatencyServer(id: Int, hostname: String) -> VPNServer {
+        VPNServer(
+            id: id,
+            serverName: "Server-\(id)",
+            serverIp: "203.0.113.\(id)",
+            serverHostname: hostname,
+            country: "Germany",
+            city: "Frankfurt",
+            linkSpeed: 1_000,
+            pricingTier: "Free",
+            load: 20,
+            activeConnections: nil,
+            latencyPingPort: 5_001,
+            loadDataFresh: true
+        )
     }
 }
 
