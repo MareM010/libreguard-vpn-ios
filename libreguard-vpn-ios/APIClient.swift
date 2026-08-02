@@ -489,10 +489,15 @@ final class VPNConfigurationResolver: VPNConfigurationResolving {
             let response = try await api.fetchVPNConfig(serverId: serverId, protocol: protocolName)
             onPreparationStateChange?(nil)
             return response
-        } catch let error as APIError where error.code == "CERTIFICATE_NOT_FOUND" {
-            onPreparationStateChange?("Preparing your \(protocolName.displayName) certificate…")
+        } catch let error as APIError where shouldInspectCertificateStatus(after: error) {
             do {
-                return try await provisionAndResolve(serverId: serverId, protocol: protocolName)
+                let response = try await recoverConfiguration(
+                    after: error,
+                    serverId: serverId,
+                    protocol: protocolName
+                )
+                onPreparationStateChange?(nil)
+                return response
             } catch {
                 if (error as? APIError)?.code != "CERTIFICATE_PREPARATION_TIMEOUT" {
                     onPreparationStateChange?(nil)
@@ -505,16 +510,43 @@ final class VPNConfigurationResolver: VPNConfigurationResolving {
         }
     }
 
-    private func provisionAndResolve(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> VPNConfigResponse {
+    private func recoverConfiguration(
+        after configurationError: APIError,
+        serverId: Int,
+        protocol protocolName: VPNConfigurationProtocol
+    ) async throws -> VPNConfigResponse {
+        try Task.checkCancellation()
+        let status = try await api.fetchCertificateGenerationStatus(serverId: serverId, protocol: protocolName)
+
+        if status.certificateExists == true || status.existingCertificate != nil {
+            return try await api.fetchVPNConfig(serverId: serverId, protocol: protocolName)
+        }
+
+        if let pendingJob = status.pendingJob {
+            beginPreparation(for: protocolName)
+            try await waitForCompletion(jobId: pendingJob.id, protocol: protocolName)
+            return try await api.fetchVPNConfig(serverId: serverId, protocol: protocolName)
+        }
+
+        guard status.canGenerate == true else {
+            throw configurationError
+        }
+
+        beginPreparation(for: protocolName)
+        return try await requestCertificateAndResolve(serverId: serverId, protocol: protocolName)
+    }
+
+    private func requestCertificateAndResolve(
+        serverId: Int,
+        protocol protocolName: VPNConfigurationProtocol
+    ) async throws -> VPNConfigResponse {
         do {
             let created = try await api.requestCertificate(serverId: serverId, protocol: protocolName)
             try await waitForCompletion(jobId: created.jobId, protocol: protocolName)
-        } catch let error as APIError where error.code == "CERTIFICATE_PENDING" || error.code == "CERTIFICATE_EXISTS" {
+        } catch let error as APIError where isCertificateConflict(error) {
             let status = try await api.fetchCertificateGenerationStatus(serverId: serverId, protocol: protocolName)
             if status.certificateExists == true || status.existingCertificate != nil {
-                let response = try await api.fetchVPNConfig(serverId: serverId, protocol: protocolName)
-                onPreparationStateChange?(nil)
-                return response
+                return try await api.fetchVPNConfig(serverId: serverId, protocol: protocolName)
             }
 
             guard let pendingJob = status.pendingJob else {
@@ -528,9 +560,19 @@ final class VPNConfigurationResolver: VPNConfigurationResolving {
             throw error
         }
 
-        let response = try await api.fetchVPNConfig(serverId: serverId, protocol: protocolName)
-        onPreparationStateChange?(nil)
-        return response
+        return try await api.fetchVPNConfig(serverId: serverId, protocol: protocolName)
+    }
+
+    private func shouldInspectCertificateStatus(after error: APIError) -> Bool {
+        error.statusCode == 404 || error.code == "CERTIFICATE_NOT_FOUND"
+    }
+
+    private func isCertificateConflict(_ error: APIError) -> Bool {
+        error.statusCode == 409 || error.code == "CERTIFICATE_PENDING" || error.code == "CERTIFICATE_EXISTS"
+    }
+
+    private func beginPreparation(for protocolName: VPNConfigurationProtocol) {
+        onPreparationStateChange?("Preparing your \(protocolName.displayName) certificate…")
     }
 
     private func waitForCompletion(jobId: Int, protocol protocolName: VPNConfigurationProtocol) async throws {
