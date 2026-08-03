@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import NetworkExtension
 import OSLog
 
@@ -13,7 +14,7 @@ final class OpenVPNManager: VPNManaging {
         subsystem: Bundle.main.bundleIdentifier ?? "libreguard-vpn-ios",
         category: "OpenVPN"
     )
-    private let providerBundleIdentifier: String
+    private let providerBundleIdentifierOverride: String?
     private var statusObserver: NSObjectProtocol?
 
     var status: VPNConnectionState = .disconnected {
@@ -32,14 +33,14 @@ final class OpenVPNManager: VPNManaging {
         deviceKeyStore: VPNDeviceKeyProviding = VPNDeviceKeyStore(),
         protocolBuilder: OpenVPNTunnelProtocolBuilding = TunnelKitOpenVPNProtocolBuilder(),
         manager: NETunnelProviderManager = NETunnelProviderManager(),
-        providerBundleIdentifier: String = OpenVPNConstants.tunnelBundleIdentifier
+        providerBundleIdentifier: String? = nil
     ) {
         self.api = api
         self.configurationResolver = resolver ?? VPNConfigurationResolver(api: api)
         self.deviceKeyStore = deviceKeyStore
         self.protocolBuilder = protocolBuilder
         self.manager = manager
-        self.providerBundleIdentifier = providerBundleIdentifier
+        self.providerBundleIdentifierOverride = providerBundleIdentifier
         observeStatusChanges()
     }
 
@@ -106,6 +107,14 @@ final class OpenVPNManager: VPNManaging {
 
             let serverAddress = tunnelProtocol.serverAddress ?? Self.fallbackServerAddress(response: response, server: server)
             tunnelProtocol.serverAddress = serverAddress
+            let resolvedAddresses = Self.applyResolvedAddresses(
+                to: tunnelProtocol,
+                response: response,
+                server: server
+            )
+            if !resolvedAddresses.isEmpty {
+                logger.debug("OpenVPN will use DNS first with backend-resolved IPv4 fallback endpoint(s): \(resolvedAddresses, privacy: .public)")
+            }
             try OpenVPNConnectionMetadataStore.save(
                 OpenVPNConnectionMetadata(
                     serverId: server.id,
@@ -114,8 +123,10 @@ final class OpenVPNManager: VPNManaging {
                 )
             )
 
+            let providerBundleIdentifier = try resolvedProviderBundleIdentifier()
             try await loadPreferences()
             try Task.checkCancellation()
+            try await removeStaleProviderConfiguration(ifProviderIdentifierDiffersFrom: providerBundleIdentifier)
             tunnelProtocol.providerBundleIdentifier = providerBundleIdentifier
             policy.apply(to: tunnelProtocol)
 
@@ -130,6 +141,7 @@ final class OpenVPNManager: VPNManaging {
             logger.debug("Reloading OpenVPN preferences before tunnel start")
             try await loadPreferences()
             try Task.checkCancellation()
+            try verifySavedProviderConfiguration(expectedIdentifier: providerBundleIdentifier)
             logger.debug("Starting OpenVPN tunnel")
             try manager.connection.startVPNTunnel()
             try Task.checkCancellation()
@@ -216,8 +228,69 @@ final class OpenVPNManager: VPNManaging {
                 let previous = self.status
                 self.updateStatus(from: self.manager.connection.status)
                 if previous != .disconnected, self.status == .disconnected {
+                    let packetTunnelError = VPNSharedSessionStore.loadTunnelError()
+                    VPNSharedSessionStore.clearTunnelError()
+                    let tunnelKitError = Self.loadTunnelKitLastError()
+                    let tunnelKitLog = Self.loadTunnelKitDebugLogTail()
+                    let lifecycleLog = OpenVPNExtensionLifecycleJournal.tail()
                     self.manager.connection.fetchLastDisconnectError(completionHandler: { error in
-                        guard let error else { return }
+                        if let packetTunnelError {
+                            var description = packetTunnelError
+                            if let tunnelKitError, !description.contains("TunnelKitLastError=") {
+                                description += " | TunnelKitLastError=\(tunnelKitError)"
+                            }
+                            var userInfo: [String: Any] = [NSLocalizedDescriptionKey: description]
+                            if let error {
+                                userInfo[NSUnderlyingErrorKey] = error
+                            }
+                            let detailedError = NSError(
+                                domain: "OpenVPNPacketTunnel",
+                                code: 1,
+                                userInfo: userInfo
+                            )
+                            self.logger.error("OpenVPN packet tunnel failure: \(description, privacy: .public)")
+                            if let tunnelKitLog {
+                                self.logger.error("TunnelKit debug log tail:\n\(tunnelKitLog, privacy: .public)")
+                            }
+                            if let lifecycleLog {
+                                self.logger.error("OpenVPN extension lifecycle tail:\n\(lifecycleLog, privacy: .public)")
+                            }
+                            Task { @MainActor in
+                                self.onDisconnectError?(detailedError)
+                            }
+                            return
+                        }
+                        if let tunnelKitError {
+                            self.logger.error("TunnelKitLastError=\(tunnelKitError, privacy: .public)")
+                        }
+                        if let tunnelKitLog {
+                            self.logger.error("TunnelKit debug log tail:\n\(tunnelKitLog, privacy: .public)")
+                        }
+                        if let lifecycleLog {
+                            self.logger.error("OpenVPN extension lifecycle tail:\n\(lifecycleLog, privacy: .public)")
+                        }
+                        if let tunnelKitError {
+                            var userInfo: [String: Any] = [
+                                NSLocalizedDescriptionKey: "OpenVPN provider failed: TunnelKitLastError=\(tunnelKitError)"
+                            ]
+                            if let error {
+                                userInfo[NSUnderlyingErrorKey] = error
+                            }
+                            let detailedError = NSError(
+                                domain: "OpenVPNPacketTunnel",
+                                code: 1,
+                                userInfo: userInfo
+                            )
+                            Task { @MainActor in
+                                self.onDisconnectError?(detailedError)
+                            }
+                            return
+                        }
+                        guard let error else {
+                            self.logger.error("OpenVPN tunnel disconnected without a NetworkExtension error")
+                            return
+                        }
+                        self.logger.error("OpenVPN tunnel disconnect error: \(Self.describe(error), privacy: .public)")
                         Task { @MainActor in
                             self.onDisconnectError?(error)
                         }
@@ -230,6 +303,47 @@ final class OpenVPNManager: VPNManaging {
     private func applyOnDemandConfiguration(enabled: Bool) {
         manager.onDemandRules = enabled ? [NEOnDemandRuleConnect()] : nil
         manager.isOnDemandEnabled = enabled
+    }
+
+    private func resolvedProviderBundleIdentifier() throws -> String {
+        if let providerBundleIdentifierOverride {
+            return providerBundleIdentifierOverride
+        }
+
+        guard let embeddedIdentifier = OpenVPNConstants.embeddedTunnelBundleIdentifier() else {
+            throw OpenVPNManagerError.packetTunnelExtensionNotEmbedded
+        }
+
+        logger.debug("Using embedded OpenVPN packet-tunnel provider \(embeddedIdentifier, privacy: .public)")
+        return embeddedIdentifier
+    }
+
+    private func removeStaleProviderConfiguration(ifProviderIdentifierDiffersFrom expectedIdentifier: String) async throws {
+        guard let existingProtocol = manager.protocolConfiguration as? NETunnelProviderProtocol,
+              existingProtocol.providerBundleIdentifier != expectedIdentifier else {
+            return
+        }
+
+        let existingIdentifier = existingProtocol.providerBundleIdentifier ?? "<missing>"
+
+        logger.warning(
+            "Removing stale OpenVPN provider configuration \(existingIdentifier, privacy: .public); expected \(expectedIdentifier, privacy: .public)"
+        )
+        try await removePreferences()
+        try await loadPreferences()
+    }
+
+    private func verifySavedProviderConfiguration(expectedIdentifier: String) throws {
+        guard let savedProtocol = manager.protocolConfiguration as? NETunnelProviderProtocol else {
+            throw OpenVPNManagerError.providerConfigurationUnavailable(expected: expectedIdentifier, actual: nil)
+        }
+
+        guard savedProtocol.providerBundleIdentifier == expectedIdentifier else {
+            throw OpenVPNManagerError.providerConfigurationUnavailable(
+                expected: expectedIdentifier,
+                actual: savedProtocol.providerBundleIdentifier
+            )
+        }
     }
 
     private func sendProviderMessage(type: OpenVPNProviderMessageType) async throws -> OpenVPNProviderResponse {
@@ -338,9 +452,69 @@ final class OpenVPNManager: VPNManaging {
         return server.serverName
     }
 
+    internal static func preferredResolvedAddresses(response: VPNConfigResponse, server: VPNServer) -> [String] {
+        var addresses: [String] = []
+        for candidate in [response.serverIp, server.serverIp] {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            // TunnelKit's resolvedAddresses path treats every entry as IPv4.
+            // Never force a hostname, URL, port-qualified address, or IPv6
+            // address through that path; use normal DNS resolution instead.
+            guard IPv4Address(trimmed) != nil, !addresses.contains(trimmed) else { continue }
+            addresses.append(trimmed)
+        }
+        return addresses
+    }
+
+    @discardableResult
+    private static func applyResolvedAddresses(
+        to tunnelProtocol: NETunnelProviderProtocol,
+        response: VPNConfigResponse,
+        server: VPNServer
+    ) -> [String] {
+        let resolvedAddresses = preferredResolvedAddresses(response: response, server: server)
+        guard !resolvedAddresses.isEmpty else { return [] }
+
+        var providerConfiguration = tunnelProtocol.providerConfiguration ?? [:]
+        // Keep the hostname from the .ovpn profile as the primary endpoint.
+        // The backend IPs are fallback addresses only: forcing them as the
+        // sole endpoint can break servers whose certificate, NAT, or OpenVPN
+        // listener is tied to the profile's hostname.
+        providerConfiguration["prefersResolvedAddresses"] = false
+        providerConfiguration["resolvedAddresses"] = resolvedAddresses
+        tunnelProtocol.providerConfiguration = providerConfiguration
+        return resolvedAddresses
+    }
+
     nonisolated private static func describe(_ error: Error) -> String {
         let nsError = error as NSError
-        return "\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"
+        var details = ["\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"]
+        for key in [NSLocalizedFailureReasonErrorKey, NSLocalizedRecoverySuggestionErrorKey] {
+            if let value = nsError.userInfo[key] as? String, !value.isEmpty {
+                details.append(value)
+            }
+        }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            details.append("underlying \(underlying.domain)(\(underlying.code)): \(underlying.localizedDescription)")
+        }
+        return details.joined(separator: " | ")
+    }
+
+    private static func loadTunnelKitLastError() -> String? {
+        UserDefaults(suiteName: VPNSharedConstants.appGroupIdentifier)?
+            .string(forKey: "TunnelKitLastError")
+    }
+
+    private static func loadTunnelKitDebugLogTail() -> String? {
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: VPNSharedConstants.appGroupIdentifier
+        ) else {
+            return nil
+        }
+        let logURL = containerURL.appendingPathComponent("debug.log")
+        guard let log = try? String(contentsOf: logURL), !log.isEmpty else {
+            return nil
+        }
+        return String(log.suffix(8_000))
     }
 }
 
@@ -368,6 +542,8 @@ private extension VPNConnectionState {
 enum OpenVPNManagerError: LocalizedError {
     case unsupportedProtocol(String)
     case expiredCertificate
+    case packetTunnelExtensionNotEmbedded
+    case providerConfigurationUnavailable(expected: String, actual: String?)
 
     var errorDescription: String? {
         switch self {
@@ -375,6 +551,11 @@ enum OpenVPNManagerError: LocalizedError {
             return "OpenVPNManager only supports OpenVPN. Received \(protocolName)."
         case .expiredCertificate:
             return "The OpenVPN certificate has expired."
+        case .packetTunnelExtensionNotEmbedded:
+            return "The OpenVPN packet-tunnel extension is not embedded in this app build. Reinstall the latest LibreGuard app build."
+        case let .providerConfigurationUnavailable(expected, actual):
+            let actualDescription = actual ?? "missing"
+            return "The OpenVPN provider configuration could not be saved (expected \(expected), got \(actualDescription))."
         }
     }
 }

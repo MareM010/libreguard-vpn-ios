@@ -145,7 +145,7 @@ static const NSInteger CryptoCTRTagLength = 32;
     TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_init(self.macCtxEnc, NULL, 0, NULL);
     TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(self.macCtxEnc, flags->ad, flags->adLength);
     TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(self.macCtxEnc, bytes, length);
-    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(self.macCtxEnc, dest, &l3, (size_t)destLength);
+    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(self.macCtxEnc, dest, &l3, CryptoCTRTagLength);
     
     NSAssert(l3 == CryptoCTRTagLength, @"Incorrect digest size");
     
@@ -201,7 +201,8 @@ static const NSInteger CryptoCTRTagLength = 32;
     TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_init(self.macCtxDec, NULL, 0, NULL);
     TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(self.macCtxDec, flags->ad, flags->adLength);
     TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(self.macCtxDec, dest, *destLength);
-    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(self.macCtxDec, self.bufferDecHMAC, &l3, sizeof(self.bufferDecHMAC));
+    // bufferDecHMAC is heap-allocated; sizeof(bufferDecHMAC) is only the pointer size.
+    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(self.macCtxDec, self.bufferDecHMAC, &l3, CryptoCTRTagLength);
     
     NSAssert(l3 == CryptoCTRTagLength, @"Incorrect digest size");
     

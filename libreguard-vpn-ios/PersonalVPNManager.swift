@@ -213,7 +213,11 @@ final class PersonalVPNManager: VPNManaging {
                 self.updateStatus(from: self.manager.connection.status)
                 if previous != .disconnected, self.status == .disconnected {
                     self.manager.connection.fetchLastDisconnectError(completionHandler: { error in
-                        guard let error else { return }
+                        guard let error else {
+                            self.logger.error("IKEv2 tunnel disconnected without a NetworkExtension error")
+                            return
+                        }
+                        self.logger.error("IKEv2 tunnel disconnect error: \(Self.describe(error), privacy: .public)")
                         Task { @MainActor in
                             self.onDisconnectError?(error)
                         }
@@ -284,7 +288,16 @@ final class PersonalVPNManager: VPNManaging {
 
     nonisolated private static func describe(_ error: Error) -> String {
         let nsError = error as NSError
-        return "\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"
+        var details = ["\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"]
+        for key in [NSLocalizedFailureReasonErrorKey, NSLocalizedRecoverySuggestionErrorKey] {
+            if let value = nsError.userInfo[key] as? String, !value.isEmpty {
+                details.append(value)
+            }
+        }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            details.append("underlying \(underlying.domain)(\(underlying.code)): \(underlying.localizedDescription)")
+        }
+        return details.joined(separator: " | ")
     }
 }
 

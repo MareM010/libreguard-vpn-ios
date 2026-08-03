@@ -153,10 +153,11 @@ open class OpenVPNTunnelProvider: NEPacketTunnelProvider {
             try appGroup = OpenVPNProvider.Configuration.appGroup(from: providerConfiguration)
 
             var configuration = providerConfiguration
-            if providerConfiguration.count > 6 {
-                //Migrate OVPN library
-                //old client. needs migration
-                configuration.removeAll()
+            // Migrate only the old TunnelKit map format. A key-count heuristic
+            // is unsafe because modern optional fields (for example
+            // resolvedAddresses and versionIdentifier) legitimately change
+            // the number of keys in the provider configuration.
+            if isLegacyOVPNConfigurationMap(providerConfiguration) {
                 configuration = migrateOVPNConfigurationMap(from: providerConfiguration)
             }
             try cfg = OpenVPNProvider.Configuration.parsed(from: configuration)
@@ -973,6 +974,24 @@ extension OpenVPNTunnelProvider {
         updatedMap["sessionConfiguration"] = sessionConfigurationMap
 
         return updatedMap
+    }
+
+    private func isLegacyOVPNConfigurationMap(_ map: [String: Any]) -> Bool {
+        let legacyKeys: Set<String> = [
+            "AppGroup",
+            "PrefersResolvedAddresses",
+            "MasksPrivateData",
+            "Debug",
+            "CipherAlgorithm",
+            "DigestAlgorithm",
+            "CA",
+            "MTU",
+            "UsesPIAPatches",
+            "DNSServers",
+            "EndpointProtocols",
+            "RenegotiatesAfter"
+        ]
+        return !legacyKeys.isDisjoint(with: map.keys)
     }
 }
 

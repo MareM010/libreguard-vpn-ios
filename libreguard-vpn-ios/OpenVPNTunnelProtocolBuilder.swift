@@ -23,9 +23,16 @@ struct TunnelKitOpenVPNProtocolBuilder: OpenVPNTunnelProtocolBuilding {
         sessionBuilder.dnsServers = [LibreGuardDNS.regularResolverAddress]
         sessionBuilder.dnsHTTPSURL = nil
         sessionBuilder.dnsTLSServerName = nil
-        let providerConfiguration = OpenVPNProvider.ConfigurationBuilder(
+        var providerConfigurationBuilder = OpenVPNProvider.ConfigurationBuilder(
             sessionConfiguration: sessionBuilder.build()
-        ).build()
+        )
+        // Keep TunnelKit's diagnostic log enabled while we resolve connection
+        // failures. TunnelKit masks private data by default, so this does not
+        // put certificates or keys in the log. The log is written to the
+        // shared app-group container and is read by OpenVPNManager on failure.
+        providerConfigurationBuilder.shouldDebug = true
+        providerConfigurationBuilder.masksPrivateData = true
+        let providerConfiguration = providerConfigurationBuilder.build()
         let tunnelProtocol = try providerConfiguration.generatedTunnelProtocol(
             withBundleIdentifier: OpenVPNConstants.tunnelBundleIdentifier,
             appGroup: OpenVPNConstants.appGroupIdentifier,

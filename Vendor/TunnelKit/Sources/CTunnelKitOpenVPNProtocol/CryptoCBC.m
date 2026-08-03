@@ -181,7 +181,7 @@ const NSInteger CryptoCBCMaxHMACLength = 100;
 
     TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_init(self.macCtxEnc, NULL, 0, NULL);
     TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(self.macCtxEnc, outIV, l1 + l2 + self.cipherIVLength);
-    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(self.macCtxEnc, dest, &l3, (size_t)destLength);
+    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(self.macCtxEnc, dest, &l3, self.digestLength);
     
     *destLength = l1 + l2 + self.cipherIVLength + self.digestLength;
     
@@ -225,7 +225,8 @@ const NSInteger CryptoCBCMaxHMACLength = 100;
 
     TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_init(self.macCtxDec, NULL, 0, NULL);
     TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(self.macCtxDec, bytes + self.digestLength, length - self.digestLength);
-    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(self.macCtxDec, self.bufferDecHMAC, &l3, sizeof(self.bufferDecHMAC));
+    // bufferDecHMAC is heap-allocated; sizeof(bufferDecHMAC) is only the pointer size.
+    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(self.macCtxDec, self.bufferDecHMAC, &l3, self.digestLength);
     
     if (TUNNEL_CRYPTO_SUCCESS(code) && CRYPTO_memcmp(self.bufferDecHMAC, bytes, self.digestLength) != 0) {
         if (error) {
@@ -250,7 +251,7 @@ const NSInteger CryptoCBCMaxHMACLength = 100;
 
     TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_init(self.macCtxDec, NULL, 0, NULL);
     TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(self.macCtxDec, bytes + self.digestLength, length - self.digestLength);
-    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(self.macCtxDec, self.bufferDecHMAC, &l1, sizeof(self.bufferDecHMAC));
+    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(self.macCtxDec, self.bufferDecHMAC, &l1, self.digestLength);
     
     if (TUNNEL_CRYPTO_SUCCESS(code) && CRYPTO_memcmp(self.bufferDecHMAC, bytes, self.digestLength) != 0) {
         if (error) {

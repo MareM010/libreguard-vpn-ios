@@ -168,6 +168,7 @@ enum VPNSharedSessionStore {
     private static let descriptorKey = "vpn.shared.active-session"
     private static let trafficKey = "vpn.shared.active-traffic"
     private static let disconnectIntentKey = "vpn.shared.disconnect-intent"
+    private static let tunnelErrorKey = "vpn.shared.tunnel-error"
 
     static func save(descriptor: VPNSessionDescriptor) {
         guard let data = try? JSONEncoder().encode(descriptor) else { return }
@@ -202,10 +203,28 @@ enum VPNSharedSessionStore {
         return VPNDisconnectIntent(rawValue: rawValue)
     }
 
+    /// Stores the packet-tunnel failure before NetworkExtension tears down the
+    /// extension process. The containing app can then surface the real error
+    /// even when fetchLastDisconnectError() only reports "Connection invalidated".
+    static func saveTunnelError(_ message: String) {
+        guard !message.isEmpty else { return }
+        defaults?.set(message, forKey: tunnelErrorKey)
+    }
+
+    static func loadTunnelError() -> String? {
+        defaults?.string(forKey: tunnelErrorKey)
+    }
+
+    static func clearTunnelError() {
+        defaults?.removeObject(forKey: tunnelErrorKey)
+    }
+
     static func clear() {
         defaults?.removeObject(forKey: descriptorKey)
         defaults?.removeObject(forKey: trafficKey)
         defaults?.removeObject(forKey: disconnectIntentKey)
+        // Keep a packet-tunnel failure until OpenVPNManager consumes it after
+        // the status callback; the app's disconnect bookkeeping runs first.
     }
 
     private static var defaults: UserDefaults? {

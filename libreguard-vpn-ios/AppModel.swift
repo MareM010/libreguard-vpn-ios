@@ -860,6 +860,18 @@ final class AppModel: ObservableObject {
             _ = google.handle(url: url)
             return
         }
+#if DEBUG
+        if url.host?.lowercased() == "debug", url.path == "/connect" {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                for _ in 0..<20 where servers.isEmpty {
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
+                requestQuickConnect(origin: .quickConnect)
+            }
+            return
+        }
+#endif
         if url.host?.lowercased() == "vpn", url.path == "/status" {
             return
         }

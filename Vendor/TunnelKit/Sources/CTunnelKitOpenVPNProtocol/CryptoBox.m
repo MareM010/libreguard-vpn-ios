@@ -168,6 +168,13 @@
     
     size_t l = 0;
     int code = 1;
+	const EVP_MD *digest = EVP_get_digestbyname([digestName cStringUsingEncoding:NSASCIIStringEncoding]);
+	if (!digest) {
+		if (error) {
+			*error = OpenVPNErrorWithCode(OpenVPNErrorCodeCryptoAlgorithm);
+		}
+		return NO;
+	}
 
     EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
     EVP_MAC_CTX *mac_ctx = EVP_MAC_CTX_new(mac);
@@ -177,7 +184,7 @@
 
     TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_init(mac_ctx, (unsigned char *)secret, (size_t)secretLength, params);
     TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(mac_ctx, data, (size_t)dataLength);
-    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(mac_ctx, hmac, &l, (size_t)hmacLength);
+    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(mac_ctx, hmac, &l, (size_t)EVP_MD_size(digest));
     EVP_MAC_free(mac);
     EVP_MAC_CTX_free(mac_ctx);
     

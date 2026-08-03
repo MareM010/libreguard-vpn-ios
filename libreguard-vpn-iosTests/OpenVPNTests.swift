@@ -56,6 +56,83 @@ struct OpenVPNTests {
         }
     }
 
+    @Test func openVPNManagerPrefersBackendServerIPsAsResolvedAddresses() {
+        let server = VPNServer(
+            id: 12,
+            serverName: "DE-1",
+            serverIp: "198.51.100.8",
+            serverHostname: "vpn.example.com",
+            country: "DE",
+            city: "Berlin",
+            linkSpeed: 1000,
+            pricingTier: "Pro",
+            load: nil,
+            activeConnections: nil,
+            latencyPingPort: 443,
+            loadDataFresh: true
+        )
+        let response = VPNConfigResponse(
+            success: true,
+            protocolName: "OpenVPN",
+            serverName: "DE-1",
+            serverIp: " 203.0.113.10 ",
+            certificateName: "OVPN_client891",
+            configContent: openVPNSampleConfig(),
+            encryptedPassphrase: EncryptedPassphrase(
+                algorithm: "RSA-OAEP-256",
+                keyId: "device-key-id",
+                ciphertext: "YQ=="
+            ),
+            issueDate: nil,
+            expirationDate: nil,
+            clientIp: nil,
+            deviceId: nil
+        )
+
+        #expect(
+            OpenVPNManager.preferredResolvedAddresses(response: response, server: server) == [
+                "203.0.113.10",
+                "198.51.100.8"
+            ]
+        )
+    }
+
+    @Test func openVPNManagerDoesNotForceNonIPv4BackendAddressesIntoTunnelKit() {
+        let server = VPNServer(
+            id: 12,
+            serverName: "DE-1",
+            serverIp: "2001:db8::1",
+            serverHostname: "vpn.example.com",
+            country: "DE",
+            city: "Berlin",
+            linkSpeed: 1000,
+            pricingTier: "Pro",
+            load: nil,
+            activeConnections: nil,
+            latencyPingPort: 443,
+            loadDataFresh: true
+        )
+        let response = VPNConfigResponse(
+            success: true,
+            protocolName: "OpenVPN",
+            serverName: "DE-1",
+            serverIp: "vpn.example.com",
+            certificateName: "OVPN_client891",
+            configContent: openVPNSampleConfig(),
+            encryptedPassphrase: EncryptedPassphrase(
+                algorithm: "RSA-OAEP-256",
+                keyId: "device-key-id",
+                ciphertext: "YQ=="
+            ),
+            issueDate: nil,
+            expirationDate: nil,
+            clientIp: nil,
+            deviceId: nil
+        )
+
+        #expect(OpenVPNManager.preferredResolvedAddresses(response: response, server: server).isEmpty)
+    }
+
     @Test func certificateRequestUsesCanonicalIKEv2ProtocolValue() async throws {
         try await withSerializedRequests {
             let client = makeClient { request in

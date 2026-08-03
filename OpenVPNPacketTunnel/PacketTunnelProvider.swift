@@ -42,7 +42,14 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
     }
 
     override func startTunnel(options: [String: NSObject]? = nil, completionHandler: @escaping (Error?) -> Void) {
+        OpenVPNExtensionLifecycleJournal.append("start-requested")
+        let tunnelProtocol = protocolConfiguration as? NETunnelProviderProtocol
+        let providerKeys = tunnelProtocol?.providerConfiguration?.keys.sorted().joined(separator: ",") ?? "<missing>"
+        OpenVPNExtensionLifecycleJournal.append(
+            "provider-configuration serverAddressPresent=\(tunnelProtocol?.serverAddress?.isEmpty == false) keys=\(providerKeys)"
+        )
         logger.info("OpenVPN packet tunnel start requested")
+        VPNSharedSessionStore.clearTunnelError()
         let metadata = OpenVPNConnectionMetadataStore.load()
         mutateDiagnostics { diagnostics in
             diagnostics = OpenVPNRuntimeDiagnostics(
@@ -63,16 +70,21 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
             self.mutateDiagnostics { diagnostics in
                 if let error {
                     diagnostics.state = .failed
-                    diagnostics.lastError = error.localizedDescription
+                    let details = Self.describe(error, includingTunnelKitError: true)
+                    diagnostics.lastError = details
+                    VPNSharedSessionStore.saveTunnelError(details)
                 } else {
                     diagnostics.state = .connected
                     diagnostics.connectedAt = Date()
                     diagnostics.lastError = nil
+                    VPNSharedSessionStore.clearTunnelError()
                 }
             }
             if let error {
-                self.logger.error("OpenVPN tunnel failed to start: \(Self.describe(error))")
+                OpenVPNExtensionLifecycleJournal.append("start-failed \(Self.describe(error, includingTunnelKitError: true))")
+                self.logger.error("OpenVPN tunnel failed to start: \(Self.describe(error, includingTunnelKitError: true))")
             } else {
+                OpenVPNExtensionLifecycleJournal.append("start-completed")
                 self.logger.info("OpenVPN tunnel connected")
                 self.beginActivityUpdates()
             }
@@ -81,12 +93,14 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+        OpenVPNExtensionLifecycleJournal.append("stop-requested reason=\(reason.rawValue)")
         logger.info("OpenVPN packet tunnel stop requested with reason \(reason.rawValue, privacy: .public)")
         mutateDiagnostics { $0.state = .stopping }
         activityUpdateTask?.cancel()
         activityUpdateTask = nil
         publishFinalState()
         super.stopTunnel(with: reason) { [weak self] in
+            OpenVPNExtensionLifecycleJournal.append("stop-completed")
             self?.mutateDiagnostics { diagnostics in
                 diagnostics.state = .stopped
                 diagnostics.connectedAt = nil
@@ -232,8 +246,23 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
         )
     }
 
-    private static func describe(_ error: Error) -> String {
+    private static func describe(_ error: Error, includingTunnelKitError: Bool = false) -> String {
         let nsError = error as NSError
-        return "\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"
+        var details = ["\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"]
+        for key in [NSLocalizedFailureReasonErrorKey, NSLocalizedRecoverySuggestionErrorKey] {
+            if let value = nsError.userInfo[key] as? String, !value.isEmpty {
+                details.append(value)
+            }
+        }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            details.append("underlying \(underlying.domain)(\(underlying.code)): \(underlying.localizedDescription)")
+        }
+        if includingTunnelKitError,
+           let rawError = UserDefaults(suiteName: VPNSharedConstants.appGroupIdentifier)?
+            .string(forKey: "TunnelKitLastError"),
+           !rawError.isEmpty {
+            details.append("TunnelKitLastError=\(rawError)")
+        }
+        return details.joined(separator: " | ")
     }
 }
