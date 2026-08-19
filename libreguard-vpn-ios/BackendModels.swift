@@ -583,9 +583,11 @@ struct VPNConfigResponse: Decodable, Equatable {
 
 struct SSWANProfile: Decodable, Equatable {
     let name: String?
+    let localIdentifier: String?
     let uuid: String?
     let type: String?
     let remoteAddress: String?
+    let remoteIdentifier: String?
     let localP12Base64: String?
     let localPassword: String?
     let localUsesRSAPSS: Bool
@@ -604,9 +606,13 @@ struct SSWANProfile: Decodable, Equatable {
 
     private enum RemoteKeys: String, CodingKey {
         case addr
+        case id
+        case ike
+        case esp
     }
 
     private enum LocalKeys: String, CodingKey {
+        case id
         case p12
         case password
         case rsaPSS = "rsa-pss"
@@ -617,20 +623,30 @@ struct SSWANProfile: Decodable, Equatable {
         name = try container.decodeIfPresent(String.self, forKey: .name)
         uuid = try container.decodeIfPresent(String.self, forKey: .uuid)
         type = try container.decodeIfPresent(String.self, forKey: .type)
-        ikeProposal = try container.decodeIfPresent(String.self, forKey: .ikeProposal)
-        espProposal = try container.decodeIfPresent(String.self, forKey: .espProposal)
+        let topLevelIKEProposal = try container.decodeIfPresent(String.self, forKey: .ikeProposal)
+        let topLevelESPProposal = try container.decodeIfPresent(String.self, forKey: .espProposal)
 
         if let remote = try? container.nestedContainer(keyedBy: RemoteKeys.self, forKey: .remote) {
             remoteAddress = try remote.decodeIfPresent(String.self, forKey: .addr)
+            remoteIdentifier = try remote.decodeIfPresent(String.self, forKey: .id)
+            let legacyIKEProposal = try remote.decodeIfPresent(String.self, forKey: .ike)
+            let legacyESPProposal = try remote.decodeIfPresent(String.self, forKey: .esp)
+            ikeProposal = topLevelIKEProposal ?? legacyIKEProposal
+            espProposal = topLevelESPProposal ?? legacyESPProposal
         } else {
             remoteAddress = nil
+            remoteIdentifier = nil
+            ikeProposal = topLevelIKEProposal
+            espProposal = topLevelESPProposal
         }
 
         if let local = try? container.nestedContainer(keyedBy: LocalKeys.self, forKey: .local) {
+            localIdentifier = try local.decodeIfPresent(String.self, forKey: .id)
             localP12Base64 = try local.decodeIfPresent(String.self, forKey: .p12)
             localPassword = try local.decodeIfPresent(String.self, forKey: .password)
             localUsesRSAPSS = try local.decodeIfPresent(Bool.self, forKey: .rsaPSS) ?? false
         } else {
+            localIdentifier = nil
             localP12Base64 = nil
             localPassword = nil
             localUsesRSAPSS = false

@@ -14,6 +14,8 @@
 		A30000012FE7000000000001 /* TunnelKitOpenVPN in Frameworks */ = {isa = PBXBuildFile; productRef = A30000032FE7000000000001 /* TunnelKitOpenVPN */; };
 		A30000012FE7000000000002 /* TunnelKitOpenVPNAppExtension in Frameworks */ = {isa = PBXBuildFile; productRef = A30000032FE7000000000002 /* TunnelKitOpenVPNAppExtension */; };
 		B10000012FEA000000000001 /* VPNStatusWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B10000022FEA000000000002 /* VPNStatusWidget.appex */; };
+		C10000012FEB000000000001 /* X509 in Frameworks */ = {isa = PBXBuildFile; productRef = C10000032FEB000000000003 /* X509 */; };
+		C10000042FEB000000000004 /* SwiftASN1 in Frameworks */ = {isa = PBXBuildFile; productRef = C10000062FEB000000000006 /* SwiftASN1 */; };
 		E686F16A2FE9A7770072FD83 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000005 /* NetworkExtension.framework */; };
 		E686F16B2FE9A7770072FD83 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000007 /* Security.framework */; };
 		F10000012FE7000000000001 /* openssl.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = F10000022FE7000000000001 /* openssl.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -139,6 +141,8 @@
 			files = (
 				A30000012FE7000000000001 /* TunnelKitOpenVPN in Frameworks */,
 				A10000012FE7000000000001 /* GoogleSignIn in Frameworks */,
+				C10000012FEB000000000001 /* X509 in Frameworks */,
+				C10000042FEB000000000004 /* SwiftASN1 in Frameworks */,
 				E686F16A2FE9A7770072FD83 /* NetworkExtension.framework in Frameworks */,
 				E686F16B2FE9A7770072FD83 /* Security.framework in Frameworks */,
 			);
@@ -257,6 +261,8 @@
 			packageProductDependencies = (
 				A10000032FE7000000000003 /* GoogleSignIn */,
 				A30000032FE7000000000001 /* TunnelKitOpenVPN */,
+				C10000032FEB000000000003 /* X509 */,
+				C10000062FEB000000000006 /* SwiftASN1 */,
 			);
 			productName = "libreguard-vpn-ios";
 			productReference = E678589C2FE6EBD7000CF95E /* libreguard-vpn-ios.app */;
@@ -375,6 +381,8 @@
 			packageReferences = (
 				A10000022FE7000000000002 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,
 				A30000022FE7000000000001 /* XCLocalSwiftPackageReference "Vendor/TunnelKit" */,
+				C10000022FEB000000000002 /* XCRemoteSwiftPackageReference "swift-certificates" */,
+				C10000052FEB000000000005 /* XCRemoteSwiftPackageReference "swift-asn1" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = E678589D2FE6EBD7000CF95E /* Products */;
@@ -942,6 +950,22 @@
 				minimumVersion = 9.0.0;
 			};
 		};
+		C10000022FEB000000000002 /* XCRemoteSwiftPackageReference "swift-certificates" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-certificates.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.19.4;
+			};
+		};
+		C10000052FEB000000000005 /* XCRemoteSwiftPackageReference "swift-asn1" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-asn1.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.7.1;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -959,6 +983,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A30000022FE7000000000001 /* XCLocalSwiftPackageReference "Vendor/TunnelKit" */;
 			productName = TunnelKitOpenVPNAppExtension;
+		};
+		C10000032FEB000000000003 /* X509 */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C10000022FEB000000000002 /* XCRemoteSwiftPackageReference "swift-certificates" */;
+			productName = X509;
+		};
+		C10000062FEB000000000006 /* SwiftASN1 */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C10000052FEB000000000005 /* XCRemoteSwiftPackageReference "swift-asn1" */;
+			productName = SwiftASN1;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

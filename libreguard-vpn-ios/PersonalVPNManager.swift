@@ -132,8 +132,9 @@ final class PersonalVPNManager: VPNManaging {
             let serverAddress = String(describing: vpnProtocol.serverAddress)
             let remoteIdentifier = String(describing: vpnProtocol.remoteIdentifier)
             let localIdentifier = String(describing: vpnProtocol.localIdentifier)
-            let configSummary = "serverAddress=\(serverAddress) remoteIdentifier=\(remoteIdentifier) localIdentifier=\(localIdentifier) includeAllNetworks=\(vpnProtocol.includeAllNetworks)"
-            logger.debug("Translated VPN config \(configSummary, privacy: .public)")
+            logger.debug(
+                "Translated VPN config serverAddress=\(serverAddress, privacy: .public) remoteIdentifier=\(remoteIdentifier, privacy: .public) localIdentifier=\(localIdentifier, privacy: .private(mask: .hash)) includeAllNetworks=\(vpnProtocol.includeAllNetworks, privacy: .public)"
+            )
 
             try await loadPreferences()
             try Task.checkCancellation()

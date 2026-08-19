@@ -1,12 +1,25 @@
+import CryptoKit
 import Foundation
 import NetworkExtension
-import Security
+import OSLog
 
 final class VPNConfigurationTranslator {
     private let deviceKeyStore: VPNDeviceKeyProviding
+    private let pkcs12Importer: PKCS12IdentityImporting
+    private let certificateIdentityResolver: IKEv2CertificateIdentityResolving
+    private let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "libreguard-vpn-ios",
+        category: "IKEv2Configuration"
+    )
 
-    init(deviceKeyStore: VPNDeviceKeyProviding = VPNDeviceKeyStore()) {
+    init(
+        deviceKeyStore: VPNDeviceKeyProviding = VPNDeviceKeyStore(),
+        pkcs12Importer: PKCS12IdentityImporting = SecurityPKCS12IdentityImporter(),
+        certificateIdentityResolver: IKEv2CertificateIdentityResolving = X509IKEv2CertificateIdentityResolver()
+    ) {
         self.deviceKeyStore = deviceKeyStore
+        self.pkcs12Importer = pkcs12Importer
+        self.certificateIdentityResolver = certificateIdentityResolver
     }
 
     func makeProtocol(
@@ -17,17 +30,27 @@ final class VPNConfigurationTranslator {
         let profile = try decodeProfile(from: response.configContent)
         let passphrase = try deviceKeyStore.decryptPassphrase(from: response.encryptedPassphrase)
         try validateSanitizedPassword(profile.localPassword)
-        let p12Data = try decodePKCS12(profile: profile, passphrase: passphrase)
+        let importedIdentity = try decodePKCS12(profile: profile, passphrase: passphrase)
+        let clientIdentity = try certificateIdentityResolver.resolve(
+            localIdentifier: profile.localIdentifier,
+            leafCertificateDER: importedIdentity.leafCertificateDER
+        )
         let enablePFS = shouldEnablePFS(profile: profile)
+
+        let counts = clientIdentity.sanCounts
+        let fingerprint = abbreviatedFingerprint(for: importedIdentity.leafCertificateDER)
+        logger.info(
+            "Resolved IKEv2 client identity source=\(clientIdentity.source.rawValue, privacy: .public) type=\(clientIdentity.kind.rawValue, privacy: .public) dnsSANs=\(counts.fqdn, privacy: .public) emailSANs=\(counts.rfc822, privacy: .public) ipSANs=\(counts.ipAddress, privacy: .public) certificateFingerprint=\(fingerprint, privacy: .public) identity=\(clientIdentity.value, privacy: .private(mask: .hash))"
+        )
 
         let vpnProtocol = NEVPNProtocolIKEv2()
         let serverAddress = resolvedServerAddress(from: profile, response: response, server: server)
         vpnProtocol.serverAddress = serverAddress
         vpnProtocol.remoteIdentifier = resolvedRemoteIdentifier(from: profile, server: server, fallback: serverAddress)
-        vpnProtocol.localIdentifier = response.certificateName ?? profile.name ?? server.serverName
+        vpnProtocol.localIdentifier = clientIdentity.value
         vpnProtocol.authenticationMethod = NEVPNIKEAuthenticationMethod(rawValue: 1)!
         vpnProtocol.useExtendedAuthentication = false
-        vpnProtocol.identityData = p12Data
+        vpnProtocol.identityData = importedIdentity.data
         vpnProtocol.identityDataPassword = passphrase
         vpnProtocol.certificateType = NEVPNIKEv2CertificateType(rawValue: profile.localUsesRSAPSS ? 6 : 1) ?? NEVPNIKEv2CertificateType(rawValue: 1)!
         vpnProtocol.deadPeerDetectionRate = NEVPNIKEv2DeadPeerDetectionRate(rawValue: 2)!
@@ -65,24 +88,16 @@ final class VPNConfigurationTranslator {
     private func validateSanitizedPassword(_ password: String?) throws {
         guard let password, !password.isEmpty else { return }
         guard password == VPNConfigurationTranslatorConstants.encryptedPassphrasePlaceholder else {
-            throw VPNConfigurationError.unexpectedPlaintextPassword(password)
+            throw VPNConfigurationError.unexpectedPlaintextPassword
         }
     }
 
-    private func decodePKCS12(profile: SSWANProfile, passphrase: String) throws -> Data {
+    private func decodePKCS12(profile: SSWANProfile, passphrase: String) throws -> ImportedPKCS12Identity {
         guard let base64 = profile.localP12Base64?.sanitizedBase64,
               let p12Data = Data(base64Encoded: base64, options: [.ignoreUnknownCharacters]) else {
             throw VPNConfigurationError.invalidPKCS12Payload
         }
-
-        let options: NSDictionary = [kSecImportExportPassphrase as String: passphrase]
-        var items: CFArray?
-        let status = SecPKCS12Import(p12Data as CFData, options, &items)
-        guard status == errSecSuccess, let dicts = items as? [[String: Any]], let first = dicts.first,
-              first[kSecImportItemIdentity as String] != nil else {
-            throw VPNConfigurationError.invalidPKCS12Payload
-        }
-        return p12Data
+        return try pkcs12Importer.importIdentity(from: p12Data, passphrase: passphrase)
     }
 
     private func resolvedServerAddress(from profile: SSWANProfile, response: VPNConfigResponse, server: VPNServer) -> String {
@@ -95,6 +110,9 @@ final class VPNConfigurationTranslator {
     }
 
     private func resolvedRemoteIdentifier(from profile: SSWANProfile, server: VPNServer, fallback: String) -> String? {
+        if let remoteIdentifier = profile.remoteIdentifier?.sanitizedString {
+            return remoteIdentifier
+        }
         if let hostname = server.serverHostname?.sanitizedString, !hostname.isEmpty {
             return hostname
         }
@@ -106,7 +124,14 @@ final class VPNConfigurationTranslator {
     }
 
     private func shouldEnablePFS(profile: SSWANProfile) -> Bool {
-        containsPFS(profile.ikeProposal) || containsPFS(profile.espProposal)
+        containsPFS(profile.espProposal)
+    }
+
+    private func abbreviatedFingerprint(for certificateDER: Data) -> String {
+        SHA256.hash(data: certificateDER)
+            .prefix(6)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     private func containsPFS(_ proposal: String?) -> Bool {
@@ -213,19 +238,31 @@ private enum VPNConfigurationTranslatorConstants {
     static let encryptedPassphrasePlaceholder = "[ENCRYPTED_PASSPHRASE]"
 }
 
-enum VPNConfigurationError: LocalizedError {
+enum VPNConfigurationError: LocalizedError, Equatable {
     case invalidConfigContent
-    case unexpectedPlaintextPassword(String)
+    case unexpectedPlaintextPassword
     case invalidPKCS12Payload
+    case invalidIKEv2ClientCertificate
+    case missingIKEv2ClientIdentity
+    case unsupportedIKEv2ClientIdentity
+    case mismatchedIKEv2ClientIdentity
 
     var errorDescription: String? {
         switch self {
         case .invalidConfigContent:
             return "The VPN configuration file could not be decoded."
-        case let .unexpectedPlaintextPassword(password):
-            return "The VPN config exposed a plaintext password (\(password))."
+        case .unexpectedPlaintextPassword:
+            return "The VPN configuration exposed a plaintext certificate password and was rejected."
         case .invalidPKCS12Payload:
             return "The VPN certificate bundle is invalid."
+        case .invalidIKEv2ClientCertificate:
+            return "The VPN client certificate could not be inspected for a compatible IKEv2 identity."
+        case .missingIKEv2ClientIdentity:
+            return "This VPN certificate cannot be used for IKEv2 on iOS because it has no DNS, email, or IP Subject Alternative Name. Request a new certificate and try again."
+        case .unsupportedIKEv2ClientIdentity:
+            return "The VPN profile requests a client identity format that native IKEv2 on iOS does not support."
+        case .mismatchedIKEv2ClientIdentity:
+            return "The VPN profile's client identity does not match a DNS, email, or IP Subject Alternative Name in its certificate."
         }
     }
 }
