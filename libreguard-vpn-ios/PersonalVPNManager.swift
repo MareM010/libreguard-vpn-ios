@@ -45,6 +45,11 @@ struct VPNConnectionPolicy: Equatable {
         protocolConfiguration.enforceRoutes = true
         protocolConfiguration.disconnectOnSleep = false
     }
+
+    func apply(to protocolConfiguration: NEVPNProtocolIKEv2) {
+        apply(to: protocolConfiguration as NEVPNProtocol)
+        protocolConfiguration.enforceRoutes = killSwitchEnabled
+    }
 }
 
 @MainActor
@@ -171,7 +176,7 @@ final class PersonalVPNManager: VPNManaging {
     func apply(policy: VPNConnectionPolicy) async throws -> Bool {
         guard !isRunningInSimulator else { return false }
         try await loadPreferences()
-        guard let vpnProtocol = manager.protocolConfiguration else { return false }
+        guard let vpnProtocol = manager.protocolConfiguration as? NEVPNProtocolIKEv2 else { return false }
         policy.apply(to: vpnProtocol)
         applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
         try await savePreferences()

@@ -168,6 +168,26 @@ struct IKEv2ConfigurationTests {
         #expect(vpnProtocol.identityData == IKEv2CertificateFixtures.multiSANPKCS12)
         #expect(vpnProtocol.certificateType.rawValue == 6)
         #expect(vpnProtocol.enablePFS == false)
+        #expect(vpnProtocol.includeAllNetworks == false)
+        #expect(vpnProtocol.enforceRoutes == false)
+    }
+
+    @Test func translatorEnforcesRoutesOnlyWithIKEv2KillSwitch() throws {
+        let translator = VPNConfigurationTranslator(deviceKeyStore: StubVPNDeviceKeyStore())
+        let policy = VPNConnectionPolicy(killSwitchEnabled: true, onDemandEnabled: false)
+        let vpnProtocol = try translator.makeProtocol(
+            server: makeServer(),
+            response: makeResponse(
+                configContent: try makeConfigContent(
+                    localIdentifier: "client.example.com",
+                    espProposal: "aes256-sha256"
+                )
+            ),
+            policy: policy
+        )
+
+        #expect(vpnProtocol.includeAllNetworks)
+        #expect(vpnProtocol.enforceRoutes)
     }
 
     @Test func translatorUsesCertificateSANInsteadOfDisplayNamesAndEnablesESPRequestedPFS() throws {
