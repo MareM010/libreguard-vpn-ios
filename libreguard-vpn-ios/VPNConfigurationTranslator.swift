@@ -35,12 +35,16 @@ final class VPNConfigurationTranslator {
             localIdentifier: profile.localIdentifier,
             leafCertificateDER: importedIdentity.leafCertificateDER
         )
+        let certificateType = try resolvedCertificateType(
+            keyType: importedIdentity.keyType,
+            useRSAPSS: profile.localUsesRSAPSS
+        )
         let enablePFS = shouldEnablePFS(profile: profile)
 
         let counts = clientIdentity.sanCounts
         let fingerprint = abbreviatedFingerprint(for: importedIdentity.leafCertificateDER)
         logger.info(
-            "Resolved IKEv2 client identity source=\(clientIdentity.source.rawValue, privacy: .public) type=\(clientIdentity.kind.rawValue, privacy: .public) dnsSANs=\(counts.fqdn, privacy: .public) emailSANs=\(counts.rfc822, privacy: .public) ipSANs=\(counts.ipAddress, privacy: .public) certificateFingerprint=\(fingerprint, privacy: .public) identity=\(clientIdentity.value, privacy: .private(mask: .hash))"
+            "Resolved IKEv2 client identity source=\(clientIdentity.source.rawValue, privacy: .public) type=\(clientIdentity.kind.rawValue, privacy: .public) certificateKeyType=\(importedIdentity.keyType.rawValue, privacy: .public) certificateType=\(certificateType.rawValue, privacy: .public) dnsSANs=\(counts.fqdn, privacy: .public) emailSANs=\(counts.rfc822, privacy: .public) ipSANs=\(counts.ipAddress, privacy: .public) certificateFingerprint=\(fingerprint, privacy: .public) identity=\(clientIdentity.value, privacy: .private(mask: .hash))"
         )
 
         let vpnProtocol = NEVPNProtocolIKEv2()
@@ -52,7 +56,7 @@ final class VPNConfigurationTranslator {
         vpnProtocol.useExtendedAuthentication = false
         vpnProtocol.identityData = importedIdentity.data
         vpnProtocol.identityDataPassword = passphrase
-        vpnProtocol.certificateType = NEVPNIKEv2CertificateType(rawValue: profile.localUsesRSAPSS ? 6 : 1) ?? NEVPNIKEv2CertificateType(rawValue: 1)!
+        vpnProtocol.certificateType = certificateType
         vpnProtocol.deadPeerDetectionRate = NEVPNIKEv2DeadPeerDetectionRate(rawValue: 2)!
         vpnProtocol.disableMOBIKE = false
         vpnProtocol.disableRedirect = false
@@ -125,6 +129,37 @@ final class VPNConfigurationTranslator {
 
     private func shouldEnablePFS(profile: SSWANProfile) -> Bool {
         containsPFS(profile.espProposal)
+    }
+
+    private func resolvedCertificateType(
+        keyType: IKEv2ClientCertificateKeyType,
+        useRSAPSS: Bool
+    ) throws -> NEVPNIKEv2CertificateType {
+        let rawValue: Int
+        switch keyType {
+        case .rsa:
+            rawValue = useRSAPSS ? 6 : 1
+        case .ecdsa256:
+            guard !useRSAPSS else {
+                throw VPNConfigurationError.incompatibleIKEv2CertificateType
+            }
+            rawValue = 2
+        case .ecdsa384:
+            guard !useRSAPSS else {
+                throw VPNConfigurationError.incompatibleIKEv2CertificateType
+            }
+            rawValue = 3
+        case .ecdsa521:
+            guard !useRSAPSS else {
+                throw VPNConfigurationError.incompatibleIKEv2CertificateType
+            }
+            rawValue = 4
+        }
+
+        guard let certificateType = NEVPNIKEv2CertificateType(rawValue: rawValue) else {
+            throw VPNConfigurationError.unsupportedIKEv2ClientCertificateType
+        }
+        return certificateType
     }
 
     private func abbreviatedFingerprint(for certificateDER: Data) -> String {
@@ -243,6 +278,8 @@ enum VPNConfigurationError: LocalizedError, Equatable {
     case unexpectedPlaintextPassword
     case invalidPKCS12Payload
     case invalidIKEv2ClientCertificate
+    case unsupportedIKEv2ClientCertificateType
+    case incompatibleIKEv2CertificateType
     case missingIKEv2ClientIdentity
     case unsupportedIKEv2ClientIdentity
     case mismatchedIKEv2ClientIdentity
@@ -257,6 +294,10 @@ enum VPNConfigurationError: LocalizedError, Equatable {
             return "The VPN certificate bundle is invalid."
         case .invalidIKEv2ClientCertificate:
             return "The VPN client certificate could not be inspected for a compatible IKEv2 identity."
+        case .unsupportedIKEv2ClientCertificateType:
+            return "The VPN client certificate uses a key type or curve that native IKEv2 on iOS does not support. Use RSA or ECDSA P-256, P-384, or P-521."
+        case .incompatibleIKEv2CertificateType:
+            return "The VPN profile requests RSA-PSS, but its client certificate uses an ECDSA key. Request a profile whose authentication type matches its certificate."
         case .missingIKEv2ClientIdentity:
             return "This VPN certificate cannot be used for IKEv2 on iOS because it has no DNS, email, or IP Subject Alternative Name. Request a new certificate and try again."
         case .unsupportedIKEv2ClientIdentity:

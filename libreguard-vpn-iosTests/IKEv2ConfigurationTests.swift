@@ -143,12 +143,24 @@ struct IKEv2ConfigurationTests {
 
         #expect(imported.data == IKEv2CertificateFixtures.multiSANPKCS12)
         #expect(imported.leafCertificateDER == IKEv2CertificateFixtures.multiSANDER)
+        #expect(imported.keyType == .rsa)
         #expect(throws: VPNConfigurationError.invalidPKCS12Payload) {
             try SecurityPKCS12IdentityImporter().importIdentity(
                 from: IKEv2CertificateFixtures.multiSANPKCS12,
                 passphrase: "wrong-passphrase"
             )
         }
+    }
+
+    @Test func securityImporterDetectsECDSAP256Identity() throws {
+        let imported = try SecurityPKCS12IdentityImporter().importIdentity(
+            from: IKEv2CertificateFixtures.ecdsaP256PKCS12,
+            passphrase: IKEv2CertificateFixtures.passphrase
+        )
+
+        #expect(imported.data == IKEv2CertificateFixtures.ecdsaP256PKCS12)
+        #expect(imported.leafCertificateDER == IKEv2CertificateFixtures.ecdsaP256DER)
+        #expect(imported.keyType == .ecdsa256)
     }
 
     @Test func translatorBuildsCertificateBackedIdentifiersAndKeepsIKEOnlyDHOutOfChildPFS() throws {
@@ -190,6 +202,43 @@ struct IKEv2ConfigurationTests {
         #expect(vpnProtocol.enforceRoutes)
     }
 
+    @Test func translatorSelectsECDSAP256ForAnECDSAClientIdentity() throws {
+        let translator = VPNConfigurationTranslator(deviceKeyStore: StubVPNDeviceKeyStore())
+        let vpnProtocol = try translator.makeProtocol(
+            server: makeServer(),
+            response: makeResponse(
+                configContent: try makeConfigContent(
+                    localIdentifier: "ecdsa-client.example.com",
+                    espProposal: "aes256-sha256",
+                    pkcs12: IKEv2CertificateFixtures.ecdsaP256PKCS12,
+                    useRSAPSS: false
+                )
+            )
+        )
+
+        #expect(vpnProtocol.localIdentifier == "ecdsa-client.example.com")
+        #expect(vpnProtocol.identityData == IKEv2CertificateFixtures.ecdsaP256PKCS12)
+        #expect(vpnProtocol.certificateType.rawValue == 2)
+    }
+
+    @Test func translatorRejectsRSAAuthenticationFlagForECDSACertificate() {
+        let translator = VPNConfigurationTranslator(deviceKeyStore: StubVPNDeviceKeyStore())
+
+        #expect(throws: VPNConfigurationError.incompatibleIKEv2CertificateType) {
+            try translator.makeProtocol(
+                server: makeServer(),
+                response: makeResponse(
+                    configContent: try makeConfigContent(
+                        localIdentifier: "ecdsa-client.example.com",
+                        espProposal: "aes256-sha256",
+                        pkcs12: IKEv2CertificateFixtures.ecdsaP256PKCS12,
+                        useRSAPSS: true
+                    )
+                )
+            )
+        }
+    }
+
     @Test func translatorUsesCertificateSANInsteadOfDisplayNamesAndEnablesESPRequestedPFS() throws {
         let translator = VPNConfigurationTranslator(deviceKeyStore: StubVPNDeviceKeyStore())
         let vpnProtocol = try translator.makeProtocol(
@@ -216,11 +265,16 @@ struct IKEv2ConfigurationTests {
         try JSONDecoder().decode(SSWANProfile.self, from: Data(json.utf8))
     }
 
-    private func makeConfigContent(localIdentifier: String?, espProposal: String) throws -> String {
+    private func makeConfigContent(
+        localIdentifier: String?,
+        espProposal: String,
+        pkcs12: Data = IKEv2CertificateFixtures.multiSANPKCS12,
+        useRSAPSS: Bool = true
+    ) throws -> String {
         var local: [String: Any] = [
-            "p12": IKEv2CertificateFixtures.multiSANPKCS12.base64EncodedString(),
+            "p12": pkcs12.base64EncodedString(),
             "password": "[ENCRYPTED_PASSPHRASE]",
-            "rsa-pss": true
+            "rsa-pss": useRSAPSS
         ]
         if let localIdentifier {
             local["id"] = localIdentifier
