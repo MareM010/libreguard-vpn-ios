@@ -2356,7 +2356,9 @@ private struct MonthlyUsageCard: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                ProgressBar(progress: progress, color: quota?.usageTint(isPro: isPro) ?? Theme.primary, height: 8)
+                if !isPro {
+                    ProgressBar(progress: progress, color: quota?.usageTint(isPro: isPro) ?? Theme.primary, height: 8)
+                }
                 HStack {
                     Text(usageText)
                         .foregroundStyle(quota?.usageTint(isPro: isPro) ?? Theme.primary)
