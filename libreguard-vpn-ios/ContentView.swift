@@ -2332,8 +2332,18 @@ private struct FlagBadge: View {
 
 private struct MonthlyUsageCard: View {
     let quota: UsageQuota?
-    let isPro: Bool = false
-    let onUpgrade: (() -> Void)? = nil
+    let isPro: Bool
+    let onUpgrade: (() -> Void)?
+
+    init(
+        quota: UsageQuota?,
+        isPro: Bool = false,
+        onUpgrade: (() -> Void)? = nil
+    ) {
+        self.quota = quota
+        self.isPro = isPro
+        self.onUpgrade = onUpgrade
+    }
 
     var body: some View {
         CardContainer {
