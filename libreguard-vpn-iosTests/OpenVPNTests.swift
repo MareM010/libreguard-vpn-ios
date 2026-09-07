@@ -649,6 +649,7 @@ struct OpenVPNTests {
             privateKeyPassphrase: "test-passphrase"
         )
         let providerConfiguration = try #require(tunnelProtocol.providerConfiguration)
+        #expect(providerConfiguration[OpenVPNConstants.ipv6BlockingConfigurationKey] as? Bool == true)
         let serialized = try PropertyListSerialization.data(
             fromPropertyList: providerConfiguration,
             format: .binary,

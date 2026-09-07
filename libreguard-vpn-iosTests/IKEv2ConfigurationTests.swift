@@ -180,13 +180,13 @@ struct IKEv2ConfigurationTests {
         #expect(vpnProtocol.identityData == IKEv2CertificateFixtures.multiSANPKCS12)
         #expect(vpnProtocol.certificateType.rawValue == 6)
         #expect(vpnProtocol.enablePFS == false)
-        #expect(vpnProtocol.includeAllNetworks == false)
-        #expect(vpnProtocol.enforceRoutes == false)
+        #expect(vpnProtocol.includeAllNetworks)
+        #expect(vpnProtocol.enforceRoutes)
     }
 
-    @Test func translatorEnforcesRoutesOnlyWithIKEv2KillSwitch() throws {
+    @Test func translatorKeepsIKEv2FullTunnelRoutingWithKillSwitchDisabled() throws {
         let translator = VPNConfigurationTranslator(deviceKeyStore: StubVPNDeviceKeyStore())
-        let policy = VPNConnectionPolicy(killSwitchEnabled: true, onDemandEnabled: false)
+        let policy = VPNConnectionPolicy(killSwitchEnabled: false, onDemandEnabled: false)
         let vpnProtocol = try translator.makeProtocol(
             server: makeServer(),
             response: makeResponse(

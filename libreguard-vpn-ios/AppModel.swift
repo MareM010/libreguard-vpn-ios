@@ -942,6 +942,15 @@ final class AppModel: ObservableObject {
         canSelect(protocolName: .openVPN)
     }
 
+    var ipv6ProtectionStatus: IPv6ProtectionStatus {
+        let activeProtocol = activeStatisticsSession?.protocolName
+            ?? pendingStatisticsRequest?.protocolName
+        return IPv6ProtectionStatus.resolve(
+            connectionState: vpnStatus,
+            protocolName: activeProtocol
+        )
+    }
+
     private func handleLogin(_ response: LoginResponse, attempt: LoginAttempt, afterTwoFactor: Bool) async throws {
         if response.requiresTwoFactor == true {
             guard let pendingToken = response.pendingLoginToken,

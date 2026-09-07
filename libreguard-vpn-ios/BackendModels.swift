@@ -714,6 +714,33 @@ enum VPNConnectionState: Equatable {
     }
 }
 
+enum IPv6ProtectionStatus: Equatable {
+    case off
+    case blocked
+    case bestEffort
+
+    var label: String {
+        switch self {
+        case .off:
+            return "IPv6 Protection Off"
+        case .blocked:
+            return "IPv6 Blocked"
+        case .bestEffort:
+            return "IPv6 Best Effort"
+        }
+    }
+
+    static func resolve(
+        connectionState: VPNConnectionState,
+        protocolName: VPNConfigurationProtocol?
+    ) -> Self {
+        guard connectionState.isConnected, let protocolName else {
+            return .off
+        }
+        return protocolName == .openVPN ? .blocked : .bestEffort
+    }
+}
+
 struct UsageQuota: Decodable, Equatable {
     let bytesUsed: Int64
     let bytesLimit: Int64

@@ -54,7 +54,13 @@ struct VPNConnectionPolicy: Equatable {
 
     func apply(to protocolConfiguration: NEVPNProtocolIKEv2) {
         apply(to: protocolConfiguration as NEVPNProtocol)
-        protocolConfiguration.enforceRoutes = killSwitchEnabled
+        // Native IKEv2 does not expose a packet-flow filter. Keep the tunnel
+        // full-tunnel while connected so IPv6 follows the same route policy
+        // as the rest of the connection. This is intentionally best-effort:
+        // the server's negotiated traffic selectors still determine what the
+        // IKEv2 tunnel can carry.
+        protocolConfiguration.includeAllNetworks = true
+        protocolConfiguration.enforceRoutes = true
     }
 }
 
@@ -191,7 +197,8 @@ final class PersonalVPNManager: VPNManaging {
         applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
         try await savePreferences()
         try await loadPreferences()
-        return manager.protocolConfiguration?.includeAllNetworks == policy.killSwitchEnabled
+        guard let savedProtocol = manager.protocolConfiguration else { return false }
+        return savedProtocol.includeAllNetworks && savedProtocol.enforceRoutes
     }
 
     func disconnect() async {

@@ -3,6 +3,7 @@ import Foundation
 enum OpenVPNConstants {
     nonisolated static let tunnelBundleIdentifier = "net.libreguard.libreguard-vpn-ios.openvpn-tunnel"
     nonisolated static let appGroupIdentifier = "group.net.libreguard.libreguard-vpn-ios"
+    nonisolated static let ipv6BlockingConfigurationKey = "libreguard.ipv6BlockingEnabled"
 
     /// Returns the bundle identifier of the packet-tunnel extension embedded in
     /// the installed app. This avoids saving a provider identifier that has

@@ -104,6 +104,23 @@ class AppExtensionTests: XCTestCase {
         XCTAssertEqual(pcSession?["mtu"] as? Int, cfg.sessionConfiguration.mtu)
         XCTAssertEqual(pcSession?["renegotiatesAfter"] as? TimeInterval, cfg.sessionConfiguration.renegotiatesAfter)
     }
+
+    func testIPv6BlockingSettingsCaptureTheDefaultRoute() {
+        let settings = OpenVPNTunnelProvider.ipv6BlockingSettings()
+
+        XCTAssertEqual(settings.addresses, ["fe80::1"])
+        XCTAssertEqual(settings.networkPrefixLengths, [NSNumber(value: 64)])
+        XCTAssertEqual(settings.excludedRoutes, [])
+        XCTAssertEqual(settings.includedRoutes?.count, 1)
+        XCTAssertEqual(settings.includedRoutes?.first?.destinationAddress, "::")
+        XCTAssertEqual(settings.includedRoutes?.first?.destinationNetworkPrefixLength.intValue, 0)
+        XCTAssertNil(settings.includedRoutes?.first?.gatewayAddress)
+    }
+
+    func testIPv6BlockingSuppressesServerIPv6Routes() {
+        XCTAssertFalse(OpenVPNTunnelProvider.shouldUseServerIPv6Routes(blockingIPv6: true))
+        XCTAssertTrue(OpenVPNTunnelProvider.shouldUseServerIPv6Routes(blockingIPv6: false))
+    }
     
     func testDNSResolver() {
         let exp = expectation(description: "DNS")

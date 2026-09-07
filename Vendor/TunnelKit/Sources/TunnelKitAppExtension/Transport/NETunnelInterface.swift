@@ -43,9 +43,11 @@ private let log = PIATunnelKitLogger.logger(for: NETunnelInterface.self)
 /// `TunnelInterface` implementation via NetworkExtension.
 public class NETunnelInterface: TunnelInterface {
     private weak var impl: NEPacketTunnelFlow?
+    private let packetFilter: (Data) -> Bool
     
-    public init(impl: NEPacketTunnelFlow) {
+    public init(impl: NEPacketTunnelFlow, packetFilter: @escaping (Data) -> Bool = { _ in false }) {
         self.impl = impl
+        self.packetFilter = packetFilter
     }
     
     // MARK: TunnelInterface
@@ -65,23 +67,38 @@ public class NETunnelInterface: TunnelInterface {
         // WARNING: runs in NEPacketTunnelFlow queue
         impl?.readPackets { [weak self] (packets, protocols) in
             queue.sync {
-                self?.loopReadPackets(queue, handler)
-                handler(packets, nil)
+                guard let self else { return }
+                self.loopReadPackets(queue, handler)
+                let filteredPackets = packets.filter { packet in
+                    !self.packetFilter(packet)
+                }
+                handler(filteredPackets, nil)
             }
         }
     }
     
     public func writePacket(_ packet: Data, completionHandler: ((Error?) -> Void)?) {
+        guard !packetFilter(packet) else {
+            completionHandler?(nil)
+            return
+        }
         let protocolNumber = IPHeader.protocolNumber(inPacket: packet)
         impl?.writePackets([packet], withProtocols: [protocolNumber])
         completionHandler?(nil)
     }
     
     public func writePackets(_ packets: [Data], completionHandler: ((Error?) -> Void)?) {
-        let protocols = packets.map {
+        let filteredPackets = packets.filter { packet in
+            !packetFilter(packet)
+        }
+        guard !filteredPackets.isEmpty else {
+            completionHandler?(nil)
+            return
+        }
+        let protocols = filteredPackets.map {
             IPHeader.protocolNumber(inPacket: $0)
         }
-        impl?.writePackets(packets, withProtocols: protocols)
+        impl?.writePackets(filteredPackets, withProtocols: protocols)
         completionHandler?(nil)
     }
 }

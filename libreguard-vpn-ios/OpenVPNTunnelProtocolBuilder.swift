@@ -45,9 +45,14 @@ struct TunnelKitOpenVPNProtocolBuilder: OpenVPNTunnelProtocolBuilding {
             context: OpenVPNConstants.tunnelBundleIdentifier,
             credentials: nil
         )
+        guard var serializedProviderConfiguration = tunnelProtocol.providerConfiguration else {
+            throw OpenVPNConfigurationError.providerConfigurationUnavailable
+        }
+        serializedProviderConfiguration[OpenVPNConstants.ipv6BlockingConfigurationKey] = true
+        tunnelProtocol.providerConfiguration = serializedProviderConfiguration
         if !privateKeyPassphrase.isEmpty,
            let serializedConfiguration = try? PropertyListSerialization.data(
-               fromPropertyList: tunnelProtocol.providerConfiguration ?? [:],
+               fromPropertyList: serializedProviderConfiguration,
                format: .binary,
                options: 0
            ),
@@ -113,6 +118,7 @@ enum OpenVPNConfigurationError: LocalizedError, Equatable {
     case unsupportedDevice
     case malformedInlineBlock
     case passphraseSerializationDetected
+    case providerConfigurationUnavailable
 
     nonisolated var errorDescription: String? {
         switch self {
@@ -128,6 +134,8 @@ enum OpenVPNConfigurationError: LocalizedError, Equatable {
             return "The OpenVPN profile contains an unclosed inline block."
         case .passphraseSerializationDetected:
             return "The OpenVPN private-key passphrase was not stored because it appeared in the tunnel configuration."
+        case .providerConfigurationUnavailable:
+            return "The OpenVPN tunnel provider configuration could not be created."
         }
     }
 }

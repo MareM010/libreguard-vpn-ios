@@ -2219,7 +2219,11 @@ private struct ProtectionIndicators: View {
     var body: some View {
         HStack(spacing: 10) {
             ProtectionBadge(text: app.dnsPreference?.effectiveEnabled == true ? "Ad Blocking" : "Private DNS")
-            ProtectionBadge(text: "IPv6 Blocked")
+            ProtectionBadge(
+                text: app.ipv6ProtectionStatus.label,
+                systemImage: app.ipv6ProtectionStatus == .bestEffort ? "exclamationmark.shield" : "checkmark.shield",
+                color: app.ipv6ProtectionStatus == .bestEffort ? Theme.statusConnecting : Theme.statusConnected
+            )
             ProtectionBadge(text: "WebRTC Safe")
         }
         .frame(maxWidth: .infinity, alignment: .center)
@@ -2228,11 +2232,13 @@ private struct ProtectionIndicators: View {
 
 private struct ProtectionBadge: View {
     let text: String
+    var systemImage = "checkmark.shield"
+    var color = Theme.statusConnected
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "checkmark.shield")
-                .foregroundStyle(Theme.statusConnected)
+            Image(systemName: systemImage)
+                .foregroundStyle(color)
             Text(text)
                 .foregroundStyle(.secondary)
         }

@@ -379,7 +379,22 @@ final class OpenVPNManager: VPNManaging {
     }
 
     private func updateStatus(from neStatus: NEVPNStatus) {
-        status = VPNConnectionState(networkExtensionStatus: neStatus)
+        let mappedStatus = VPNConnectionState(networkExtensionStatus: neStatus)
+        if mappedStatus.isConnected, !hasIPv6BlockingConfiguration {
+            logger.error("Refusing to report OpenVPN connected without IPv6 blocking configuration")
+            manager.connection.stopVPNTunnel()
+            status = .disconnecting
+            return
+        }
+        status = mappedStatus
+    }
+
+    private var hasIPv6BlockingConfiguration: Bool {
+        guard let tunnelProtocol = manager.protocolConfiguration as? NETunnelProviderProtocol,
+              let providerConfiguration = tunnelProtocol.providerConfiguration else {
+            return false
+        }
+        return OpenVPNIPv6Protection.isEnabled(in: providerConfiguration)
     }
 
     private func loadPreferences() async throws {

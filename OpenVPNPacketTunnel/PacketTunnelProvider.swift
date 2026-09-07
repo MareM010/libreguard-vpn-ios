@@ -29,6 +29,10 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
         dataCountInterval = 1_000
     }
 
+    override func shouldDropPacket(_ packet: Data) -> Bool {
+        blocksIPv6 && IPv6PacketFilter.shouldDrop(packet)
+    }
+
     private var diagnostics: OpenVPNRuntimeDiagnostics {
         diagnosticsLock.lock()
         defer { diagnosticsLock.unlock() }
@@ -48,6 +52,21 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
     }
 
     override func startTunnel(options: [String: NSObject]? = nil, completionHandler: @escaping (Error?) -> Void) {
+        blocksIPv6 = false
+
+        guard let providerConfiguration = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration,
+              OpenVPNIPv6Protection.isEnabled(in: providerConfiguration) else {
+            let error = NSError(
+                domain: "OpenVPNPacketTunnel",
+                code: 1001,
+                userInfo: [NSLocalizedDescriptionKey: "IPv6 blocking is not enabled for this OpenVPN tunnel."]
+            )
+            VPNSharedSessionStore.saveTunnelError(error.localizedDescription)
+            completionHandler(error)
+            return
+        }
+
+        blocksIPv6 = true
         OpenVPNExtensionLifecycleJournal.append("start-requested")
         let tunnelProtocol = protocolConfiguration as? NETunnelProviderProtocol
         let providerKeys = tunnelProtocol?.providerConfiguration?.keys.sorted().joined(separator: ",") ?? "<missing>"

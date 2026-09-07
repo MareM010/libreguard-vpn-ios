@@ -34,6 +34,7 @@
 //      THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //
 
+import Foundation
 import NetworkExtension
 import Logging
 #if os(iOS)
@@ -85,6 +86,30 @@ open class OpenVPNTunnelProvider: NEPacketTunnelProvider {
     
     /// A list of public DNS servers to use as fallback when none are provided (defaults to empty dns list).
     public var fallbackDNSServers = [""]
+
+    /// When enabled, the provider captures and drops IPv6 packets at the
+    /// packet-tunnel boundary instead of passing them to the OpenVPN engine.
+    open var blocksIPv6 = false
+
+    /// Packet-level filter invoked for packets entering or leaving the tunnel.
+    /// Subclasses can use this to enforce provider-specific packet policy.
+    open func shouldDropPacket(_ packet: Data) -> Bool {
+        false
+    }
+
+    static func ipv6BlockingSettings() -> NEIPv6Settings {
+        let settings = NEIPv6Settings(
+            addresses: ["fe80::1"],
+            networkPrefixLengths: [NSNumber(value: 64)]
+        )
+        settings.includedRoutes = [NEIPv6Route.default()]
+        settings.excludedRoutes = []
+        return settings
+    }
+
+    static func shouldUseServerIPv6Routes(blockingIPv6: Bool) -> Bool {
+        !blockingIPv6
+    }
     
     // MARK: Constants
 
@@ -501,6 +526,20 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
     // MARK: OpenVPNSessionDelegate (tunnel queue)
     
     public func sessionDidStart(_ session: OpenVPNSession, remoteAddress: String, options: OpenVPN.Configuration) {
+        if blocksIPv6 && !shouldDropPacket(Data([0x60])) {
+            let error = NSError(
+                domain: "OpenVPNPacketTunnel",
+                code: 1002,
+                userInfo: [NSLocalizedDescriptionKey: "The IPv6 packet filter is not active."]
+            )
+            log.error("IPv6 blocking is enabled, but the packet filter is not active")
+            let startHandler = pendingStartHandler
+            pendingStartHandler = nil
+            session.shutdown(error: error)
+            startHandler?(error)
+            return
+        }
+
         log.info("Session did start")
         
         log.info("Returned ifconfig parameters:")
@@ -547,14 +586,23 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
             
             if let error = error {
                 log.error("Failed to configure tunnel: \(error)")
-                self.pendingStartHandler?(error)
+                let startHandler = self.pendingStartHandler
                 self.pendingStartHandler = nil
+                session.shutdown(error: error)
+                startHandler?(error)
                 return
             }
             
             log.info("Tunnel interface is now UP")
             
-            session.setTunnel(tunnel: NETunnelInterface(impl: self.packetFlow))
+            session.setTunnel(
+                tunnel: NETunnelInterface(
+                    impl: self.packetFlow,
+                    packetFilter: { [weak self] packet in
+                        self?.shouldDropPacket(packet) ?? true
+                    }
+                )
+            )
 
             self.pendingStartHandler?(nil)
             self.pendingStartHandler = nil
@@ -581,7 +629,8 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
     private func bringNetworkUp(remoteAddress: String, localOptions: OpenVPN.Configuration, options: OpenVPN.Configuration, completionHandler: @escaping (Error?) -> Void) {
         let routingPolicies = localOptions.routingPolicies ?? options.routingPolicies
         let isIPv4Gateway = routingPolicies?.contains(.IPv4) ?? false
-        let isIPv6Gateway = routingPolicies?.contains(.IPv6) ?? false
+        let isIPv6Gateway = Self.shouldUseServerIPv6Routes(blockingIPv6: blocksIPv6)
+            && (routingPolicies?.contains(.IPv6) ?? false)
         let isGateway = isIPv4Gateway || isIPv6Gateway
 
         var ipv4Settings: NEIPv4Settings?
@@ -614,7 +663,10 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
         }
 
         var ipv6Settings: NEIPv6Settings?
-        if let ipv6 = options.ipv6 {
+        if blocksIPv6 {
+            ipv6Settings = Self.ipv6BlockingSettings()
+            log.info("IPv6 blocking: Capturing the IPv6 default route and dropping packets at the tunnel boundary")
+        } else if let ipv6 = options.ipv6 {
             var routes: [NEIPv6Route] = []
 
             // route all traffic to VPN?
