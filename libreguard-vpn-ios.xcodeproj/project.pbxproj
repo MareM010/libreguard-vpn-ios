@@ -678,8 +678,8 @@
 				GOOGLE_REVERSED_CLIENT_ID = GOOGLE_REVERSED_CLIENT_ID_NOT_CONFIGURED;
 				GOOGLE_SERVER_CLIENT_ID = GOOGLE_SERVER_CLIENT_ID_NOT_CONFIGURED;
 				INFOPLIST_FILE = Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "LibreGuard VPN";
-				INFOPLIST_KEY_CFBundleName = "LibreGuard VPN";
+				INFOPLIST_KEY_CFBundleDisplayName = "LibreGuard VPN";
+				INFOPLIST_KEY_CFBundleName = "LibreGuard VPN";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -716,8 +716,8 @@
 				GOOGLE_REVERSED_CLIENT_ID = GOOGLE_REVERSED_CLIENT_ID_NOT_CONFIGURED;
 				GOOGLE_SERVER_CLIENT_ID = GOOGLE_SERVER_CLIENT_ID_NOT_CONFIGURED;
 				INFOPLIST_FILE = Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "LibreGuard VPN";
-				INFOPLIST_KEY_CFBundleName = "LibreGuard VPN";
+				INFOPLIST_KEY_CFBundleDisplayName = "LibreGuard VPN";
+				INFOPLIST_KEY_CFBundleName = "LibreGuard VPN";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
