@@ -25,8 +25,7 @@ final class VPNConfigurationTranslator {
     func makeProtocol(
         server: VPNServer,
         response: VPNConfigResponse,
-        policy: VPNConnectionPolicy = .disabled,
-        gatewayCertificateKeyType: IKEv2ClientCertificateKeyType? = nil
+        policy: VPNConnectionPolicy = .disabled
     ) throws -> NEVPNProtocolIKEv2 {
         let profile = try decodeProfile(from: response.configContent)
         let passphrase = try deviceKeyStore.decryptPassphrase(from: response.encryptedPassphrase)
@@ -36,28 +35,17 @@ final class VPNConfigurationTranslator {
             localIdentifier: profile.localIdentifier,
             leafCertificateDER: importedIdentity.leafCertificateDER
         )
-        let clientCertificateType = try resolvedCertificateType(
+        let certificateType = try resolvedCertificateType(
             keyType: importedIdentity.keyType,
             useRSAPSS: profile.localUsesRSAPSS
-        )
-        let certificateType = try resolvedCertificateType(
-            keyType: gatewayCertificateKeyType ?? importedIdentity.keyType,
-            useRSAPSS: (gatewayCertificateKeyType ?? importedIdentity.keyType) == .rsa
-                && profile.localUsesRSAPSS
         )
         let enablePFS = shouldEnablePFS(profile: profile)
 
         let counts = clientIdentity.sanCounts
         let fingerprint = abbreviatedFingerprint(for: importedIdentity.leafCertificateDER)
         logger.info(
-            "Resolved IKEv2 client identity source=\(clientIdentity.source.rawValue, privacy: .public) type=\(clientIdentity.kind.rawValue, privacy: .public) certificateKeyType=\(importedIdentity.keyType.rawValue, privacy: .public) clientCertificateType=\(clientCertificateType.rawValue, privacy: .public) gatewayCertificateKeyType=\(gatewayCertificateKeyType?.rawValue ?? "unavailable", privacy: .public) configuredCertificateType=\(certificateType.rawValue, privacy: .public) dnsSANs=\(counts.fqdn, privacy: .public) emailSANs=\(counts.rfc822, privacy: .public) ipSANs=\(counts.ipAddress, privacy: .public) certificateFingerprint=\(fingerprint, privacy: .public) identity=\(clientIdentity.value, privacy: .private(mask: .hash))"
+            "Resolved IKEv2 client identity source=\(clientIdentity.source.rawValue, privacy: .public) type=\(clientIdentity.kind.rawValue, privacy: .public) certificateKeyType=\(importedIdentity.keyType.rawValue, privacy: .public) certificateType=\(certificateType.rawValue, privacy: .public) dnsSANs=\(counts.fqdn, privacy: .public) emailSANs=\(counts.rfc822, privacy: .public) ipSANs=\(counts.ipAddress, privacy: .public) certificateFingerprint=\(fingerprint, privacy: .public) identity=\(clientIdentity.value, privacy: .private(mask: .hash))"
         )
-
-        if let gatewayCertificateKeyType, gatewayCertificateKeyType != importedIdentity.keyType {
-            logger.warning(
-                "IKEv2 gateway key type \(gatewayCertificateKeyType.rawValue, privacy: .public) differs from client identity key type \(importedIdentity.keyType.rawValue, privacy: .public); applying the gateway type required by Apple's responder authentication check"
-            )
-        }
 
         let vpnProtocol = NEVPNProtocolIKEv2()
         let serverAddress = resolvedServerAddress(from: profile, response: response, server: server)

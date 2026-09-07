@@ -163,18 +163,6 @@ struct IKEv2ConfigurationTests {
         #expect(imported.keyType == .ecdsa256)
     }
 
-    @Test func certificateKeyTypeResolverDetectsRSAAndECDSAP256Leaves() throws {
-        let rsaCertificate = try #require(
-            SecCertificateCreateWithData(nil, IKEv2CertificateFixtures.multiSANDER as CFData)
-        )
-        let ecdsaCertificate = try #require(
-            SecCertificateCreateWithData(nil, IKEv2CertificateFixtures.ecdsaP256DER as CFData)
-        )
-
-        #expect(try IKEv2CertificateKeyTypeResolver.resolve(rsaCertificate) == .rsa)
-        #expect(try IKEv2CertificateKeyTypeResolver.resolve(ecdsaCertificate) == .ecdsa256)
-    }
-
     @Test func translatorBuildsCertificateBackedIdentifiersAndKeepsIKEOnlyDHOutOfChildPFS() throws {
         let translator = VPNConfigurationTranslator(deviceKeyStore: StubVPNDeviceKeyStore())
         let vpnProtocol = try translator.makeProtocol(
@@ -230,24 +218,6 @@ struct IKEv2ConfigurationTests {
 
         #expect(vpnProtocol.localIdentifier == "ecdsa-client.example.com")
         #expect(vpnProtocol.identityData == IKEv2CertificateFixtures.ecdsaP256PKCS12)
-        #expect(vpnProtocol.certificateType.rawValue == 2)
-    }
-
-    @Test func translatorUsesDetectedECDSAP256GatewayTypeWithRSAClientIdentity() throws {
-        let translator = VPNConfigurationTranslator(deviceKeyStore: StubVPNDeviceKeyStore())
-        let vpnProtocol = try translator.makeProtocol(
-            server: makeServer(),
-            response: makeResponse(
-                configContent: try makeConfigContent(
-                    localIdentifier: "client.example.com",
-                    espProposal: "aes256-sha256",
-                    useRSAPSS: false
-                )
-            ),
-            gatewayCertificateKeyType: .ecdsa256
-        )
-
-        #expect(vpnProtocol.identityData == IKEv2CertificateFixtures.multiSANPKCS12)
         #expect(vpnProtocol.certificateType.rawValue == 2)
     }
 
