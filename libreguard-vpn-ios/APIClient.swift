@@ -8,10 +8,10 @@ protocol BackendServicing: AnyObject {
     var appVersion: String { get }
     func restoreSession() async throws -> AuthSession?
     func login(email: String, password: String) async throws -> LoginResponse
-    func loginWithGoogle(idToken: String) async throws -> LoginResponse
+    func loginWithGoogle(idToken: String, newsletterConsent: Bool?) async throws -> LoginResponse
     func verifyTwoFactor(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse
     func verifyRecoveryCode(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse
-    func register(email: String, password: String) async throws -> RegistrationResponse
+    func register(email: String, password: String, newsletterConsent: Bool) async throws -> RegistrationResponse
     func requestPasswordReset(email: String) async throws -> MessageResponse
     func resetPassword(email: String, token: String, newPassword: String) async throws -> MessageResponse
     func confirmationStatus(userId: String) async throws -> ConfirmationStatusResponse
@@ -98,13 +98,14 @@ final class APIClient: BackendServicing {
         return response
     }
 
-    func loginWithGoogle(idToken: String) async throws -> LoginResponse {
+    func loginWithGoogle(idToken: String, newsletterConsent: Bool? = nil) async throws -> LoginResponse {
         let keyPayload = try deviceKeyStore.publicKeyPayload()
         let response: LoginResponse = try await send(
             .post,
             path: "/api/login/google",
             body: GoogleLoginRequest(
                 idToken: idToken,
+                newsletterConsent: newsletterConsent,
                 deviceId: deviceId,
                 appVersion: appVersion,
                 devicePublicKey: keyPayload.devicePublicKey,
@@ -148,8 +149,13 @@ final class APIClient: BackendServicing {
         return response
     }
 
-    func register(email: String, password: String) async throws -> RegistrationResponse {
-        let response: RegistrationResponse = try await send(.post, path: "/api/register", body: RegistrationRequest(email: email, password: password), authorized: false)
+    func register(email: String, password: String, newsletterConsent: Bool = false) async throws -> RegistrationResponse {
+        let response: RegistrationResponse = try await send(
+            .post,
+            path: "/api/register",
+            body: RegistrationRequest(email: email, password: password, newsletterConsent: newsletterConsent),
+            authorized: false
+        )
         return response
     }
 

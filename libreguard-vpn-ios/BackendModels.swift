@@ -142,6 +142,7 @@ struct LoginRequest: Encodable {
 
 struct GoogleLoginRequest: Encodable {
     let idToken: String
+    let newsletterConsent: Bool?
     let deviceId: String
     let appVersion: String
     let devicePublicKey: String
@@ -197,6 +198,7 @@ struct RecoveryCodeLoginRequest: Encodable {
 struct RegistrationRequest: Encodable {
     let email: String
     let password: String
+    let newsletterConsent: Bool
 }
 
 struct ForgotPasswordRequest: Encodable {
@@ -866,7 +868,7 @@ struct PendingRegistration: Codable, Equatable {
 
 enum LoginAttempt {
     case password(email: String, password: String)
-    case google(idToken: String)
+    case google(idToken: String, newsletterConsent: Bool?)
 }
 
 struct TwoFactorChallenge: Identifiable {

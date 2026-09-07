@@ -11,7 +11,13 @@ final class AppModel: ObservableObject {
     @Published var isRefreshingAccount = false
     @Published var isRefreshingServers = false
     @Published var prefilledEmail = ""
-    @Published var session: AuthSession?
+    @Published var session: AuthSession? {
+        didSet {
+            guard oldValue?.userId != session?.userId else { return }
+            loadFavoriteServerIDs(for: session?.userId)
+        }
+    }
+    @Published private(set) var favoriteServerIDs: [Int] = []
     @Published var usageQuota: UsageQuota?
     @Published var subscription: SubscriptionStatus?
     @Published private(set) var isCheckingConnectionQuota = false
@@ -53,6 +59,7 @@ final class AppModel: ObservableObject {
     private let vpn: VPNManaging
     private let defaults: UserDefaults
     private let protocolSelectionStore: VPNProtocolSelectionStoring
+    private let favoriteServerStore: FavoriteServerStoring
     private let statisticsRecorder: LocalStatisticsRecording?
     private let trafficSampler: TunnelTrafficSampling
     private let notificationService: VPNNotificationService
@@ -93,6 +100,7 @@ final class AppModel: ObservableObject {
         latencyProbe: LatencyProbing? = nil,
         vpnManager: VPNManaging? = nil,
         protocolSelectionStore: VPNProtocolSelectionStoring? = nil,
+        favoriteServerStore: FavoriteServerStoring? = nil,
         statisticsRecorder: LocalStatisticsRecording? = nil,
         trafficSampler: TunnelTrafficSampling = SystemTunnelTrafficSampler(),
         notificationService: VPNNotificationService? = nil,
@@ -106,6 +114,7 @@ final class AppModel: ObservableObject {
         self.google = google ?? GoogleSignInService()
         self.latencyProbe = latencyProbe ?? NetworkLatencyProbe()
         self.protocolSelectionStore = protocolSelectionStore ?? UserDefaultsVPNProtocolSelectionStore(defaults: defaults)
+        self.favoriteServerStore = favoriteServerStore ?? UserDefaultsFavoriteServerStore(defaults: defaults)
         self.statisticsRecorder = statisticsRecorder
         self.trafficSampler = trafficSampler
         self.notificationService = notificationService ?? VPNNotificationService()
@@ -279,14 +288,14 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func loginWithGoogle() async {
+    func loginWithGoogle(newsletterConsent: Bool? = nil) async {
         isAuthenticating = true
         defer { isAuthenticating = false }
         do {
             let idToken = try await google.signIn()
-            let attempt = LoginAttempt.google(idToken: idToken)
+            let attempt = LoginAttempt.google(idToken: idToken, newsletterConsent: newsletterConsent)
             do {
-                let response = try await api.loginWithGoogle(idToken: idToken)
+                let response = try await api.loginWithGoogle(idToken: idToken, newsletterConsent: newsletterConsent)
                 try await handleLogin(response, attempt: attempt, afterTwoFactor: false)
             } catch {
                 handle(error, attempt: attempt, afterTwoFactor: false)
@@ -298,7 +307,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func register(email: String, password: String, confirmation: String) async {
+    func register(email: String, password: String, confirmation: String, newsletterConsent: Bool = false) async {
         let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         guard password.count >= 8 else {
             presentedError = APIError(message: "Password must be at least 8 characters.")
@@ -311,7 +320,11 @@ final class AppModel: ObservableObject {
         isAuthenticating = true
         defer { isAuthenticating = false }
         do {
-            let response = try await api.register(email: normalizedEmail, password: password)
+            let response = try await api.register(
+                email: normalizedEmail,
+                password: password,
+                newsletterConsent: newsletterConsent
+            )
             let pending = PendingRegistration(userId: response.userId, email: response.email)
             savePendingRegistration(pending)
             prefilledEmail = response.email
@@ -375,10 +388,13 @@ final class AppModel: ObservableObject {
                 deviceLimitContext = nil
                 let response = try await api.login(email: email, password: password)
                 try await handleLogin(response, attempt: context.attempt, afterTwoFactor: false)
-            case let .google(idToken):
+            case let .google(idToken, newsletterConsent):
                 try await api.removeGoogleDevice(idToken: idToken, deviceId: device.id)
                 deviceLimitContext = nil
-                let response = try await api.loginWithGoogle(idToken: idToken)
+                let response = try await api.loginWithGoogle(
+                    idToken: idToken,
+                    newsletterConsent: newsletterConsent
+                )
                 try await handleLogin(response, attempt: context.attempt, afterTwoFactor: false)
             }
         } catch {
@@ -776,8 +792,28 @@ final class AppModel: ObservableObject {
         selectedServerID = server.id
     }
 
+    func isFavoriteServer(_ serverID: Int) -> Bool {
+        favoriteServerIDs.contains(serverID)
+    }
+
+    func toggleFavoriteServer(_ serverID: Int) {
+        guard let userID = session?.userId else { return }
+
+        if let index = favoriteServerIDs.firstIndex(of: serverID) {
+            favoriteServerIDs.remove(at: index)
+        } else {
+            favoriteServerIDs.insert(serverID, at: 0)
+        }
+
+        favoriteServerStore.saveFavoriteServerIDs(favoriteServerIDs, for: userID)
+    }
+
     func deselectServer() {
         selectedServerID = nil
+    }
+
+    private func loadFavoriteServerIDs(for userID: String?) {
+        favoriteServerIDs = userID.map { favoriteServerStore.favoriteServerIDs(for: $0) } ?? []
     }
 
     func selectVPNProtocol(_ protocolName: VPNConfigurationProtocol) {

@@ -33,6 +33,21 @@ final class libreguard_vpn_iosUITests: XCTestCase {
         XCTAssertTrue(app.buttons["login-sign-in-button"].waitForExistence(timeout: 20))
         XCTAssertTrue(app.buttons["google-sign-in-button"].exists)
         XCTAssertTrue(app.buttons["create-account-button"].exists)
+        XCTAssertFalse(app.switches["newsletter-consent-checkbox"].exists)
+    }
+
+    @MainActor
+    func testRegistrationScreenShowsOptionalNewsletterConsentAndGoogleSignup() throws {
+        let app = XCUIApplication()
+        app.launchArguments.append("--uitesting-reset")
+        app.launch()
+
+        XCTAssertTrue(app.buttons["create-account-button"].waitForExistence(timeout: 20))
+        app.buttons["create-account-button"].tap()
+
+        XCTAssertTrue(app.switches["newsletter-consent-checkbox"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.switches["newsletter-consent-checkbox"].isSelected)
+        XCTAssertTrue(app.buttons["google-register-button"].exists)
     }
 
     @MainActor
@@ -45,6 +60,35 @@ final class libreguard_vpn_iosUITests: XCTestCase {
         app.buttons["Forgot password?"].tap()
         XCTAssertTrue(app.scrollViews["forgot-password-screen"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["forgot-password-send-button"].exists)
+    }
+
+    @MainActor
+    func testThemeSelectorShowsThreeModesAndPersistsSelection() throws {
+        let app = XCUIApplication()
+        app.launchArguments.append("--uitesting-reset")
+        app.launchEnvironment["UITEST_FORCE_SETTINGS"] = "1"
+        app.launch()
+
+        let systemButton = app.buttons["theme-system-button"]
+        let lightButton = app.buttons["theme-light-button"]
+        let darkButton = app.buttons["theme-dark-button"]
+
+        XCTAssertTrue(app.descendants(matching: .any)["theme-section"].waitForExistence(timeout: 10))
+        XCTAssertTrue(systemButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(lightButton.exists)
+        XCTAssertTrue(darkButton.exists)
+        XCTAssertTrue(systemButton.isSelected)
+
+        darkButton.tap()
+        XCTAssertTrue(darkButton.isSelected)
+        XCTAssertFalse(systemButton.isSelected)
+
+        app.terminate()
+        app.launchArguments.removeAll()
+        app.launch()
+
+        XCTAssertTrue(app.buttons["theme-dark-button"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["theme-dark-button"].isSelected)
     }
 
     @MainActor

@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UIKit
 import SwiftData
 import CoreImage.CIFilterBuiltins
 import UserNotifications
@@ -14,12 +15,29 @@ import StoreKit
 struct ContentView: View {
     @EnvironmentObject private var app: AppModel
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var systemColorScheme
     @State private var selectedTab: MainTab = .home
     @State private var overlayScreen: OverlayScreen?
-    @State private var isDarkMode = false
+    @AppStorage("theme_mode") private var storedThemeMode = ThemeMode.system.rawValue
+
+    private var themeMode: ThemeMode {
+        ThemeMode.fromStoredValue(storedThemeMode)
+    }
+
+    private var effectiveDarkMode: Bool {
+        switch themeMode {
+        case .system:
+            systemColorScheme == .dark
+        case .light:
+            false
+        case .dark:
+            true
+        }
+    }
 
     var body: some View {
         let isUITestLoginMode = ProcessInfo.processInfo.environment["UITEST_FORCE_LOGIN"] == "1"
+        let isUITestSettingsMode = ProcessInfo.processInfo.environment["UITEST_FORCE_SETTINGS"] == "1"
         ZStack {
             Theme.background.ignoresSafeArea()
 
@@ -27,6 +45,16 @@ struct ContentView: View {
                 LoginView(
                     onRegister: app.showRegister,
                     onForgotPassword: app.showForgotPassword
+                )
+            } else if isUITestSettingsMode {
+                SettingsView(
+                    themeMode: themeMode,
+                    effectiveDarkMode: effectiveDarkMode,
+                    onThemeModeChange: { selectedThemeMode in
+                        storedThemeMode = selectedThemeMode.rawValue
+                    },
+                    onUpgrade: {},
+                    onSignOut: {}
                 )
             } else {
                 switch app.route {
@@ -66,14 +94,23 @@ struct ContentView: View {
                     MainAppView(
                         selectedTab: $selectedTab,
                         overlayScreen: $overlayScreen,
-                        isDarkMode: $isDarkMode,
+                        themeMode: themeMode,
+                        effectiveDarkMode: effectiveDarkMode,
+                        onThemeModeChange: { selectedThemeMode in
+                            storedThemeMode = selectedThemeMode.rawValue
+                        },
                         onSignOut: { Task { await app.signOut() } }
                     )
                 }
             }
         }
-        .preferredColorScheme(isDarkMode ? .dark : .light)
-        .task { await app.start() }
+        .preferredColorScheme(themeMode.colorSchemeOverride)
+        .task {
+            if ProcessInfo.processInfo.arguments.contains("--uitesting-reset") {
+                storedThemeMode = ThemeMode.system.rawValue
+            }
+            await app.start()
+        }
         .sheet(item: $app.deviceLimitContext) { context in
             DeviceLimitView(context: context)
                 .presentationDetents([.medium, .large])
@@ -133,6 +170,63 @@ private enum MainTab: String, CaseIterable, Identifiable {
     }
 }
 
+enum ThemeMode: String, CaseIterable, Identifiable {
+    case system
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    static func fromStoredValue(_ rawValue: String?) -> ThemeMode {
+        guard let rawValue, let mode = ThemeMode(rawValue: rawValue) else { return .system }
+        return mode
+    }
+
+    var colorSchemeOverride: ColorScheme? {
+        switch self {
+        case .system:
+            nil
+        case .light:
+            .light
+        case .dark:
+            .dark
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .system:
+            "circle.lefthalf.filled"
+        case .light:
+            "sun.max.fill"
+        case .dark:
+            "moon.fill"
+        }
+    }
+
+    func subtitle(effectiveDarkMode: Bool) -> String {
+        switch self {
+        case .system:
+            "Following system theme • Currently \(effectiveDarkMode ? "Dark" : "Light")"
+        case .light:
+            "Manual theme override • Always Light"
+        case .dark:
+            "Manual theme override • Always Dark"
+        }
+    }
+
+    func buttonTitle(effectiveDarkMode: Bool, isSelected: Bool) -> String {
+        switch self {
+        case .system:
+            isSelected ? "System • \(effectiveDarkMode ? "Dark" : "Light")" : "System"
+        case .light:
+            "Light"
+        case .dark:
+            "Dark"
+        }
+    }
+}
+
 private enum OverlayScreen: Identifiable {
     case upgrade
 
@@ -177,7 +271,9 @@ private struct MainAppView: View {
     @EnvironmentObject private var app: AppModel
     @Binding var selectedTab: MainTab
     @Binding var overlayScreen: OverlayScreen?
-    @Binding var isDarkMode: Bool
+    let themeMode: ThemeMode
+    let effectiveDarkMode: Bool
+    let onThemeModeChange: (ThemeMode) -> Void
     let onSignOut: () -> Void
 
     var body: some View {
@@ -199,7 +295,9 @@ private struct MainAppView: View {
                         StatisticsView(userId: app.session?.userId)
                     case .settings:
                         SettingsView(
-                            isDarkMode: $isDarkMode,
+                            themeMode: themeMode,
+                            effectiveDarkMode: effectiveDarkMode,
+                            onThemeModeChange: onThemeModeChange,
                             onUpgrade: { overlayScreen = .upgrade },
                             onSignOut: onSignOut
                         )
@@ -266,6 +364,7 @@ private struct LoginView: View {
                         Button("Forgot password?", action: onForgotPassword)
                             .font(.subheadline.weight(.medium))
                             .foregroundStyle(Theme.primary)
+                            .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
 
                     PrimaryButton(
@@ -293,6 +392,7 @@ private struct LoginView: View {
                     .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
                 }
                 .buttonStyle(.plain)
+                .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .disabled(app.isAuthenticating)
                 .accessibilityIdentifier("google-sign-in-button")
 
@@ -302,6 +402,7 @@ private struct LoginView: View {
                     Button("Create an account", action: onRegister)
                         .foregroundStyle(Theme.primary)
                         .fontWeight(.semibold)
+                        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .accessibilityIdentifier("create-account-button")
                 }
                 .padding(.top, 8)
@@ -323,6 +424,7 @@ private struct RegisterView: View {
     @State private var email = ""
     @State private var password = ""
     @State private var confirmPassword = ""
+    @State private var newsletterConsent = false
     @State private var showPassword = false
     @State private var showConfirmPassword = false
     @State private var passwordError = ""
@@ -365,6 +467,36 @@ private struct RegisterView: View {
                         .background(Theme.card.opacity(0.7), in: RoundedRectangle(cornerRadius: 14))
                         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border.opacity(0.8)))
 
+                    Toggle(isOn: $newsletterConsent) {
+                        Text("Yes, I’d like to receive occasional LibreGuard news, product updates, and other relevant information by email. I can unsubscribe at any time.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .tint(Theme.primary)
+                    .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("newsletter-consent-checkbox")
+
+                    DividerWithText(text: "Or continue with")
+
+                    Button {
+                        Task { await app.loginWithGoogle(newsletterConsent: newsletterConsent) }
+                    } label: {
+                        HStack(spacing: 12) {
+                            GoogleGlyph()
+                            Text("Continue with Google")
+                        }
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
+                    }
+                    .buttonStyle(.plain)
+                    .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .disabled(app.isAuthenticating)
+                    .accessibilityIdentifier("google-register-button")
+
                     PrimaryButton(title: app.isAuthenticating ? "Creating Account..." : "Create Account") {
                         guard password.count >= 8 else {
                             passwordError = "Password must be at least 8 characters"
@@ -375,7 +507,14 @@ private struct RegisterView: View {
                             return
                         }
                         passwordError = ""
-                        Task { await app.register(email: email, password: password, confirmation: confirmPassword) }
+                        Task {
+                            await app.register(
+                                email: email,
+                                password: password,
+                                confirmation: confirmPassword,
+                                newsletterConsent: newsletterConsent
+                            )
+                        }
                     }
                     .disabled(app.isAuthenticating)
                 }
@@ -386,6 +525,7 @@ private struct RegisterView: View {
                     Button("Sign in", action: onLogin)
                         .foregroundStyle(Theme.primary)
                         .fontWeight(.semibold)
+                        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
             }
             .padding(24)
@@ -431,8 +571,10 @@ private struct EmailConfirmationView: View {
             }
             .disabled(resendSeconds > 0)
             .foregroundStyle(Theme.primary)
+            .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
             Button("Back", action: onBack)
                 .foregroundStyle(Theme.primary)
+                .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .padding(24)
         .frame(maxWidth: 480)
@@ -478,7 +620,8 @@ private struct TwoFactorLoginView: View {
                     label: useRecoveryCode ? "Recovery Code" : "Authentication Code",
                     text: $code,
                     icon: useRecoveryCode ? "key" : "number",
-                    placeholder: useRecoveryCode ? "xxxx-xxxx" : "123456"
+                    placeholder: useRecoveryCode ? "xxxx-xxxx" : "123456",
+                    keyboardType: useRecoveryCode ? .default : .numberPad
                 )
 
                 PrimaryButton(title: app.isAuthenticating ? "Verifying..." : "Verify") {
@@ -491,9 +634,11 @@ private struct TwoFactorLoginView: View {
                     useRecoveryCode.toggle()
                 }
                 .foregroundStyle(Theme.primary)
+                .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                 Button("Back to Sign In", action: onBack)
                     .foregroundStyle(.secondary)
+                    .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .padding(24)
             .frame(maxWidth: 480)
@@ -539,6 +684,7 @@ private struct DeviceLimitView: View {
                                 .overlay(RoundedRectangle(cornerRadius: 14).stroke(selectedDeviceID == device.id ? Theme.primary : Theme.border))
                             }
                             .buttonStyle(.plain)
+                            .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
                         }
                     }
                 }
@@ -567,6 +713,7 @@ private struct DeviceLimitView: View {
                         app.deviceLimitContext = nil
                         dismiss()
                     }
+                    .rippleEffect(tint: Theme.primary, shape: Capsule())
                 }
             }
         }
@@ -616,6 +763,7 @@ private struct ForgotPasswordView: View {
                 .disabled(app.isAuthenticating)
                 Button("Back to Sign In", action: onBack)
                     .foregroundStyle(Theme.primary)
+                    .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .padding(24)
             .frame(maxWidth: 480)
@@ -662,6 +810,7 @@ private struct ResetPasswordView: View {
                 }
                 Button("Back to Sign In", action: onBack)
                     .foregroundStyle(Theme.primary)
+                    .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .padding(24)
             .frame(maxWidth: 480)
@@ -704,10 +853,10 @@ private struct DashboardView: View {
                                 app.deselectServer()
                             }
                         )
-                    }
-
-                    QuickConnectCard {
-                        app.requestQuickConnect()
+                    } else {
+                        QuickConnectCard {
+                            app.requestQuickConnect()
+                        }
                     }
                 }
 
@@ -846,7 +995,6 @@ private struct DashboardView: View {
 private struct ServerListView: View {
     @EnvironmentObject private var app: AppModel
     @State private var query = ""
-    @State private var favorites: Set<Int> = []
     let onUpgrade: () -> Void
     let onSelectServer: (VPNServer) -> Void
 
@@ -895,6 +1043,7 @@ private struct ServerListView: View {
                     .padding(.vertical, 13)
                     .background(Theme.card, in: RoundedRectangle(cornerRadius: 14))
                     .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
+                    .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                     Button {
                         app.refreshServers()
@@ -907,6 +1056,7 @@ private struct ServerListView: View {
                             .foregroundStyle(.white)
                     }
                     .disabled(app.isRefreshingServers)
+                    .rippleEffect(tint: .white, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .animation(.linear(duration: 0.7), value: app.isRefreshingServers)
                 }
             }
@@ -923,6 +1073,40 @@ private struct ServerListView: View {
                         ContentUnavailableView("No Servers Found", systemImage: "network.slash", description: Text("Try a different search or refresh the list."))
                     }
 
+                    if !favoriteServers.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "star.fill")
+                                    .foregroundStyle(Theme.primary)
+                                    .frame(width: 28, height: 28)
+                                    .background(Theme.primary.opacity(0.12), in: Circle())
+                                Text("Favourites")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("(\(favoriteServers.count))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            VStack(spacing: 8) {
+                                ForEach(favoriteServers) { server in
+                                    serverRow(for: server)
+                                        .transition(
+                                            .asymmetric(
+                                                insertion: .move(edge: .top).combined(with: .opacity),
+                                                removal: .scale(scale: 0.96).combined(with: .opacity)
+                                            )
+                                        )
+                                }
+                            }
+                        }
+                        .transition(
+                            .asymmetric(
+                                insertion: .move(edge: .top).combined(with: .opacity),
+                                removal: .opacity
+                            )
+                        )
+                    }
+
                     ForEach(groupedServers, id: \.country) { group in
                         VStack(alignment: .leading, spacing: 10) {
                             HStack(spacing: 8) {
@@ -936,27 +1120,7 @@ private struct ServerListView: View {
 
                             VStack(spacing: 8) {
                                 ForEach(group.servers) { server in
-                                    ServerRow(
-                                        server: server,
-                                        isSelected: app.selectedServerID == server.id,
-                                        isFavorite: favorites.contains(server.id),
-                                        latency: app.serverLatencies[server.id],
-                                        onSelect: {
-                                            if server.requiresProSubscription,
-                                               !app.isProUser {
-                                                onUpgrade()
-                                            } else {
-                                                onSelectServer(server)
-                                            }
-                                        },
-                                        onFavorite: {
-                                            if favorites.contains(server.id) {
-                                                favorites.remove(server.id)
-                                            } else {
-                                                favorites.insert(server.id)
-                                            }
-                                        }
-                                    )
+                                    serverRow(for: server)
                                 }
                             }
                         }
@@ -965,11 +1129,35 @@ private struct ServerListView: View {
                 .padding(.horizontal, 24)
                 .padding(.bottom, 24)
             }
+            .animation(.spring(response: 0.42, dampingFraction: 0.86), value: app.favoriteServerIDs)
         }
         .background(Theme.background)
         .task {
             if app.servers.isEmpty { app.refreshServers() }
         }
+    }
+
+    @ViewBuilder
+    private func serverRow(for server: VPNServer) -> some View {
+        ServerRow(
+            server: server,
+            isSelected: app.selectedServerID == server.id,
+            isFavorite: app.isFavoriteServer(server.id),
+            latency: app.serverLatencies[server.id],
+            onSelect: {
+                if server.requiresProSubscription,
+                   !app.isProUser {
+                    onUpgrade()
+                } else {
+                    onSelectServer(server)
+                }
+            },
+            onFavorite: {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+                    app.toggleFavoriteServer(server.id)
+                }
+            }
+        )
     }
 
     private var filteredServers: [VPNServer] {
@@ -986,6 +1174,12 @@ private struct ServerListView: View {
         return countries.keys.sorted().compactMap { country in
             guard let list = countries[country] else { return nil }
             return (country, countryFlag(country), list)
+        }
+    }
+
+    private var favoriteServers: [VPNServer] {
+        app.favoriteServerIDs.compactMap { favoriteID in
+            filteredServers.first(where: { $0.id == favoriteID })
         }
     }
 
@@ -1069,6 +1263,7 @@ private struct StatisticsView: View {
                                 }
                             }
                         }
+                        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                         CardContainer {
                             VStack(alignment: .leading, spacing: 14) {
@@ -1100,6 +1295,7 @@ private struct StatisticsView: View {
                                 }
                             }
                         }
+                        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                         Button(role: .destructive) { confirmClear = true } label: {
                             Label("Clear My Statistics", systemImage: "trash")
@@ -1107,6 +1303,7 @@ private struct StatisticsView: View {
                                 .padding(14)
                                 .background(Theme.destructive.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
                         }
+                        .rippleEffect(tint: Theme.destructive, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
 
                     CardContainer {
@@ -1115,6 +1312,7 @@ private struct StatisticsView: View {
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .padding(.horizontal, 24)
                 .padding(.bottom, 24)
@@ -1165,11 +1363,14 @@ private struct StatisticsView: View {
 private struct SettingsView: View {
     @EnvironmentObject private var app: AppModel
     @Environment(\.openURL) private var openURL
-    @Binding var isDarkMode: Bool
+    let themeMode: ThemeMode
+    let effectiveDarkMode: Bool
+    let onThemeModeChange: (ThemeMode) -> Void
     @State private var splitTunneling = false
     @State private var showTwoFactorManagement = false
     @State private var showProtocolSelection = false
     @State private var showDNSSettings = false
+    @State private var showSignOutConfirmation = false
 
     let onUpgrade: () -> Void
     let onSignOut: () -> Void
@@ -1215,6 +1416,14 @@ private struct SettingsView: View {
                             )
                         )
                         .disabled(app.dnsPreference == nil || app.isUpdatingAdBlocking)
+                    }
+
+                    SettingsSection(title: "Theme") {
+                        ThemeModeSelector(
+                            selectedThemeMode: themeMode,
+                            effectiveDarkMode: effectiveDarkMode,
+                            onThemeModeChange: onThemeModeChange
+                        )
                     }
 
                     SettingsSection(title: "Connection") {
@@ -1269,7 +1478,6 @@ private struct SettingsView: View {
                     }
 
                     SettingsSection(title: "Preferences") {
-                        ToggleRow(icon: "moon", title: "Dark Mode", subtitle: "Toggle dark theme", isOn: $isDarkMode)
                         NavigationRow(
                             icon: "bell",
                             title: "Notifications",
@@ -1301,7 +1509,7 @@ private struct SettingsView: View {
                         }
                     }
 
-                    Button(action: onSignOut) {
+                    Button { showSignOutConfirmation = true } label: {
                         HStack {
                             Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
                             Spacer()
@@ -1313,6 +1521,7 @@ private struct SettingsView: View {
                         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.destructive.opacity(0.45)))
                     }
                     .buttonStyle(.plain)
+                    .rippleEffect(tint: Theme.destructive, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                     VStack(spacing: 4) {
                         Text("LibreGuard v1.0.0")
@@ -1336,6 +1545,16 @@ private struct SettingsView: View {
         }
         .sheet(isPresented: $showDNSSettings) {
             LibreGuardDNSSettingsView(onUpgrade: onUpgrade)
+        }
+        .confirmationDialog(
+            "Sign out of LibreGuard?",
+            isPresented: $showSignOutConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Sign Out", role: .destructive, action: onSignOut)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You will need to sign in again to use LibreGuard.")
         }
         .task {
             await app.refreshDNSPreference(showErrors: false)
@@ -1460,6 +1679,7 @@ private struct LibreGuardDNSSettingsView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(Theme.primary)
+                            .rippleEffect(tint: .white, shape: RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
                     }
 
@@ -1475,6 +1695,7 @@ private struct LibreGuardDNSSettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
+                        .rippleEffect(tint: Theme.primary, shape: Capsule())
                 }
             }
         }
@@ -1583,6 +1804,7 @@ private struct VPNProtocolSelectionView: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
+                        .rippleEffect(tint: Theme.primary, shape: Capsule())
                 }
             }
         }
@@ -1621,6 +1843,7 @@ private struct TwoFactorManagementView: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
+                        .rippleEffect(tint: Theme.primary, shape: Capsule())
                 }
             }
         }
@@ -1681,6 +1904,7 @@ private struct TwoFactorManagementView: View {
                     .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
             }
             .buttonStyle(.plain)
+            .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .disabled(isWorking)
 
             Button(role: .destructive) { confirmDisable = true } label: {
@@ -1689,6 +1913,7 @@ private struct TwoFactorManagementView: View {
                     .padding(15)
                     .background(Theme.destructive.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
             }
+            .rippleEffect(tint: Theme.destructive, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .disabled(isWorking)
         }
     }
@@ -1714,7 +1939,13 @@ private struct TwoFactorManagementView: View {
             CardContainer {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("2. Verify the six-digit code").font(.headline)
-                    FormField(label: "Authentication Code", text: $verificationCode, icon: "number", placeholder: "123456")
+                    FormField(
+                        label: "Authentication Code",
+                        text: $verificationCode,
+                        icon: "number",
+                        placeholder: "123456",
+                        keyboardType: .numberPad
+                    )
                     PrimaryButton(title: isWorking ? "Verifying..." : "Enable 2FA") {
                         Task {
                             isWorking = true
@@ -1744,10 +1975,12 @@ private struct TwoFactorManagementView: View {
                 }
                 HStack {
                     Button("Copy All") { UIPasteboard.general.string = codes.joined(separator: "\n") }
+                        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     Spacer()
                     ShareLink(item: codes.joined(separator: "\n")) {
                         Label("Share", systemImage: "square.and.arrow.up")
                     }
+                    .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Theme.primary)
@@ -1799,6 +2032,7 @@ private struct UpgradeView: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
                 }
+                .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                 HStack(spacing: 12) {
                     LibreGuardLogo(size: 42)
@@ -1875,6 +2109,7 @@ private struct UpgradeView: View {
                                 Task { await app.restoreApplePurchases() }
                             }
                             .font(.subheadline.weight(.semibold))
+                            .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
                             .disabled(app.isPurchasingAppleSubscription || app.isRestoringApplePurchases)
 
                             if let message = app.applePurchaseMessage {
@@ -1938,6 +2173,7 @@ private struct UpgradeView: View {
                         .padding(15)
                         .background(Theme.card, in: RoundedRectangle(cornerRadius: 14))
                         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
+                        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
 
                     MonthlyUsageCard(quota: app.usageQuota, isPro: app.isProUser)
@@ -2014,6 +2250,7 @@ private struct AppleSubscriptionOption: View {
             )
         }
         .buttonStyle(.plain)
+        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .accessibilityLabel("\(product.period == .annual ? "Annual" : "Monthly") subscription, \(product.displayPrice)")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
@@ -2056,6 +2293,7 @@ private struct BottomTabBar: View {
                     .padding(.vertical, 10)
                 }
                 .buttonStyle(.plain)
+                .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
         }
         .padding(.horizontal, 8)
@@ -2085,6 +2323,7 @@ private struct FormField: View {
     @Binding var text: String
     let icon: String
     let placeholder: String
+    var keyboardType: UIKeyboardType = .default
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -2097,11 +2336,13 @@ private struct FormField: View {
                     .frame(width: 22)
                 TextField(placeholder, text: $text)
                     .textInputAutocapitalization(.never)
+                    .keyboardType(keyboardType)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 14)
             .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
+            .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
     }
 }
@@ -2140,6 +2381,7 @@ private struct PasswordField: View {
             .padding(.vertical, 14)
             .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
+            .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             if let hint {
                 Text(hint)
@@ -2167,6 +2409,7 @@ private struct PrimaryButton: View {
                 .shadow(color: Theme.primary.opacity(0.22), radius: 12, y: 7)
         }
         .buttonStyle(ScaleButtonStyle())
+        .rippleEffect(tint: .white, shape: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .modifier(AccessibilityIdentifierModifier(identifier: accessibilityIdentifier))
     }
 }
@@ -2279,6 +2522,7 @@ private struct QuickConnectCard: View {
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
         }
         .buttonStyle(ScaleButtonStyle())
+        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -2288,14 +2532,16 @@ private struct SelectedServerCard: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            FlagBadge(flag: server.flagEmoji)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(server.serverName)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                Text("Selected server")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                FlagBadge(flag: server.flagEmoji)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(server.serverName)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Text(server.country)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
             Button(action: onClearSelection) {
@@ -2310,6 +2556,7 @@ private struct SelectedServerCard: View {
                 .accessibilityLabel("Clear selected server")
             }
             .buttonStyle(.plain)
+            .rippleEffect(tint: Theme.primary, shape: Circle())
         }
         .padding(14)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 14))
@@ -2323,9 +2570,8 @@ private struct FlagBadge: View {
 
     var body: some View {
         Text(flag)
-            .font(.system(size: size * 0.52))
+            .font(.system(size: size * 0.68))
             .frame(width: size, height: size)
-            .background(Theme.primary.opacity(0.12), in: Circle())
             .accessibilityHidden(true)
     }
 }
@@ -2376,6 +2622,7 @@ private struct MonthlyUsageCard: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(quota?.usageTint(isPro: isPro) ?? Theme.primary)
+                    .rippleEffect(tint: .white, shape: RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .accessibilityIdentifier("monthly-usage-upgrade")
                 }
             }
@@ -2517,52 +2764,83 @@ private struct ServerRow: View {
     let onFavorite: () -> Void
 
     var body: some View {
-        Button(action: onSelect) {
-            VStack(spacing: 10) {
-                HStack(spacing: 12) {
-                    FlagBadge(flag: server.flagEmoji)
+        ZStack(alignment: .trailing) {
+            Button(action: onSelect) {
+                VStack(spacing: 10) {
+                    HStack(spacing: 12) {
+                        FlagBadge(flag: server.flagEmoji)
 
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(server.city ?? server.country)
-                            .font(.subheadline.weight(.semibold))
-                        HStack(spacing: 5) {
-                            Text(server.pricingTierLabel)
-                            Text("-")
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 7) {
+                                Text(server.city ?? server.country)
+                                    .font(.subheadline.weight(.semibold))
+
+                                if server.requiresProSubscription {
+                                    Text("PRO")
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 3)
+                                        .background(Theme.primary, in: Capsule())
+                                        .accessibilityLabel("Pro server")
+                                }
+                            }
                             Text(server.serverName)
-                                .fontDesign(.monospaced)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
                         }
-                        .font(.caption)
+                        .lineLimit(1)
+
+                        Spacer()
+
+                        VStack(alignment: .trailing, spacing: 4) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "wifi")
+                                    .foregroundStyle(latencyColor)
+                                Text(latency.map { "\($0)ms" } ?? "—")
+                            }
+                            HStack(spacing: 5) {
+                                Image(systemName: "internaldrive")
+                                    .foregroundStyle(loadColor)
+                                Text(loadLabel)
+                            }
+                        }
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
+
+                        // Reserve space for the independent favourite button.
+                        Color.clear
+                            .frame(width: 30)
+
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(isSelected ? Theme.primary : .secondary)
                     }
-                    .lineLimit(1)
 
-                    Spacer()
-
-                    VStack(alignment: .trailing, spacing: 4) {
-                        Label(latency.map { "\($0)ms" } ?? "—", systemImage: "wifi")
-                        Label(loadLabel, systemImage: "internaldrive")
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-
-                    Button(action: onFavorite) {
-                        Image(systemName: isFavorite ? "star.fill" : "star")
-                            .foregroundStyle(isFavorite ? Theme.primary : .secondary)
-                    }
-                    .buttonStyle(.plain)
-
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(isSelected ? Theme.primary : .secondary)
+                    ProgressBar(progress: loadProgress, color: loadColor, height: 5)
                 }
-
-                ProgressBar(progress: loadProgress, color: loadColor, height: 5)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(13)
-            .background(isSelected ? Theme.primary.opacity(0.06) : Theme.card, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(isSelected ? Theme.primary : Theme.border, lineWidth: isSelected ? 1.4 : 1))
+            .buttonStyle(ScaleButtonStyle())
+            .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .frame(maxWidth: .infinity)
+
+            Button(action: onFavorite) {
+                Image(systemName: isFavorite ? "star.fill" : "star")
+                    .foregroundStyle(isFavorite ? Theme.primary : .secondary)
+                    .contentTransition(.symbolEffect(.replace))
+                    .symbolEffect(.bounce, value: isFavorite)
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .rippleEffect(tint: Theme.primary, shape: Circle())
+            .accessibilityLabel(isFavorite ? "Remove \(server.serverName) from favourites" : "Add \(server.serverName) to favourites")
+            .accessibilityIdentifier("favorite-server-\(server.id)")
         }
-        .buttonStyle(ScaleButtonStyle())
+        .padding(13)
+        .background(isSelected ? Theme.primary.opacity(0.06) : Theme.card, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(isSelected ? Theme.primary : Theme.border, lineWidth: isSelected ? 1.4 : 1))
     }
 
     private var loadLabel: String {
@@ -2580,6 +2858,13 @@ private struct ServerRow: View {
         if load < 40 { return Theme.statusConnected }
         if load < 70 { return Theme.statusConnecting }
         return Theme.destructive
+    }
+
+    private var latencyColor: Color {
+        guard let latency else { return Theme.statusDisconnected }
+        if latency < 100 { return Theme.statusConnected }
+        if latency <= 200 { return Theme.primary }
+        return Theme.statusDisconnected
     }
 }
 
@@ -2611,6 +2896,7 @@ private struct ProtocolButton: View {
             }
         }
         .buttonStyle(.plain)
+        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -2632,6 +2918,7 @@ private struct SummaryCard: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .rippleEffect(tint: color, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -2653,6 +2940,7 @@ private struct SegmentedPicker: View {
                         .background(selection == option ? Theme.primary : Color.clear, in: RoundedRectangle(cornerRadius: 10))
                 }
                 .buttonStyle(.plain)
+                .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
         }
         .padding(5)
@@ -2706,6 +2994,73 @@ private struct SettingsSection<Content: View>: View {
     }
 }
 
+private struct ThemeModeSelector: View {
+    let selectedThemeMode: ThemeMode
+    let effectiveDarkMode: Bool
+    let onThemeModeChange: (ThemeMode) -> Void
+
+    var body: some View {
+        CardContainer {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 12) {
+                    IconBox(systemName: "circle.lefthalf.filled")
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Theme")
+                            .font(.subheadline.weight(.semibold))
+                        Text(selectedThemeMode.subtitle(effectiveDarkMode: effectiveDarkMode))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                HStack(spacing: 6) {
+                    ForEach(ThemeMode.allCases) { mode in
+                        let isSelected = selectedThemeMode == mode
+
+                        Button {
+                            onThemeModeChange(mode)
+                        } label: {
+                            Label {
+                                Text(mode.buttonTitle(
+                                    effectiveDarkMode: effectiveDarkMode,
+                                    isSelected: isSelected
+                                ))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                                .allowsTightening(true)
+                            } icon: {
+                                Image(systemName: mode.icon)
+                            }
+                            .font(.subheadline.weight(.medium))
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 9)
+                            .foregroundStyle(isSelected ? Theme.primary : Theme.muted)
+                            .background(
+                                isSelected ? Theme.primary.opacity(0.12) : Theme.background,
+                                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(
+                                        isSelected ? Theme.primary.opacity(0.35) : Theme.border,
+                                        lineWidth: 1
+                                    )
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .accessibilityIdentifier("theme-\(mode.rawValue)-button")
+                        .accessibilityAddTraits(isSelected ? .isSelected : [])
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("theme-section")
+    }
+}
+
 private struct ToggleRow: View {
     let icon: String
     let title: String
@@ -2727,6 +3082,7 @@ private struct ToggleRow: View {
                 Toggle("", isOn: $isOn)
                     .labelsHidden()
                     .tint(Theme.primary)
+                    .rippleEffect(tint: Theme.primary, shape: Capsule())
             }
         }
     }
@@ -2759,6 +3115,7 @@ private struct NavigationRow: View {
             }
         }
         .buttonStyle(.plain)
+        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -2794,6 +3151,7 @@ private struct UpgradeCard: View {
                     .overlay(RoundedRectangle(cornerRadius: 16).stroke(Theme.primary, lineWidth: 1.5))
                 }
                 .buttonStyle(.plain)
+                .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 16, style: .continuous))
             } else {
                 CardContainer {
                     VStack(alignment: .leading, spacing: 14) {
@@ -2802,7 +3160,7 @@ private struct UpgradeCard: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("You are a Pro user")
                                     .font(.headline)
-                                Text("Premium servers, OpenVPN, and unlimited monthly data are enabled on this account.")
+                                Text("Premium servers, OpenVPN, DNS ad blocking, and unlimited monthly data are enabled on this account.")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                             }

@@ -151,6 +151,7 @@ struct ConnectionHeroView: View {
                     .shadow(color: Theme.primary.opacity(0.22), radius: 12, y: 7)
             }
             .buttonStyle(ConnectionActionButtonStyle())
+            .rippleEffect(tint: .white, shape: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .accessibilityIdentifier("vpn-primary-action")
         }
         .padding(.top, isCompact ? 0 : 8)
@@ -243,6 +244,7 @@ struct ConnectionHeroView: View {
                     )
             }
             .buttonStyle(ConnectionShieldButtonStyle())
+            .rippleEffect(tint: presentation.color, shape: Circle())
             .accessibilityHidden(true)
         }
         .scaleEffect(baseShieldScale * activePulseScale)

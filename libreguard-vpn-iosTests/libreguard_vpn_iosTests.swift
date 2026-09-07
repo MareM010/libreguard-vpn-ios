@@ -1,10 +1,136 @@
 import Foundation
 import SwiftData
+import SwiftUI
 import Testing
 @testable import libreguard_vpn_ios
 
 @MainActor
 struct libreguard_vpn_iosTests {
+    @Test func themeModeDefaultsToSystemForMissingOrInvalidStorage() {
+        #expect(ThemeMode.fromStoredValue(nil) == .system)
+        #expect(ThemeMode.fromStoredValue("unsupported") == .system)
+        #expect(ThemeMode.fromStoredValue(ThemeMode.dark.rawValue) == .dark)
+    }
+
+    @Test func themeModeMapsToTheExpectedColorSchemeOverride() {
+        #expect(ThemeMode.system.colorSchemeOverride == nil)
+        #expect(ThemeMode.light.colorSchemeOverride == .light)
+        #expect(ThemeMode.dark.colorSchemeOverride == .dark)
+    }
+
+    @Test func favoriteServerStorePersistsNewestFirstPerAccount() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let store = UserDefaultsFavoriteServerStore(defaults: defaults)
+
+        store.saveFavoriteServerIDs([42, 17], for: "user-a")
+        store.saveFavoriteServerIDs([99], for: "user-b")
+
+        let restoredStore = UserDefaultsFavoriteServerStore(defaults: defaults)
+        #expect(restoredStore.favoriteServerIDs(for: "user-a") == [42, 17])
+        #expect(restoredStore.favoriteServerIDs(for: "user-b") == [99])
+
+        restoredStore.saveFavoriteServerIDs([], for: "user-a")
+        #expect(restoredStore.favoriteServerIDs(for: "user-a").isEmpty)
+        #expect(restoredStore.favoriteServerIDs(for: "user-b") == [99])
+    }
+
+    @Test func appModelLoadsAndPersistsFavoritesForTheActiveAccount() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let store = UserDefaultsFavoriteServerStore(defaults: defaults)
+        let app = AppModel(favoriteServerStore: store, defaults: defaults)
+        let firstAccount = AuthSession(
+            accessToken: "access-a",
+            refreshToken: "refresh-a",
+            email: "a@example.com",
+            userId: "user-a",
+            deviceId: "device"
+        )
+        let secondAccount = AuthSession(
+            accessToken: "access-b",
+            refreshToken: "refresh-b",
+            email: "b@example.com",
+            userId: "user-b",
+            deviceId: "device"
+        )
+
+        app.session = firstAccount
+        app.toggleFavoriteServer(17)
+        app.toggleFavoriteServer(42)
+        #expect(app.favoriteServerIDs == [42, 17])
+        #expect(app.selectedServerID == nil)
+
+        app.session = secondAccount
+        #expect(app.favoriteServerIDs.isEmpty)
+        app.toggleFavoriteServer(99)
+
+        app.session = firstAccount
+        #expect(app.favoriteServerIDs == [42, 17])
+        app.session = nil
+        #expect(app.favoriteServerIDs.isEmpty)
+        #expect(store.favoriteServerIDs(for: "user-a") == [42, 17])
+        #expect(store.favoriteServerIDs(for: "user-b") == [99])
+    }
+
+    @Test func themeModeUsesAndroidCopyForSubtitlesAndButtonTitles() {
+        #expect(
+            ThemeMode.system.subtitle(effectiveDarkMode: true) ==
+                "Following system theme • Currently Dark"
+        )
+        #expect(
+            ThemeMode.system.subtitle(effectiveDarkMode: false) ==
+                "Following system theme • Currently Light"
+        )
+        #expect(ThemeMode.light.subtitle(effectiveDarkMode: true) == "Manual theme override • Always Light")
+        #expect(ThemeMode.dark.subtitle(effectiveDarkMode: false) == "Manual theme override • Always Dark")
+
+        #expect(ThemeMode.system.buttonTitle(effectiveDarkMode: true, isSelected: true) == "System • Dark")
+        #expect(ThemeMode.system.buttonTitle(effectiveDarkMode: false, isSelected: true) == "System • Light")
+        #expect(ThemeMode.system.buttonTitle(effectiveDarkMode: true, isSelected: false) == "System")
+        #expect(ThemeMode.light.buttonTitle(effectiveDarkMode: true, isSelected: false) == "Light")
+        #expect(ThemeMode.dark.buttonTitle(effectiveDarkMode: false, isSelected: false) == "Dark")
+    }
+
+    @Test func registrationRequestSendsNewsletterConsentValue() async throws {
+        try await withSerializedRequests {
+            var receivedValues: [Bool] = []
+            let client = makeClient { request in
+                #expect(request.url?.path == "/api/register")
+                let json = try #require(JSONSerialization.jsonObject(with: requestBody(from: request)) as? [String: Any])
+                receivedValues.append(try #require(json["newsletterConsent"] as? Bool))
+                return try makeResponse(request, status: 200, json: [
+                    "message": "Check your inbox.",
+                    "userId": "pending-user",
+                    "email": "person@example.com",
+                    "requiresEmailConfirmation": true
+                ])
+            }
+
+            _ = try await client.register(email: "person@example.com", password: "Password1!", newsletterConsent: true)
+            _ = try await client.register(email: "person@example.com", password: "Password1!", newsletterConsent: false)
+
+            #expect(receivedValues == [true, false])
+        }
+    }
+
+    @Test func googleLoginOmitsConsentForLoginAndIncludesItForRegistration() async throws {
+        try await withSerializedRequests {
+            var receivedValues: [Bool?] = []
+            let client = makeClient { request in
+                #expect(request.url?.path == "/api/login/google")
+                let json = try #require(JSONSerialization.jsonObject(with: requestBody(from: request)) as? [String: Any])
+                receivedValues.append(json["newsletterConsent"] as? Bool)
+                return try makeResponse(request, status: 200, json: [:])
+            }
+
+            _ = try await client.loginWithGoogle(idToken: "login-token")
+            _ = try await client.loginWithGoogle(idToken: "registration-token", newsletterConsent: true)
+
+            #expect(receivedValues.count == 2)
+            #expect(receivedValues[0] == nil)
+            #expect(receivedValues[1] == true)
+        }
+    }
+
     @Test func connectionEligibilityUsesReadOnlyBackendPreflight() async throws {
         try await withSerializedRequests {
             let session = AuthSession(
