@@ -57,6 +57,7 @@ final class PersonalVPNManager: VPNManaging {
     private let api: BackendServicing
     private let configurationResolver: VPNConfigurationResolving
     private let translator: VPNConfigurationTranslator
+    private let gatewayCertificateTypeResolver: IKEv2GatewayCertificateTypeResolving
     private let manager: NEVPNManager
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "libreguard-vpn-ios",
@@ -79,11 +80,14 @@ final class PersonalVPNManager: VPNManaging {
         api: BackendServicing,
         resolver: VPNConfigurationResolving? = nil,
         translator: VPNConfigurationTranslator? = nil,
+        gatewayCertificateTypeResolver: IKEv2GatewayCertificateTypeResolving? = nil,
         manager: NEVPNManager = .shared()
     ) {
         self.api = api
         self.configurationResolver = resolver ?? VPNConfigurationResolver(api: api)
         self.translator = translator ?? VPNConfigurationTranslator()
+        self.gatewayCertificateTypeResolver = gatewayCertificateTypeResolver
+            ?? HTTPSIKEv2GatewayCertificateTypeResolver()
         self.manager = manager
         observeStatusChanges()
     }
@@ -132,7 +136,18 @@ final class PersonalVPNManager: VPNManaging {
             let response = try await configurationResolver.resolve(serverId: server.id, protocol: protocolName)
             try Task.checkCancellation()
             logger.debug("Backend VPN configuration received for server \(server.id, privacy: .public)")
-            let vpnProtocol = try translator.makeProtocol(server: server, response: response, policy: policy)
+            logger.debug("Resolving IKEv2 gateway certificate type from the server health endpoint")
+            let gatewayCertificateKeyType = await gatewayCertificateTypeResolver.resolve(
+                host: server.latencyHost,
+                port: server.latencyPingPort
+            )
+            try Task.checkCancellation()
+            let vpnProtocol = try translator.makeProtocol(
+                server: server,
+                response: response,
+                policy: policy,
+                gatewayCertificateKeyType: gatewayCertificateKeyType
+            )
             try Task.checkCancellation()
             let serverAddress = String(describing: vpnProtocol.serverAddress)
             let remoteIdentifier = String(describing: vpnProtocol.remoteIdentifier)

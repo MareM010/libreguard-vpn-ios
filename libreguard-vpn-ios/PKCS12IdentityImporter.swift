@@ -42,7 +42,7 @@ struct SecurityPKCS12IdentityImporter: PKCS12IdentityImporting {
             throw VPNConfigurationError.invalidPKCS12Payload
         }
 
-        let keyType = try certificateKeyType(certificate)
+        let keyType = try IKEv2CertificateKeyTypeResolver.resolve(certificate)
 
         return ImportedPKCS12Identity(
             data: data,
@@ -51,7 +51,10 @@ struct SecurityPKCS12IdentityImporter: PKCS12IdentityImporting {
         )
     }
 
-    private func certificateKeyType(_ certificate: SecCertificate) throws -> IKEv2ClientCertificateKeyType {
+}
+
+enum IKEv2CertificateKeyTypeResolver {
+    static func resolve(_ certificate: SecCertificate) throws -> IKEv2ClientCertificateKeyType {
         guard let publicKey = SecCertificateCopyKey(certificate),
               let attributes = SecKeyCopyAttributes(publicKey) as? [String: Any],
               let rawKeyType = attributes[kSecAttrKeyType as String] as? String else {

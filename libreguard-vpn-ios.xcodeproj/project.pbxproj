@@ -207,6 +207,7 @@
 			children = (
 				A10000032FE7000000000005 /* NetworkExtension.framework */,
 				A10000032FE7000000000007 /* Security.framework */,
+				F10000022FE7000000000001 /* openssl.framework */,
 			);
 			name = "Recovered References";
 			sourceTree = "<group>";
@@ -830,14 +831,14 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "OpenVPNPacketTunnel-Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "net.libreguard.libreguard-vpn-ios.openvpn-tunnel";
-				PRODUCT_NAME = "$(TARGET_NAME)";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "net.libreguard.libreguard-vpn-ios.openvpn-tunnel";
+				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG OPENVPN_PACKET_TUNNEL $(inherited)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -858,14 +859,14 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "OpenVPNPacketTunnel-Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "net.libreguard.libreguard-vpn-ios.openvpn-tunnel";
-				PRODUCT_NAME = "$(TARGET_NAME)";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "net.libreguard.libreguard-vpn-ios.openvpn-tunnel";
+				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "OPENVPN_PACKET_TUNNEL $(inherited)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
