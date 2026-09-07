@@ -231,52 +231,6 @@ open class OpenVPNTunnelProvider: NEPacketTunnelProvider {
         session.delegate = self
         self.session = session
 
-        // Set up TCP ping handler using createTCPConnectionThroughTunnel
-        session.tcpPingHandler = { [weak self] completion in
-            guard let self = self,
-                  let remoteAddress = (self.protocolConfiguration as? NETunnelProviderProtocol)?.serverAddress else {
-                completion(false)
-                return
-            }
-
-            let endpoint = NWHostEndpoint(hostname: remoteAddress, port: "443")
-            let connection = self.createTCPConnectionThroughTunnel(
-                to: endpoint,
-                enableTLS: false,
-                tlsParameters: nil,
-                delegate: nil
-            )
-
-            var observation: NSKeyValueObservation?
-            var completed = false
-
-            let complete = { (success: Bool) in
-                guard !completed else { return }
-                completed = true
-                observation?.invalidate()
-                connection.cancel()
-                completion(success)
-            }
-
-            observation = connection.observe(\.state, options: [.new]) { conn, _ in
-                DispatchQueue.main.async {
-                    switch conn.state {
-                    case .connected:
-                        complete(true)
-                    case .disconnected, .cancelled:
-                        complete(false)
-                    default:
-                        break
-                    }
-                }
-            }
-
-            // Timeout after 3 seconds
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                complete(false)
-            }
-        }
-
         logCurrentSSID()
 
         pendingStartHandler = completionHandler
@@ -768,10 +722,11 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
             }
         }
 
-        // LibreGuard intentionally fails closed when the private tunnel resolver
-        // is unavailable instead of falling back to the device's public resolver.
+        // A tunnel can be up while its pushed resolver is temporarily
+        // unreachable. Permit the system resolver to take over after a failed
+        // resolution so DNS-dependent apps do not lose all connectivity.
         if #available(iOS 26.0, macOS 26.0, macCatalyst 26.0, *) {
-            dnsSettings?.allowFailover = false
+            dnsSettings?.allowFailover = true
         }
         
         // add direct routes to DNS servers

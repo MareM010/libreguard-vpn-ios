@@ -41,6 +41,12 @@ protocol BackendServicing: AnyObject {
 
 @MainActor
 final class APIClient: BackendServicing {
+    private static let transportDiagnosticsKey = "LibreGuardLastAPITransportError"
+    private static let transportDiagnosticsTimestampKey = "LibreGuardLastAPITransportErrorTimestamp"
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "net.libreguard.libreguard-vpn-ios",
+        category: "API"
+    )
     private let baseURL: URL
     private let urlSession: URLSession
     private let sessionStore: SessionStoring
@@ -414,6 +420,7 @@ final class APIClient: BackendServicing {
                 throw APIError(message: "The server returned an invalid response.")
             }
             if (200..<300).contains(http.statusCode) {
+                Self.clearTransportDiagnostic()
                 return try Self.decoder.decode(Response.self, from: data)
             }
 
@@ -428,8 +435,28 @@ final class APIClient: BackendServicing {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            let diagnostic = Self.transportDiagnostic(for: error)
+            Self.saveTransportDiagnostic(diagnostic)
+            Self.logger.error("API transport request failed: \(diagnostic, privacy: .public)")
             throw APIError(message: "Unable to reach LibreGuard. Check your connection and try again.")
         }
+    }
+
+    private static func transportDiagnostic(for error: Error) -> String {
+        let nsError = error as NSError
+        return "\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"
+    }
+
+    private static func saveTransportDiagnostic(_ diagnostic: String) {
+        guard let defaults = UserDefaults(suiteName: VPNSharedConstants.appGroupIdentifier) else { return }
+        defaults.set(diagnostic, forKey: transportDiagnosticsKey)
+        defaults.set(Date().timeIntervalSince1970, forKey: transportDiagnosticsTimestampKey)
+    }
+
+    private static func clearTransportDiagnostic() {
+        guard let defaults = UserDefaults(suiteName: VPNSharedConstants.appGroupIdentifier) else { return }
+        defaults.removeObject(forKey: transportDiagnosticsKey)
+        defaults.removeObject(forKey: transportDiagnosticsTimestampKey)
     }
 
     private func decodeError(data: Data, response: HTTPURLResponse) -> APIError {

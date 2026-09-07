@@ -6,6 +6,7 @@ import TunnelKitCore
 import TunnelKitOpenVPNAppExtension
 
 final class PacketTunnelProvider: OpenVPNTunnelProvider {
+    private static let privateDNSAddress = "10.254.0.53"
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? OpenVPNConstants.tunnelBundleIdentifier,
         category: "PacketTunnel"
@@ -18,6 +19,10 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
     )
     private var activityUpdateTask: Task<Void, Never>?
     private var trafficAccumulator = VPNTrafficAccumulator()
+    private var connectivityProbeConnections: [NWTCPConnection] = []
+    private var connectivityProbeUDPSessions: [NWUDPSession] = []
+    private var connectivityProbeObservations: [NSKeyValueObservation] = []
+    private static let connectivityProbeResultsKey = "OpenVPNConnectivityProbeResults"
 
     override init() {
         super.init()
@@ -89,6 +94,9 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
                 OpenVPNExtensionLifecycleJournal.append("start-completed")
                 self.logger.info("OpenVPN tunnel connected")
                 self.beginActivityUpdates()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    self?.runConnectivityProbes()
+                }
             }
             completionHandler(error)
         }
@@ -100,6 +108,12 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
         mutateDiagnostics { $0.state = .stopping }
         activityUpdateTask?.cancel()
         activityUpdateTask = nil
+        connectivityProbeConnections.forEach { $0.cancel() }
+        connectivityProbeConnections.removeAll()
+        connectivityProbeUDPSessions.forEach { $0.cancel() }
+        connectivityProbeUDPSessions.removeAll()
+        connectivityProbeObservations.forEach { $0.invalidate() }
+        connectivityProbeObservations.removeAll()
         publishFinalState()
         super.stopTunnel(with: reason) { [weak self] in
             self?.persistTunnelKitLog()
@@ -165,6 +179,250 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
                 logger.error("Could not save TunnelKit diagnostic log: \(error.localizedDescription, privacy: .public)")
             }
         }
+    }
+
+    /// A one-time diagnostic only. These probes travel through the established
+    /// packet tunnel and distinguish an Internet forwarding failure from a DNS
+    /// resolution failure without affecting the VPN session.
+    private func runConnectivityProbes() {
+        runTCPConnectProbe(label: "public IPv4 TCP", hostname: "1.1.1.1")
+        runTCPConnectProbe(label: "LibreGuard API TCP", hostname: "management.libreguard.net")
+        runHTTPSProbe()
+        runPrivateDNSProbe()
+    }
+
+    private func runTCPConnectProbe(label: String, hostname: String) {
+        saveConnectivityProbeResult(label: label, result: "started")
+        let endpoint = NWHostEndpoint(hostname: hostname, port: "443")
+        let connection = createTCPConnectionThroughTunnel(
+            to: endpoint,
+            enableTLS: false,
+            tlsParameters: nil,
+            delegate: nil
+        )
+        connectivityProbeConnections.append(connection)
+
+        var observation: NSKeyValueObservation?
+        var completed = false
+        let complete: (String) -> Void = { [weak self] result in
+            guard !completed else { return }
+            completed = true
+            observation?.invalidate()
+            connection.cancel()
+            self?.connectivityProbeConnections.removeAll { $0 === connection }
+            if let observation {
+                self?.connectivityProbeObservations.removeAll { $0 === observation }
+            }
+            OpenVPNExtensionLifecycleJournal.append("connectivity-probe \(label)=\(result)")
+            self?.saveConnectivityProbeResult(label: label, result: result)
+            self?.logger.info("Tunnel connectivity probe (\(label, privacy: .public)): \(result, privacy: .public)")
+        }
+
+        observation = connection.observe(\.state, options: [.new]) { connection, _ in
+            DispatchQueue.main.async {
+                switch connection.state {
+                case .connected:
+                    complete("connected")
+                case .disconnected:
+                    complete("disconnected")
+                case .cancelled:
+                    complete("cancelled")
+                default:
+                    break
+                }
+            }
+        }
+        if let observation {
+            connectivityProbeObservations.append(observation)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            complete("timed out")
+        }
+    }
+
+    /// Complete a TLS handshake, send an HTTP request, and require response
+    /// bytes. A bare TCP connect is insufficient because it succeeds before
+    /// the packet sizes used by TLS and HTTP are exercised.
+    private func runHTTPSProbe() {
+        let label = "LibreGuard HTTPS payload"
+        saveConnectivityProbeResult(label: label, result: "started")
+        let connection = createTCPConnectionThroughTunnel(
+            to: NWHostEndpoint(hostname: "management.libreguard.net", port: "443"),
+            enableTLS: true,
+            tlsParameters: nil,
+            delegate: nil
+        )
+        connectivityProbeConnections.append(connection)
+
+        var observation: NSKeyValueObservation?
+        var completed = false
+        var requestStarted = false
+        let complete: (String) -> Void = { [weak self] result in
+            guard !completed else { return }
+            completed = true
+            observation?.invalidate()
+            connection.cancel()
+            self?.connectivityProbeConnections.removeAll { $0 === connection }
+            if let observation {
+                self?.connectivityProbeObservations.removeAll { $0 === observation }
+            }
+            self?.saveConnectivityProbeResult(label: label, result: result)
+            self?.logger.info("Tunnel connectivity probe (\(label, privacy: .public)): \(result, privacy: .public)")
+        }
+
+        observation = connection.observe(\.state, options: [.new]) { connection, _ in
+            DispatchQueue.main.async {
+                switch connection.state {
+                case .connected where !requestStarted:
+                    requestStarted = true
+                    let request = Data(
+                        "HEAD / HTTP/1.1\r\nHost: management.libreguard.net\r\nConnection: close\r\n\r\n".utf8
+                    )
+                    connection.write(request) { error in
+                        DispatchQueue.main.async {
+                            if let error {
+                                complete("HTTP write failed: \(Self.shortDescription(error))")
+                                return
+                            }
+                            connection.readMinimumLength(1, maximumLength: 4_096) { data, error in
+                                DispatchQueue.main.async {
+                                    if let error {
+                                        complete("HTTP read failed: \(Self.shortDescription(error))")
+                                    } else if let data, !data.isEmpty {
+                                        let firstLine = String(decoding: data, as: UTF8.self)
+                                            .components(separatedBy: "\r\n")
+                                            .first ?? "response"
+                                        complete("received \(data.count) bytes (\(firstLine))")
+                                    } else {
+                                        complete("HTTP connection closed without response")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                case .disconnected:
+                    complete("TLS disconnected: \(connection.error.map(Self.shortDescription) ?? "no error")")
+                case .cancelled:
+                    complete("TLS cancelled: \(connection.error.map(Self.shortDescription) ?? "no error")")
+                default:
+                    break
+                }
+            }
+        }
+        if let observation {
+            connectivityProbeObservations.append(observation)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
+            complete(requestStarted ? "HTTP response timed out" : "TLS handshake timed out")
+        }
+    }
+
+    /// Query the resolver configured by LibreGuard over UDP through the tunnel.
+    /// This detects a resolver that is routable but never answers DNS queries.
+    private func runPrivateDNSProbe() {
+        let label = "private DNS UDP"
+        let queryID: UInt16 = 0x4c47
+        saveConnectivityProbeResult(label: label, result: "started")
+        let session = createUDPSessionThroughTunnel(
+            to: NWHostEndpoint(hostname: Self.privateDNSAddress, port: "53"),
+            from: nil
+        )
+        connectivityProbeUDPSessions.append(session)
+
+        var observation: NSKeyValueObservation?
+        var completed = false
+        var querySent = false
+        let complete: (String) -> Void = { [weak self] result in
+            guard !completed else { return }
+            completed = true
+            observation?.invalidate()
+            session.cancel()
+            self?.connectivityProbeUDPSessions.removeAll { $0 === session }
+            if let observation {
+                self?.connectivityProbeObservations.removeAll { $0 === observation }
+            }
+            self?.saveConnectivityProbeResult(label: label, result: result)
+            self?.logger.info("Tunnel connectivity probe (\(label, privacy: .public)): \(result, privacy: .public)")
+        }
+
+        observation = session.observe(\NWUDPSession.state, options: [.new]) { session, _ in
+            DispatchQueue.main.async {
+                switch session.state {
+                case .ready where !querySent:
+                    querySent = true
+                    session.setReadHandler({ datagrams, error in
+                        DispatchQueue.main.async {
+                            if let error {
+                                complete("read failed: \(Self.shortDescription(error))")
+                            } else if let response = datagrams?.first, response.count >= 12 {
+                                let receivedID = UInt16(response[0]) << 8 | UInt16(response[1])
+                                let responseCode = response[3] & 0x0f
+                                let answers = UInt16(response[6]) << 8 | UInt16(response[7])
+                                guard receivedID == queryID else {
+                                    complete("response ID mismatch")
+                                    return
+                                }
+                                complete("response rcode=\(responseCode) answers=\(answers)")
+                            } else {
+                                complete("empty or malformed response")
+                            }
+                        }
+                    }, maxDatagrams: 1)
+                    session.writeDatagram(Self.dnsAQuery(hostname: "management.libreguard.net", id: queryID)) { error in
+                        if let error {
+                            DispatchQueue.main.async {
+                                complete("write failed: \(Self.shortDescription(error))")
+                            }
+                        }
+                    }
+                case .failed:
+                    complete("session failed")
+                case .cancelled:
+                    complete("session cancelled")
+                default:
+                    break
+                }
+            }
+        }
+        if let observation {
+            connectivityProbeObservations.append(observation)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            complete(querySent ? "response timed out" : "session setup timed out")
+        }
+    }
+
+    private static func dnsAQuery(hostname: String, id: UInt16) -> Data {
+        var query = Data([
+            UInt8(id >> 8), UInt8(id & 0xff),
+            0x01, 0x00,
+            0x00, 0x01,
+            0x00, 0x00,
+            0x00, 0x00,
+            0x00, 0x00
+        ])
+        for label in hostname.split(separator: ".") {
+            let bytes = Array(label.utf8)
+            query.append(UInt8(bytes.count))
+            query.append(contentsOf: bytes)
+        }
+        query.append(UInt8(0))
+        query.append(contentsOf: [0x00, 0x01, 0x00, 0x01])
+        return query
+    }
+
+    private static func shortDescription(_ error: Error) -> String {
+        let nsError = error as NSError
+        return "\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"
+    }
+
+    private func saveConnectivityProbeResult(label: String, result: String) {
+        guard let defaults = UserDefaults(suiteName: VPNSharedConstants.appGroupIdentifier) else {
+            return
+        }
+        var results = defaults.dictionary(forKey: Self.connectivityProbeResultsKey) as? [String: String] ?? [:]
+        results[label] = result
+        defaults.set(results, forKey: Self.connectivityProbeResultsKey)
     }
 
     private func beginActivityUpdates() {

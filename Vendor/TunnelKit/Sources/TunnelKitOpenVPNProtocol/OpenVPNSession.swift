@@ -108,18 +108,6 @@ public class OpenVPNSession: Session {
     /// An optional `OpenVPNSessionDelegate` for receiving session events.
     public weak var delegate: OpenVPNSessionDelegate?
 
-    /// Handler for sending TCP pings through the tunnel.
-    /// Calls the completion handler with true if the ping was successfully sent.
-    public var tcpPingHandler: ((@escaping (Bool) -> Void) -> Void) = { completion in
-        completion(false)
-    }
-
-    /// Maximum consecutive TCP ping failures before terminating tunnel
-    private let maxTcpPingFailures = 5
-
-    /// Counter for consecutive TCP ping failures
-    private var tcpPingFailureCount = 0
-
     // MARK: State
 
     private let queue: DispatchQueue
@@ -542,29 +530,15 @@ public class OpenVPNSession: Session {
         guard currentKey?.controlState == .connected else {
             return
         }
-        
-        // Use TCP ping handler
-        tcpPingHandler { [weak self] success in
-            guard let self = self else {
-                return
-            }
 
-            if success {
-                tcpPingFailureCount = 0
-                log.debug("TCP ping sent successfully")
-            } else {
-                tcpPingFailureCount += 1
-                log.warning("TCP ping failed (\(self.tcpPingFailureCount)/\(self.maxTcpPingFailures))")
-
-                if tcpPingFailureCount >= maxTcpPingFailures {
-                    log.error("Max TCP ping failures, terminating tunnel")
-                    deferStop(.shutdown, OpenVPNError.connectivityCheckFailed)
-                    return
-                }
-            }
-
-            self.scheduleNextPing()
-        }
+        // OpenVPN keepalives are authenticated packets on the VPN data
+        // channel. A TCP connect to the VPN endpoint is not equivalent: this
+        // server listens for OpenVPN on UDP/1194 and need not expose TCP/443.
+        // Treating that unrelated port as a health check shut down otherwise
+        // healthy UDP tunnels after five attempts.
+        sendDataPackets([OpenVPN.DataPacket.pingString])
+        log.debug("Data: Sent keep-alive ping")
+        scheduleNextPing()
     }
     
     private func scheduleNextPing() {

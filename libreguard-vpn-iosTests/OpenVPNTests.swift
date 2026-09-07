@@ -5,7 +5,7 @@ import Testing
 
 @MainActor
 struct OpenVPNTests {
-    @Test func killSwitchPolicyAppliesStrictRoutingToTunnelProtocols() {
+    @Test func killSwitchPolicyUsesIncludeAllNetworksForTunnelProtocols() {
         let tunnelProtocol = NETunnelProviderProtocol()
         VPNConnectionPolicy(killSwitchEnabled: true, onDemandEnabled: true).apply(to: tunnelProtocol)
 
@@ -14,11 +14,12 @@ struct OpenVPNTests {
         #expect(tunnelProtocol.excludeAPNs == false)
         #expect(tunnelProtocol.excludeCellularServices == false)
         #expect(tunnelProtocol.excludeDeviceCommunication == false)
-        #expect(tunnelProtocol.enforceRoutes)
+        #expect(tunnelProtocol.enforceRoutes == false)
         #expect(tunnelProtocol.disconnectOnSleep == false)
 
         VPNConnectionPolicy.disabled.apply(to: tunnelProtocol)
         #expect(tunnelProtocol.includeAllNetworks == false)
+        #expect(tunnelProtocol.enforceRoutes == false)
     }
 
     @Test func vpnConfigRequestEncodesOpenVPNProtocolAndDecodesRawProfile() async throws {
@@ -657,6 +658,19 @@ struct OpenVPNTests {
         #expect(serialized.range(of: Data(LibreGuardDNS.regularResolverAddress.utf8)) != nil)
         #expect(serialized.range(of: Data(publicResolver.utf8)) == nil)
         #expect(serialized.range(of: Data(filteredResolver.utf8)) == nil)
+    }
+
+    @Test func tunnelKitUsesCellularSafeTunnelMTU() throws {
+        let tunnelProtocol = try TunnelKitOpenVPNProtocolBuilder().makeTunnelProtocol(
+            configuration: openVPNSampleConfig(),
+            privateKeyPassphrase: "test-passphrase"
+        )
+        let providerConfiguration = try #require(tunnelProtocol.providerConfiguration)
+        let sessionConfiguration = try #require(
+            providerConfiguration["sessionConfiguration"] as? [String: Any]
+        )
+
+        #expect(sessionConfiguration["mtu"] as? Int == 1280)
     }
 
     @Test func openVPNPreflightRequiresInlineClientIdentityAndTLSCrypt() throws {

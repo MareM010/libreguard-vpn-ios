@@ -9,6 +9,8 @@ protocol OpenVPNTunnelProtocolBuilding {
 }
 
 struct TunnelKitOpenVPNProtocolBuilder: OpenVPNTunnelProtocolBuilding {
+    private static let tunnelMTU = 1280
+
     nonisolated init() {}
 
     nonisolated func makeTunnelProtocol(configuration: String, privateKeyPassphrase: String) throws -> NETunnelProviderProtocol {
@@ -19,6 +21,10 @@ struct TunnelKitOpenVPNProtocolBuilder: OpenVPNTunnelProtocolBuilding {
             passphrase: privateKeyPassphrase
         )
         var sessionBuilder = parsed.configuration.builder()
+        // Leave enough room for the outer UDP, OpenVPN, and AEAD headers.
+        // A 1500-byte inner packet otherwise exceeds common cellular path
+        // MTUs even though TCP handshakes and OpenVPN keepalives still work.
+        sessionBuilder.mtu = Self.tunnelMTU
         sessionBuilder.dnsProtocol = .plain
         sessionBuilder.dnsServers = [LibreGuardDNS.regularResolverAddress]
         sessionBuilder.dnsHTTPSURL = nil

@@ -42,7 +42,11 @@ struct VPNConnectionPolicy: Equatable {
         protocolConfiguration.excludeAPNs = false
         protocolConfiguration.excludeCellularServices = false
         protocolConfiguration.excludeDeviceCommunication = false
-        protocolConfiguration.enforceRoutes = true
+        // Packet tunnels already install their included routes through
+        // NEPacketTunnelNetworkSettings. On iOS 26, enforcing a default route
+        // can cause the system to drop ordinary app traffic before it reaches
+        // packetFlow. A kill switch is enforced by includeAllNetworks instead.
+        protocolConfiguration.enforceRoutes = false
         protocolConfiguration.disconnectOnSleep = false
     }
 
