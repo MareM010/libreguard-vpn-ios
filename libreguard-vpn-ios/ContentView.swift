@@ -2220,7 +2220,7 @@ private struct ProtectionIndicators: View {
             ProtectionBadge(text: "IPv6 Blocked")
             ProtectionBadge(text: "WebRTC Safe")
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 }
 
@@ -2416,7 +2416,7 @@ private struct SessionDurationStat: View {
     let connectedAt: Date?
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        TimelineView(.periodic(from: connectedAt ?? .now, by: 1)) { context in
             StatMini(
                 icon: "clock",
                 value: durationString(at: context.date),

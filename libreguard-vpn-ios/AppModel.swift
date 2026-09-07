@@ -1197,7 +1197,11 @@ final class AppModel: ObservableObject {
                 if request.killSwitchEnabled {
                     persistKillSwitch(enabled: true, activation: .active)
                 }
-                activeVPNTransition = nil
+                // startVPNTunnel() can return before Network Extension has
+                // advanced its observable status from .disconnected. Keep the
+                // request pending until the real .connected callback arrives;
+                // clearing it here loses the session descriptor and prevents
+                // traffic monitoring from ever starting.
                 handleVPNStatusChange(vpn.status)
             } catch is CancellationError {
                 return

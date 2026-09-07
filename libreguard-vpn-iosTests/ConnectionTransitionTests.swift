@@ -132,6 +132,25 @@ struct ConnectionTransitionTests {
         #expect(app.presentedError?.message == "Connection failed")
     }
 
+    @Test func statisticsStartWhenTunnelStartReturnsBeforeConnectedStatus() async throws {
+        let manager = ControlledVPNManager()
+        manager.returnDisconnectedAfterStart = true
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)])
+        app.session = makeSession(userId: "traffic-user")
+
+        app.requestConnectionToSelectedServer()
+        await settle()
+
+        #expect(app.vpnStatus == .connecting)
+        #expect(app.sessionMetrics == nil)
+
+        manager.emit(.connected)
+        await settle()
+
+        #expect(app.vpnStatus == .connected)
+        #expect(app.sessionMetrics != nil)
+    }
+
     @Test func reconnectCanBeCancelledWhileDisconnecting() async throws {
         let manager = ControlledVPNManager(status: .connected)
         manager.holdDisconnect = true
@@ -460,6 +479,7 @@ private final class ControlledVPNManager: VPNManaging {
     var onDisconnectError: ((Error) -> Void)?
     var holdDisconnect = false
     var connectError: Error?
+    var returnDisconnectedAfterStart = false
     private(set) var connectCalls: [ConnectCall] = []
     private(set) var disconnectCalls = 0
     private(set) var policyUpdates: [VPNConnectionPolicy] = []
@@ -481,6 +501,11 @@ private final class ControlledVPNManager: VPNManaging {
             status = .disconnected
             onStatusChange?(status)
             throw connectError
+        }
+        if returnDisconnectedAfterStart {
+            // Network Extension can still expose its old status immediately
+            // after startVPNTunnel() returns. The later callback is authoritative.
+            status = .disconnected
         }
     }
 
