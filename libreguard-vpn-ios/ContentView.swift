@@ -147,6 +147,7 @@ enum Theme {
     static let primary = Color(red: 0.082, green: 0.439, blue: 0.937)
     static let statusConnected = Color(red: 0.063, green: 0.725, blue: 0.506)
     static let statusConnecting = Color(red: 0.961, green: 0.620, blue: 0.043)
+    static let warning = Color(red: 0.960, green: 0.680, blue: 0.050)
     static let statusDisconnected = Color(red: 0.580, green: 0.639, blue: 0.722)
     static let destructive = Color(red: 0.937, green: 0.267, blue: 0.267)
     static let blueBar = Color(red: 0.376, green: 0.647, blue: 0.980)
@@ -216,6 +217,11 @@ private struct MainAppView: View {
             }
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.88), value: overlayScreen?.id)
+        .onChange(of: app.upgradePromptRequested) { _, requested in
+            guard requested else { return }
+            overlayScreen = .upgrade
+            app.consumeUpgradePrompt()
+        }
     }
 
     @ViewBuilder
@@ -710,7 +716,11 @@ private struct DashboardView: View {
 
                 Spacer(minLength: compact ? 2 : 8)
 
-                MonthlyUsageCard(quota: app.usageQuota)
+                MonthlyUsageCard(
+                    quota: app.usageQuota,
+                    isPro: app.isProUser,
+                    onUpgrade: onUpgrade
+                )
             }
             .padding(.horizontal, compact ? 16 : 24)
             .padding(.top, compact ? 10 : 24)
@@ -1930,7 +1940,7 @@ private struct UpgradeView: View {
                         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
                     }
 
-                    MonthlyUsageCard(quota: app.usageQuota)
+                    MonthlyUsageCard(quota: app.usageQuota, isPro: app.isProUser)
                 }
             }
             .padding(24)
@@ -2322,6 +2332,8 @@ private struct FlagBadge: View {
 
 private struct MonthlyUsageCard: View {
     let quota: UsageQuota?
+    let isPro: Bool = false
+    let onUpgrade: (() -> Void)? = nil
 
     var body: some View {
         CardContainer {
@@ -2334,70 +2346,90 @@ private struct MonthlyUsageCard: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                ProgressBar(progress: progress, color: quota?.usageTint ?? Theme.primary, height: 8)
+                ProgressBar(progress: progress, color: quota?.usageTint(isPro: isPro) ?? Theme.primary, height: 8)
                 HStack {
                     Text(usageText)
-                        .foregroundStyle(quota?.usageTint ?? Theme.primary)
+                        .foregroundStyle(quota?.usageTint(isPro: isPro) ?? Theme.primary)
                     Spacer()
                     Text(remainingText)
                         .foregroundStyle(.secondary)
                 }
                 .font(.caption.weight(.medium))
+
+                if shouldShowUpgrade, let onUpgrade {
+                    Button(action: onUpgrade) {
+                        Label("Upgrade to Pro", systemImage: "arrow.up.circle.fill")
+                            .font(.caption.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(quota?.usageTint(isPro: isPro) ?? Theme.primary)
+                    .accessibilityIdentifier("monthly-usage-upgrade")
+                }
             }
         }
     }
 
     private var progress: Double {
-        quota?.displayProgress ?? 0
+        quota?.displayProgress(isPro: isPro) ?? 0
     }
 
     private var quotaText: String {
         guard let quota else { return "Loading…" }
-        return quota.dashboardUsageHeadline
+        return quota.dashboardUsageHeadline(isPro: isPro)
     }
 
     private var usageText: String {
         guard let quota else { return "—" }
-        return quota.usageSummaryText
+        return quota.usageSummaryText(isPro: isPro)
     }
 
     private var remainingText: String {
         guard let quota else { return "—" }
-        return quota.usageDetailText
+        return quota.usageDetailText(isPro: isPro)
+    }
+
+    private var shouldShowUpgrade: Bool {
+        guard let quota, !isPro else { return false }
+        return quota.isOverLimit || (quota.usagePercentage ?? 0) >= 80
     }
 }
 
 private extension UsageQuota {
-    var displayProgress: Double {
-        if isUnlimited {
-            return usagePercentage > 0 ? min(max(usagePercentage / 100, 0.08), 1) : 0.08
+    func displayProgress(isPro: Bool) -> Double {
+        if isPro || isUnlimited {
+            let percentage = usagePercentage ?? 0
+            return percentage > 0 ? min(max(percentage / 100, 0.08), 1) : 0.08
         }
-        return min(max(usagePercentage / 100, 0), 1)
+        return min(max((usagePercentage ?? 0) / 100, 0), 1)
     }
 
-    var usageTint: Color {
-        isOverLimit ? Theme.destructive : Theme.primary
+    func usageTint(isPro: Bool) -> Color {
+        guard !isPro && !isUnlimited else { return Theme.primary }
+        if isOverLimit || (usagePercentage ?? 0) >= 100 { return Theme.destructive }
+        if (usagePercentage ?? 0) >= 80 { return Theme.warning }
+        return Theme.primary
     }
 
-    var dashboardUsageHeadline: String {
-        "\(formattedUsed) / \(isUnlimited ? "Unlimited" : formattedLimit)"
+    func dashboardUsageHeadline(isPro: Bool) -> String {
+        "\(formattedUsed) / \(isPro || isUnlimited ? "Unlimited" : (formattedLimit ?? "5 GB"))"
     }
 
-    var usageSummaryText: String {
-        if isUnlimited { return "\(formattedUsed) used this cycle" }
-        return String(format: "%.1f%% used", usagePercentage)
+    func usageSummaryText(isPro: Bool) -> String {
+        if isPro || isUnlimited { return "\(formattedUsed) used this cycle" }
+        return String(format: "%.1f%% used", usagePercentage ?? 0)
     }
 
-    var usageDetailText: String {
-        if isUnlimited {
+    func usageDetailText(isPro: Bool) -> String {
+        if isPro || isUnlimited {
             if let resetDate {
                 return "Cycle resets \(resetDate.formatted(date: .abbreviated, time: .omitted))"
             }
             return "Unlimited monthly data"
         }
-        if isOverLimit { return "Limit reached" }
+        if isOverLimit || (usagePercentage ?? 0) >= 100 { return "Limit reached" }
         if let resetDate { return "Resets \(resetDate.formatted(date: .abbreviated, time: .omitted))" }
-        return "\(formattedRemaining) left"
+        return "\(formattedRemaining ?? "0 B") left"
     }
 }
 

@@ -14,6 +14,8 @@ final class AppModel: ObservableObject {
     @Published var session: AuthSession?
     @Published var usageQuota: UsageQuota?
     @Published var subscription: SubscriptionStatus?
+    @Published private(set) var isCheckingConnectionQuota = false
+    @Published var upgradePromptRequested = false
     @Published private(set) var dnsPreference: DNSPreference?
     @Published private(set) var isRefreshingDNSPreference = false
     @Published private(set) var isUpdatingAdBlocking = false
@@ -601,15 +603,15 @@ final class AppModel: ObservableObject {
                         throw APIError(message: "No VPN server is available right now.")
                     }
                     selectedServerID = server.id
-                    requestConnection(
-                        VPNConnectRequest(
-                            server: server,
-                            protocolName: effectiveConnectionProtocol(),
-                            onDemandEnabled: true,
-                            killSwitchEnabled: isKillSwitchEnabled,
-                            origin: .autoConnect
-                        )
+                    let request = VPNConnectRequest(
+                        server: server,
+                        protocolName: effectiveConnectionProtocol(),
+                        onDemandEnabled: true,
+                        killSwitchEnabled: isKillSwitchEnabled,
+                        origin: .autoConnect
                     )
+                    guard await authorizeConnection() else { return }
+                    requestConnection(request)
                     await vpnTransitionTask?.value
                     guard vpnStatus != .disconnected, vpnStatus != .invalid else {
                         _ = try? await vpn.apply(policy: currentConnectionPolicy(autoConnectOverride: false))
@@ -798,7 +800,7 @@ final class AppModel: ObservableObject {
             presentedError = APIError(message: "This server requires a Pro plan.")
             return
         }
-        requestConnection(
+        startConnection(
             VPNConnectRequest(
                 server: server,
                 protocolName: effectiveConnectionProtocol(),
@@ -819,7 +821,7 @@ final class AppModel: ObservableObject {
             return
         }
         selectedServerID = server.id
-        requestConnection(
+        startConnection(
             VPNConnectRequest(
                 server: server,
                 protocolName: effectiveConnectionProtocol(),
@@ -829,6 +831,10 @@ final class AppModel: ObservableObject {
             )
         )
         refreshServers()
+    }
+
+    func consumeUpgradePrompt() {
+        upgradePromptRequested = false
     }
 
     func requestVPNDisconnect(bypassingKillSwitchConfirmation: Bool = false) {
@@ -1023,6 +1029,8 @@ final class AppModel: ObservableObject {
         session = nil
         usageQuota = nil
         subscription = nil
+        upgradePromptRequested = false
+        isCheckingConnectionQuota = false
         dnsPreference = nil
         isRefreshingDNSPreference = false
         isUpdatingAdBlocking = false
@@ -1167,6 +1175,40 @@ final class AppModel: ObservableObject {
             return .ikev2
         }
         return selectedVPNProtocol
+    }
+
+    private func startConnection(_ request: VPNConnectRequest) {
+        guard !isCheckingConnectionQuota else { return }
+        guard shouldPreflightConnection else {
+            requestConnection(request)
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self, await authorizeConnection() else { return }
+            requestConnection(request)
+        }
+    }
+
+    private var shouldPreflightConnection: Bool {
+        !isProUser && (session != nil || api.storedSession != nil)
+    }
+
+    private func authorizeConnection() async -> Bool {
+        guard shouldPreflightConnection else { return true }
+
+        isCheckingConnectionQuota = true
+        defer { isCheckingConnectionQuota = false }
+
+        do {
+            let eligibility = try await api.fetchConnectionEligibility()
+            usageQuota = try? await api.fetchUsage()
+            guard !eligibility.allowed else { return true }
+            upgradePromptRequested = true
+            return false
+        } catch {
+            // The backend documents this preflight as fail-open for availability.
+            return true
+        }
     }
 
     private func requestConnection(_ request: VPNConnectRequest) {

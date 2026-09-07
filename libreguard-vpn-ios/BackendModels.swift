@@ -743,17 +743,27 @@ enum IPv6ProtectionStatus: Equatable {
 
 struct UsageQuota: Decodable, Equatable {
     let bytesUsed: Int64
-    let bytesLimit: Int64
-    let bytesRemaining: Int64
-    let usagePercentage: Double
+    let bytesLimit: Int64?
+    let bytesRemaining: Int64?
+    let usagePercentage: Double?
     let isUnlimited: Bool
     let isOverLimit: Bool
     let formattedUsed: String
-    let formattedLimit: String
-    let formattedRemaining: String
+    let formattedLimit: String?
+    let formattedRemaining: String?
     let cycleStart: Date?
     let cycleEnd: Date?
     let resetDate: Date?
+}
+
+struct CanConnectResponse: Decodable, Equatable {
+    let allowed: Bool
+    let reason: String?
+    let bytesUsed: Int64
+    let bytesLimit: Int64?
+    let resetDate: Date?
+    let isUnlimited: Bool
+    let message: String?
 }
 
 struct SubscriptionStatus: Decodable, Equatable {

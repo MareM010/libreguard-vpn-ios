@@ -27,6 +27,7 @@ protocol BackendServicing: AnyObject {
     func fetchCertificateGenerationStatus(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> CertificateGenerationStatusResponse
     func fetchCertificateJob(jobId: Int) async throws -> CertificateJobStatusResponse
     func fetchUsage() async throws -> UsageQuota
+    func fetchConnectionEligibility() async throws -> CanConnectResponse
     func fetchSubscription() async throws -> SubscriptionStatus
     func fetchDNSPreference() async throws -> DNSPreference
     func updateDNSPreference(adBlockingEnabled: Bool) async throws -> DNSPreference
@@ -272,6 +273,10 @@ final class APIClient: BackendServicing {
     func fetchUsage() async throws -> UsageQuota {
         let response: UsageQuota = try await send(.get, path: "/api/usage/quota")
         return response
+    }
+
+    func fetchConnectionEligibility() async throws -> CanConnectResponse {
+        try await send(.get, path: "/api/usage/can-connect")
     }
 
     func fetchSubscription() async throws -> SubscriptionStatus {

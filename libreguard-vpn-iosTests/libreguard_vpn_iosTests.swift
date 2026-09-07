@@ -5,6 +5,58 @@ import Testing
 
 @MainActor
 struct libreguard_vpn_iosTests {
+    @Test func connectionEligibilityUsesReadOnlyBackendPreflight() async throws {
+        try await withSerializedRequests {
+            let session = AuthSession(
+                accessToken: "usage-access",
+                refreshToken: "refresh",
+                email: "person@example.com",
+                userId: "user-1",
+                deviceId: "test-device"
+            )
+            let client = makeClient(sessionStore: InMemorySessionStore(session: session)) { request in
+                #expect(request.url?.path == "/api/usage/can-connect")
+                #expect(request.httpMethod == "GET")
+                #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer usage-access")
+                return try makeResponse(request, status: 200, json: [
+                    "allowed": false,
+                    "reason": "Data limit exceeded for this billing period",
+                    "bytesUsed": 5_368_709_120,
+                    "bytesLimit": 5_368_709_120,
+                    "resetDate": "2026-07-01T00:00:00Z",
+                    "isUnlimited": false,
+                    "message": "Upgrade to Pro for unlimited data."
+                ])
+            }
+
+            let response = try await client.fetchConnectionEligibility()
+            #expect(response.allowed == false)
+            #expect(response.bytesLimit == 5_368_709_120)
+            #expect(response.reason?.contains("exceeded") == true)
+        }
+    }
+
+    @Test func proQuotaDecodesNullableUnlimitedFields() throws {
+        let quota = try JSONDecoder().decode(UsageQuota.self, from: JSONSerialization.data(withJSONObject: [
+            "bytesUsed": 2_048,
+            "bytesLimit": NSNull(),
+            "bytesRemaining": NSNull(),
+            "usagePercentage": NSNull(),
+            "isUnlimited": true,
+            "isOverLimit": false,
+            "formattedUsed": "2 KB",
+            "formattedLimit": NSNull(),
+            "formattedRemaining": NSNull(),
+            "cycleStart": "2026-06-01T00:00:00Z",
+            "cycleEnd": "2026-07-01T00:00:00Z",
+            "resetDate": "2026-07-01T00:00:00Z"
+        ]))
+
+        #expect(quota.isUnlimited)
+        #expect(quota.bytesLimit == nil)
+        #expect(quota.usagePercentage == nil)
+    }
+
     @Test func dnsPreferenceEndpointsUseAuthenticatedAccountContract() async throws {
         try await withSerializedRequests {
             let session = AuthSession(
