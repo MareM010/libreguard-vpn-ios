@@ -248,9 +248,12 @@ extension OpenVPN {
             var optProxyBypass: [String]?
             var optRedirectGateway: Set<RedirectGateway>?
 
-            log.debug("Configuration file:")
             for line in lines {
-                log.debug("\(line)")
+                // Inline profiles contain private keys and tls-crypt secrets.
+                // Address masking does not redact raw configuration lines.
+                if CoreConfiguration.logsSensitiveData {
+                    log.debug("\(line)")
+                }
                 
                 var isHandled = false
                 var strippedLine = line

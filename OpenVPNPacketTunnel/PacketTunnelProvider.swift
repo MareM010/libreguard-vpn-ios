@@ -2,6 +2,7 @@ import ActivityKit
 import Foundation
 import NetworkExtension
 import OSLog
+import TunnelKitCore
 import TunnelKitOpenVPNAppExtension
 
 final class PacketTunnelProvider: OpenVPNTunnelProvider {
@@ -67,6 +68,7 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
                 completionHandler(error)
                 return
             }
+            self.persistTunnelKitLog()
             self.mutateDiagnostics { diagnostics in
                 if let error {
                     diagnostics.state = .failed
@@ -100,6 +102,7 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
         activityUpdateTask = nil
         publishFinalState()
         super.stopTunnel(with: reason) { [weak self] in
+            self?.persistTunnelKitLog()
             OpenVPNExtensionLifecycleJournal.append("stop-completed")
             self?.mutateDiagnostics { diagnostics in
                 diagnostics.state = .stopped
@@ -126,6 +129,42 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
         diagnosticsLock.lock()
         mutation(&storedDiagnostics)
         diagnosticsLock.unlock()
+    }
+
+    /// This TunnelKit version keeps its log in memory. Save it before the
+    /// extension exits so the containing app can read the failed handshake.
+    private func persistTunnelKitLog() {
+        let log = PIATunnelKitLogHandler.logStorage.getAllLogs()
+        guard !log.isEmpty else {
+            logger.error("TunnelKit diagnostic log storage is empty")
+            return
+        }
+        let snapshot = String(log.suffix(64_000))
+        // Emit individual lines so unified logging does not truncate a single
+        // large message. Raw profile logging is disabled in ConfigurationParser.
+        for line in snapshot.split(separator: "\n") {
+            logger.debug("TunnelKit: \(String(line), privacy: .public)")
+        }
+        var destinations = [FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]]
+        if let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: OpenVPNConstants.appGroupIdentifier
+        ) {
+            destinations.append(containerURL)
+        } else {
+            logger.error("Shared app-group container is unavailable for TunnelKit diagnostics")
+        }
+        for directory in destinations {
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                try snapshot.write(
+                    to: directory.appendingPathComponent("debug.log"),
+                    atomically: true,
+                    encoding: .utf8
+                )
+            } catch {
+                logger.error("Could not save TunnelKit diagnostic log: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     private func beginActivityUpdates() {

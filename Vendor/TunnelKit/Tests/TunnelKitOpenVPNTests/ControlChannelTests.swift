@@ -134,4 +134,62 @@ class ControlChannelTests: XCTestCase {
         print("org: \(original.toHex())")
         XCTAssertEqual(raw, original)
     }
+
+    func testCryptResetReproducesIdenticalPackets() throws {
+        let client = try OpenVPN.ControlChannel.CryptSerializer(withKey: OpenVPN.StaticKey(data: Data(hex: hex), direction: .client))
+        let packet = ControlPacket(code: .controlV1, key: 0, sessionId: Data(hex: "1122334455667788"), packetId: 1, payload: Data(repeating: 0x42, count: 297))
+        let first = try client.serialize(packet: packet, timestamp: 1)
+        client.reset()
+        let second = try client.serialize(packet: packet, timestamp: 1)
+        XCTAssertEqual(first.prefix(49), second.prefix(49), "Header and authentication tag must match")
+        XCTAssertEqual(first.dropFirst(49), second.dropFirst(49), "Ciphertext must not depend on preceding packets")
+        let server = try OpenVPN.ControlChannel.CryptSerializer(withKey: OpenVPN.StaticKey(data: Data(hex: hex), direction: .server))
+        XCTAssertEqual(try server.deserialize(data: second, start: 0, end: nil).payload, packet.payload)
+    }
+
+    func testCryptHandshakePacketsAuthenticateAfterDroppedDatagram() throws {
+        let client = try OpenVPN.ControlChannel(withCryptKey: OpenVPN.StaticKey(data: Data(hex: hex), direction: .client))
+        let server = try OpenVPN.ControlChannel.CryptSerializer(withKey: OpenVPN.StaticKey(data: Data(hex: hex), direction: .server))
+        try client.reset(forNewSession: true)
+        let clientID = try XCTUnwrap(client.sessionId)
+        let serverID = Data(hex: "1122334455667788")
+        client.enqueueOutboundPackets(withCode: .hardResetClientV2, key: 0, payload: Data(), maxPacketSize: 1000)
+        let reset = try XCTUnwrap(client.writeOutboundPackets().first)
+        XCTAssertNil(try server.deserialize(data: reset, start: 0, end: nil).ackIds)
+
+        let serverReset = ControlPacket(code: .hardResetServerV2, key: 0, sessionId: serverID, packetId: 0, payload: nil)
+        serverReset.ackIds = [0]
+        serverReset.ackRemoteSessionId = clientID
+        let received = try client.readInboundPacket(withData: server.serialize(packet: serverReset), offset: 0)
+        XCTAssertEqual(client.enqueueInboundPacket(packet: received).count, 1)
+        client.remoteSessionId = serverID
+        // Generate the standalone ACK but deliberately do not deliver it.
+        _ = try client.writeAcks(withKey: 0, ackPacketIds: [0], ackRemoteSessionId: serverID)
+        client.enqueueOutboundPackets(withCode: .controlV1, key: 0, payload: Data([0x16, 0x03, 0x01]), maxPacketSize: 1000)
+
+        func checkHello(_ bytes: Data) throws {
+            let packet = try server.deserialize(data: bytes, start: 0, end: nil)
+            XCTAssertEqual(packet.packetId, 1)
+            XCTAssertEqual(packet.payload, Data([0x16, 0x03, 0x01]))
+        }
+        try checkHello(XCTUnwrap(client.writeOutboundPackets().first))
+        Thread.sleep(forTimeInterval: CoreConfiguration.OpenVPN.retransmissionLimit + 0.02)
+        try checkHello(XCTUnwrap(client.writeOutboundPackets().first))
+
+        // Incoming packets must also authenticate independently, including
+        // after rejecting a damaged datagram.
+        for id: UInt32 in 1...3 {
+            let reply = ControlPacket(code: .controlV1, key: 0, sessionId: serverID, packetId: id, payload: Data(repeating: UInt8(id), count: 97))
+            let raw = try server.serialize(packet: reply)
+            var damaged = raw
+            damaged[damaged.count - 1] ^= 1
+            XCTAssertThrowsError(try client.readInboundPacket(withData: damaged, offset: 0))
+            XCTAssertEqual(try client.readInboundPacket(withData: raw, offset: 0).payload, reply.payload)
+        }
+
+        try client.reset(forNewSession: true)
+        client.enqueueOutboundPackets(withCode: .hardResetClientV2, key: 0, payload: Data(), maxPacketSize: 1000)
+        let nextReset = try XCTUnwrap(client.writeOutboundPackets().first)
+        XCTAssertNil(try server.deserialize(data: nextReset, start: 0, end: nil).ackIds)
+    }
 }

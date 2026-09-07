@@ -28,8 +28,8 @@ struct TunnelKitOpenVPNProtocolBuilder: OpenVPNTunnelProtocolBuilding {
         )
         // Keep TunnelKit's diagnostic log enabled while we resolve connection
         // failures. TunnelKit masks private data by default, so this does not
-        // put certificates or keys in the log. The log is written to the
-        // shared app-group container and is read by OpenVPNManager on failure.
+        // put certificates or keys in the log. PacketTunnelProvider snapshots
+        // the in-memory log to the app group for OpenVPNManager on failure.
         providerConfigurationBuilder.shouldDebug = true
         providerConfigurationBuilder.masksPrivateData = true
         let providerConfiguration = providerConfigurationBuilder.build()

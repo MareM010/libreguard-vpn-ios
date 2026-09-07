@@ -1042,7 +1042,11 @@ public class OpenVPNSession: Session {
             return
         }
         for raw in rawList {
-            log.debug("Send control packet (\(raw.count) bytes): \(raw.toHex())")
+            if CoreConfiguration.logsSensitiveData {
+                log.debug("Send control packet (\(raw.count) bytes): \(raw.toHex())")
+            } else {
+                log.debug("Send control packet (\(raw.count) bytes)")
+            }
         }
         
         // WARNING: runs in Network.framework queue

@@ -142,10 +142,14 @@ static const NSInteger CryptoCTRTagLength = 32;
     size_t l3 = 0;
     int code = 1;
     
-    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_init(self.macCtxEnc, NULL, 0, NULL);
-    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(self.macCtxEnc, flags->ad, flags->adLength);
-    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(self.macCtxEnc, bytes, length);
-    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(self.macCtxEnc, dest, &l3, CryptoCTRTagLength);
+    // Keep the keyed context pristine. Each UDP packet authenticates only its
+    // own header and payload, independently of previously sent packets.
+    EVP_MAC_CTX *packetMAC = EVP_MAC_CTX_dup(self.macCtxEnc);
+    code = (packetMAC != NULL);
+    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(packetMAC, flags->ad, flags->adLength);
+    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(packetMAC, bytes, length);
+    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(packetMAC, dest, &l3, CryptoCTRTagLength);
+    EVP_MAC_CTX_free(packetMAC);
     
     NSAssert(l3 == CryptoCTRTagLength, @"Incorrect digest size");
     
@@ -198,11 +202,15 @@ static const NSInteger CryptoCTRTagLength = 32;
 
     *destLength = l1 + l2;
     
-    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_init(self.macCtxDec, NULL, 0, NULL);
-    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(self.macCtxDec, flags->ad, flags->adLength);
-    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(self.macCtxDec, dest, *destLength);
+    EVP_MAC_CTX *packetMAC = EVP_MAC_CTX_dup(self.macCtxDec);
+    if (!packetMAC) {
+        code = 0;
+    }
+    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(packetMAC, flags->ad, flags->adLength);
+    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_update(packetMAC, dest, *destLength);
     // bufferDecHMAC is heap-allocated; sizeof(bufferDecHMAC) is only the pointer size.
-    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(self.macCtxDec, self.bufferDecHMAC, &l3, CryptoCTRTagLength);
+    TUNNEL_CRYPTO_TRACK_STATUS(code) EVP_MAC_final(packetMAC, self.bufferDecHMAC, &l3, CryptoCTRTagLength);
+    EVP_MAC_CTX_free(packetMAC);
     
     NSAssert(l3 == CryptoCTRTagLength, @"Incorrect digest size");
     
