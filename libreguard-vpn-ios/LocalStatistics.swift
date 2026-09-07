@@ -45,6 +45,7 @@ final class LocalConnectionRecord {
 @MainActor
 protocol LocalStatisticsRecording {
     func record(
+        sessionID: UUID,
         userId: String,
         connectedAt: Date,
         disconnectedAt: Date,
@@ -65,6 +66,7 @@ final class SwiftDataStatisticsRecorder: LocalStatisticsRecording {
     }
 
     func record(
+        sessionID: UUID,
         userId: String,
         connectedAt: Date,
         disconnectedAt: Date,
@@ -73,17 +75,33 @@ final class SwiftDataStatisticsRecorder: LocalStatisticsRecording {
         downloadedBytes: Int64,
         uploadedBytes: Int64
     ) throws {
-        context.insert(LocalConnectionRecord(
-            userId: userId,
-            connectedAt: connectedAt,
-            disconnectedAt: disconnectedAt,
-            serverId: server.id,
-            serverName: server.serverName,
-            country: server.country,
-            protocolName: protocolName.rawValue,
-            downloadedBytes: downloadedBytes,
-            uploadedBytes: uploadedBytes
-        ))
+        let descriptor = FetchDescriptor<LocalConnectionRecord>(
+            predicate: #Predicate { $0.id == sessionID }
+        )
+        if let existing = try context.fetch(descriptor).first {
+            existing.userId = userId
+            existing.connectedAt = connectedAt
+            existing.disconnectedAt = disconnectedAt
+            existing.serverId = server.id
+            existing.serverName = server.serverName
+            existing.country = server.country
+            existing.protocolName = protocolName.rawValue
+            existing.downloadedBytes = downloadedBytes
+            existing.uploadedBytes = uploadedBytes
+        } else {
+            context.insert(LocalConnectionRecord(
+                id: sessionID,
+                userId: userId,
+                connectedAt: connectedAt,
+                disconnectedAt: disconnectedAt,
+                serverId: server.id,
+                serverName: server.serverName,
+                country: server.country,
+                protocolName: protocolName.rawValue,
+                downloadedBytes: downloadedBytes,
+                uploadedBytes: uploadedBytes
+            ))
+        }
         try context.save()
     }
 

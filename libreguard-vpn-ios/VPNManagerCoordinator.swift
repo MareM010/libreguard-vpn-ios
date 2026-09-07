@@ -150,6 +150,19 @@ final class VPNManagerCoordinator: VPNManaging {
         return await manager(for: activeProtocol).currentTrafficSnapshot()
     }
 
+    var connectedDate: Date? {
+        if let activeProtocol {
+            return manager(for: activeProtocol).connectedDate
+        }
+        if openVPNManager.status.isConnected {
+            return openVPNManager.connectedDate
+        }
+        if ikev2Manager.status.isConnected {
+            return ikev2Manager.connectedDate
+        }
+        return nil
+    }
+
     private func handleStatusChange(from protocolName: VPNConfigurationProtocol) {
         if let activeProtocol,
            manager(for: activeProtocol) !== manager(for: protocolName),

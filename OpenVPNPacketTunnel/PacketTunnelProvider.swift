@@ -457,7 +457,7 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
             uploadBitsPerSecond: 0,
             sampledAt: Date()
         )
-        VPNSharedSessionStore.save(traffic: reconnecting)
+        VPNSharedSessionStore.save(traffic: reconnecting, sessionID: descriptor.sessionID)
         Task {
             await updateActivity(descriptor: descriptor, traffic: reconnecting)
             if descriptor.killSwitchEnabled {
@@ -472,15 +472,36 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
 
     private func publishFinalState() {
         guard let descriptor = VPNSharedSessionStore.loadDescriptor() else { return }
-        let previous = VPNSharedSessionStore.loadTraffic() ?? .zero()
-        let final = VPNSessionTraffic(
-            state: .disconnected,
-            downloadedBytes: previous.downloadedBytes,
-            uploadedBytes: previous.uploadedBytes,
-            downloadBitsPerSecond: 0,
-            uploadBitsPerSecond: 0,
-            sampledAt: Date()
-        )
+        let final: VPNSessionTraffic
+        if let snapshot = currentTrafficSnapshot() {
+            let now = Date()
+            if let checkpoint = VPNSharedSessionStore.loadCheckpoint(),
+               checkpoint.sessionID == descriptor.sessionID {
+                let previous = VPNSharedSessionStore.loadTraffic() ?? .zero(at: checkpoint.sampledAt)
+                let gap = snapshot.delta(from: checkpoint.snapshot)
+                final = VPNSessionTraffic(
+                    state: .disconnected,
+                    downloadedBytes: saturatingAdd(previous.downloadedBytes, gap.downloadedBytes),
+                    uploadedBytes: saturatingAdd(previous.uploadedBytes, gap.uploadedBytes),
+                    downloadBitsPerSecond: 0,
+                    uploadBitsPerSecond: 0,
+                    sampledAt: now
+                )
+            } else {
+                final = trafficAccumulator.consume(snapshot, at: now, state: .disconnected)
+            }
+        } else {
+            let previous = VPNSharedSessionStore.loadTraffic() ?? .zero()
+            final = VPNSessionTraffic(
+                state: .disconnected,
+                downloadedBytes: previous.downloadedBytes,
+                uploadedBytes: previous.uploadedBytes,
+                downloadBitsPerSecond: 0,
+                uploadBitsPerSecond: 0,
+                sampledAt: Date()
+            )
+        }
+        VPNSharedSessionStore.save(traffic: final, sessionID: descriptor.sessionID)
         let intent = VPNSharedSessionStore.loadDisconnectIntent()
         Task {
             await endActivity(descriptor: descriptor, traffic: final)
@@ -497,19 +518,34 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
     }
 
     private func publishCurrentTraffic(descriptor: VPNSessionDescriptor) async {
+        guard let snapshot = currentTrafficSnapshot() else { return }
+        let now = Date()
+        let state: VPNActivityConnectionState = reasserting ? .reconnecting : .connected
+        let traffic = trafficAccumulator.consume(snapshot, at: now, state: state)
+        VPNSharedSessionStore.save(traffic: traffic, sessionID: descriptor.sessionID)
+        await updateActivity(descriptor: descriptor, traffic: traffic)
+        VPNSharedSessionStore.save(
+            checkpoint: VPNTrafficCheckpoint(
+                sessionID: descriptor.sessionID,
+                snapshot: snapshot,
+                sampledAt: traffic.sampledAt
+            )
+        )
+    }
+
+    private func currentTrafficSnapshot() -> TunnelTrafficSnapshot? {
         guard let defaults = UserDefaults(suiteName: VPNSharedConstants.appGroupIdentifier),
               let counts = defaults.array(forKey: "TunnelKitDataCount") as? [Int],
-              counts.count == 2 else { return }
-
-        let now = Date()
-        let snapshot = TunnelTrafficSnapshot(
+              counts.count == 2 else { return nil }
+        return TunnelTrafficSnapshot(
             downloadedBytes: Int64(max(0, counts[0])),
             uploadedBytes: Int64(max(0, counts[1]))
         )
-        let state: VPNActivityConnectionState = reasserting ? .reconnecting : .connected
-        let traffic = trafficAccumulator.consume(snapshot, at: now, state: state)
-        VPNSharedSessionStore.save(traffic: traffic)
-        await updateActivity(descriptor: descriptor, traffic: traffic)
+    }
+
+    private func saturatingAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? .max : sum
     }
 
     private func updateActivity(

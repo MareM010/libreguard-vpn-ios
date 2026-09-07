@@ -5,6 +5,7 @@ import OSLog
 @MainActor
 protocol VPNManaging: AnyObject {
     var status: VPNConnectionState { get }
+    var connectedDate: Date? { get }
     var onStatusChange: ((VPNConnectionState) -> Void)? { get set }
     var onDisconnectError: ((Error) -> Void)? { get set }
 
@@ -19,6 +20,7 @@ protocol VPNManaging: AnyObject {
 }
 
 extension VPNManaging {
+    var connectedDate: Date? { nil }
     func currentTrafficSnapshot() async -> TunnelTrafficSnapshot? { nil }
     func setCertificatePreparationHandler(_ handler: ((String?) -> Void)?) {}
 }
@@ -74,6 +76,10 @@ final class PersonalVPNManager: VPNManaging {
             guard oldValue != status else { return }
             onStatusChange?(status)
         }
+    }
+
+    var connectedDate: Date? {
+        manager.connection.connectedDate
     }
 
     var onStatusChange: ((VPNConnectionState) -> Void)?

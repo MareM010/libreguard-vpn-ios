@@ -24,6 +24,10 @@ final class OpenVPNManager: VPNManaging {
         }
     }
 
+    var connectedDate: Date? {
+        manager.connection.connectedDate
+    }
+
     var onStatusChange: ((VPNConnectionState) -> Void)?
     var onDisconnectError: ((Error) -> Void)?
 

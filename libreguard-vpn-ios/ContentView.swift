@@ -791,7 +791,14 @@ private struct DashboardView: View {
                         value: VPNTrafficFormatting.bitRate(app.sessionMetrics?.traffic.uploadBitsPerSecond ?? 0),
                         label: "Upload"
                     )
-                    StatMini(icon: "globe", value: selectedServer?.city ?? selectedServer?.country ?? "Auto", label: "Location")
+                    StatMini(
+                        icon: "globe",
+                        value: selectedServer?.city
+                            ?? selectedServer?.country
+                            ?? app.sessionMetrics?.descriptor.country
+                            ?? "Auto",
+                        label: "Location"
+                    )
                 }
 
                 CardContainer {
@@ -2056,15 +2063,10 @@ private struct LibreGuardLogo: View {
     let size: CGFloat
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
-                .fill(LinearGradient(colors: [Theme.primary, Theme.primary.opacity(0.70)], startPoint: .topLeading, endPoint: .bottomTrailing))
-            Image(systemName: "shield.fill")
-                .font(.system(size: size * 0.48, weight: .semibold))
-                .foregroundStyle(.white)
-        }
-        .frame(width: size, height: size)
-        .shadow(color: Theme.primary.opacity(0.25), radius: size * 0.16, y: size * 0.08)
+        Image("LibreGuardLogo")
+            .resizable()
+            .scaledToFit()
+            .frame(width: size, height: size)
     }
 }
 

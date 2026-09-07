@@ -160,11 +160,7 @@ final class AppModel: ObservableObject {
             return
         }
         await vpn.refreshStatus()
-        if vpnStatus == .disconnected || vpnStatus == .invalid {
-            await liveActivityController.endAll()
-            VPNSharedSessionStore.clear()
-        }
-        if api.storedSession != nil {
+        if let storedSession = api.storedSession {
             do {
                 session = try await api.restoreSession()
                 route = .authenticated
@@ -173,22 +169,40 @@ final class AppModel: ObservableObject {
                 if vpnStatus.isConnected {
                     refreshServers()
                     await serverRefreshTask?.value
-                    restoreActiveSessionIfNeeded()
+                    await restoreActiveSessionIfNeeded()
+                } else {
+                    await liveActivityController.endAll()
+                    finalizeOrphanedSessionIfNeeded(endedAt: Date())
                 }
                 await reconcileKillSwitchOnLaunch()
                 await reconcileAutoConnectOnLaunch()
                 return
             } catch let error as APIError where error.code == "APP_VERSION_BLOCKED" || error.code == "APP_VERSION_REQUIRED" {
                 presentedError = error
-            } catch {
+            } catch let error as APIError where isAuthenticationFailure(error) {
                 clearCachedPlan()
-                // A stale session falls through to registration or login.
+            } catch {
+                // Keep the local account and active VPN available when the
+                // refresh failed for a transient network or server reason.
+                session = storedSession
+                route = .authenticated
+                if vpnStatus.isConnected {
+                    refreshServers()
+                    await serverRefreshTask?.value
+                    await restoreActiveSessionIfNeeded()
+                } else {
+                    finalizeOrphanedSessionIfNeeded(endedAt: Date())
+                }
+                await reconcileKillSwitchOnLaunch()
+                return
             }
         }
 
+        await liveActivityController.endAll()
         persistAutoConnectEnabled(false)
         persistKillSwitch(enabled: false, activation: .off)
         await vpn.disconnectAndForget()
+        VPNSharedSessionStore.clear()
 
         if let pending = loadPendingRegistration() {
             prefilledEmail = pending.email
@@ -697,6 +711,13 @@ final class AppModel: ObservableObject {
 
     func refreshVPNStatus() async {
         await vpn.refreshStatus()
+        guard session != nil, activeVPNTransition == nil else { return }
+        if vpnStatus.isConnected {
+            await restoreActiveSessionIfNeeded()
+            await refreshTrafficMetricsOnce(updateLiveActivity: false)
+        } else if vpnStatus == .disconnected || vpnStatus == .invalid {
+            finalizeOrphanedSessionIfNeeded(endedAt: Date())
+        }
     }
 
     func loadTwoFactorSetup() async {
@@ -1170,7 +1191,11 @@ final class AppModel: ObservableObject {
         vpnStatus = .connecting
         VPNSharedSessionStore.saveDisconnectIntent(nil)
         VPNSharedSessionStore.save(
-            descriptor: makeSessionDescriptor(for: request, connectedAt: Date())
+            descriptor: makeSessionDescriptor(
+                for: request,
+                connectedAt: Date(),
+                isEstablished: false
+            )
         )
 
         vpnTransitionTask = Task { [weak self] in
@@ -1229,6 +1254,12 @@ final class AppModel: ObservableObject {
 
         vpnTransitionTask = Task { [weak self] in
             guard let self else { return }
+            _ = try? await vpn.apply(
+                policy: VPNConnectionPolicy(
+                    killSwitchEnabled: isKillSwitchEnabled,
+                    onDemandEnabled: false
+                )
+            )
             await refreshTrafficMetricsOnce(updateLiveActivity: true)
             await vpn.disconnect()
             guard generation == vpnTransitionGeneration, !Task.isCancelled else { return }
@@ -1328,6 +1359,13 @@ final class AppModel: ObservableObject {
         defaults.set(isPro, forKey: cachedPlanIsProKey)
     }
 
+    private func isAuthenticationFailure(_ error: APIError) -> Bool {
+        error.statusCode == 401
+            || error.requiresLogin
+            || error.requiresDeviceRegistration
+            || error.code == "SESSION_EXPIRED"
+    }
+
     private func clearCachedPlan() {
         cachedPlanName = nil
         cachedPlanIsPro = false
@@ -1377,21 +1415,28 @@ private extension AppModel {
             return
         }
 
+        let connectionDate = vpn.connectedDate ?? Date()
         let descriptor: VPNSessionDescriptor
         if let storedDescriptor = VPNSharedSessionStore.loadDescriptor(),
            storedDescriptor.sessionID == request.sessionID {
-            descriptor = storedDescriptor
+            descriptor = storedDescriptor.isEstablished
+                ? storedDescriptor
+                : storedDescriptor.established(at: connectionDate)
         } else {
-            descriptor = makeSessionDescriptor(for: request, connectedAt: Date())
+            descriptor = makeSessionDescriptor(
+                for: request,
+                connectedAt: connectionDate,
+                isEstablished: true
+            )
         }
         let connectedAt = descriptor.connectedAt
-        let initialTraffic = VPNSessionTraffic.zero(at: connectedAt)
+        let initialTraffic = VPNSharedSessionStore.loadTraffic() ?? .zero(at: connectedAt)
         activeStatisticsSession = ActiveStatisticsSession(
             userId: userId,
             server: request.server,
             protocolName: request.protocolName,
             descriptor: descriptor,
-            accumulator: VPNTrafficAccumulator(),
+            accumulator: VPNTrafficAccumulator(existingTraffic: initialTraffic),
             traffic: initialTraffic
         )
         pendingStatisticsRequest = nil
@@ -1399,18 +1444,48 @@ private extension AppModel {
         startTrafficMonitoring(emitConnectedNotification: true)
     }
 
-    func restoreActiveSessionIfNeeded() {
+    func restoreActiveSessionIfNeeded() async {
         guard activeStatisticsSession == nil,
               vpnStatus.isConnected,
               let userId = session?.userId,
-              let descriptor = VPNSharedSessionStore.loadDescriptor(),
-              let server = servers.first(where: { $0.id == descriptor.serverID }) else { return }
+              let storedDescriptor = VPNSharedSessionStore.loadDescriptor() else { return }
 
-        let traffic = VPNSharedSessionStore.loadTraffic() ?? .zero(at: descriptor.connectedAt)
         let protocolName = VPNConfigurationProtocol.allCases.first(where: {
-            $0.displayName.caseInsensitiveCompare(descriptor.protocolName) == .orderedSame
-                || ($0 == .ikev2 && descriptor.protocolName == "IKEv2/IPSec")
+            $0.displayName.caseInsensitiveCompare(storedDescriptor.protocolName) == .orderedSame
+                || ($0 == .ikev2 && storedDescriptor.protocolName == "IKEv2/IPSec")
         }) ?? .ikev2
+        let connectionDate = vpn.connectedDate ?? storedDescriptor.connectedAt
+        let descriptor = storedDescriptor.isEstablished
+            ? storedDescriptor
+            : storedDescriptor.established(at: connectionDate)
+        let server = serverForSession(descriptor)
+        selectedServerID = descriptor.serverID
+        var traffic = VPNSharedSessionStore.loadTraffic() ?? .zero(at: descriptor.connectedAt)
+
+        if protocolName == .ikev2,
+           let checkpoint = VPNSharedSessionStore.loadCheckpoint(),
+           checkpoint.sessionID == descriptor.sessionID,
+           let snapshot = await vpn.currentTrafficSnapshot() ?? trafficSampler.currentSnapshot() {
+            let gap = snapshot.delta(from: checkpoint.snapshot)
+            traffic = VPNSessionTraffic(
+                state: vpnStatus == .reasserting ? .reconnecting : .connected,
+                downloadedBytes: saturatingAdd(traffic.downloadedBytes, gap.downloadedBytes),
+                uploadedBytes: saturatingAdd(traffic.uploadedBytes, gap.uploadedBytes),
+                downloadBitsPerSecond: 0,
+                uploadBitsPerSecond: 0,
+                sampledAt: Date()
+            )
+            VPNSharedSessionStore.save(traffic: traffic, sessionID: descriptor.sessionID)
+            VPNSharedSessionStore.save(
+                checkpoint: VPNTrafficCheckpoint(
+                    sessionID: descriptor.sessionID,
+                    snapshot: snapshot,
+                    sampledAt: traffic.sampledAt
+                )
+            )
+        }
+
+        VPNSharedSessionStore.save(descriptor: descriptor)
         activeStatisticsSession = ActiveStatisticsSession(
             userId: userId,
             server: server,
@@ -1452,7 +1527,8 @@ private extension AppModel {
 
     func refreshTrafficMetricsOnce(updateLiveActivity: Bool) async {
         guard let sessionID = activeStatisticsSession?.descriptor.sessionID else { return }
-        let snapshot = await vpn.currentTrafficSnapshot() ?? trafficSampler.currentSnapshot()
+        let snapshot = await vpn.currentTrafficSnapshot()
+            ?? (activeStatisticsSession?.protocolName == .ikev2 ? trafficSampler.currentSnapshot() : nil)
         guard let snapshot,
               var active = activeStatisticsSession,
               active.descriptor.sessionID == sessionID else { return }
@@ -1461,20 +1537,36 @@ private extension AppModel {
         activeStatisticsSession = active
         let metrics = VPNSessionMetrics(descriptor: active.descriptor, traffic: active.traffic)
         publishSessionMetrics(metrics)
+        if active.protocolName == .ikev2 {
+            VPNSharedSessionStore.save(
+                checkpoint: VPNTrafficCheckpoint(
+                    sessionID: active.descriptor.sessionID,
+                    snapshot: snapshot,
+                    sampledAt: active.traffic.sampledAt
+                )
+            )
+        }
         if updateLiveActivity {
             await liveActivityController.update(descriptor: active.descriptor, traffic: active.traffic)
         }
     }
 
     func publishSessionMetrics(_ metrics: VPNSessionMetrics) {
-        sessionMetrics = metrics
+        VPNSharedSessionStore.save(descriptor: metrics.descriptor)
+        let persistedTraffic = VPNSharedSessionStore.save(
+            traffic: metrics.traffic,
+            sessionID: metrics.descriptor.sessionID
+        )
+        let persistedMetrics = VPNSessionMetrics(
+            descriptor: metrics.descriptor,
+            traffic: persistedTraffic
+        )
+        sessionMetrics = persistedMetrics
         if var active = activeStatisticsSession,
-           active.descriptor.sessionID == metrics.descriptor.sessionID {
-            active.traffic = metrics.traffic
+           active.descriptor.sessionID == persistedMetrics.descriptor.sessionID {
+            active.traffic = persistedMetrics.traffic
             activeStatisticsSession = active
         }
-        VPNSharedSessionStore.save(descriptor: metrics.descriptor)
-        VPNSharedSessionStore.save(traffic: metrics.traffic)
     }
 
     func persistActiveStatisticsSessionIfNeeded(
@@ -1483,7 +1575,9 @@ private extension AppModel {
     ) {
         guard let activeStatisticsSession else {
             pendingStatisticsRequest = nil
-            VPNSharedSessionStore.clear()
+            if VPNSharedSessionStore.loadDescriptor()?.isEstablished == false {
+                VPNSharedSessionStore.clear()
+            }
             return
         }
 
@@ -1501,30 +1595,39 @@ private extension AppModel {
             descriptor: activeStatisticsSession.descriptor,
             traffic: finalTraffic
         )
-        sessionMetrics = finalMetrics
+        VPNSharedSessionStore.save(descriptor: finalMetrics.descriptor)
+        let persistedFinalTraffic = VPNSharedSessionStore.save(
+            traffic: finalMetrics.traffic,
+            sessionID: finalMetrics.descriptor.sessionID
+        )
+        sessionMetrics = VPNSessionMetrics(
+            descriptor: finalMetrics.descriptor,
+            traffic: persistedFinalTraffic
+        )
 
         if let statisticsRecorder {
             try? statisticsRecorder.record(
-            userId: activeStatisticsSession.userId,
-            connectedAt: activeStatisticsSession.descriptor.connectedAt,
-            disconnectedAt: max(endedAt, activeStatisticsSession.descriptor.connectedAt),
-            server: activeStatisticsSession.server,
-            protocolName: activeStatisticsSession.protocolName,
-            downloadedBytes: finalTraffic.downloadedBytes,
-            uploadedBytes: finalTraffic.uploadedBytes
+                sessionID: activeStatisticsSession.descriptor.sessionID,
+                userId: activeStatisticsSession.userId,
+                connectedAt: activeStatisticsSession.descriptor.connectedAt,
+                disconnectedAt: max(endedAt, activeStatisticsSession.descriptor.connectedAt),
+                server: activeStatisticsSession.server,
+                protocolName: activeStatisticsSession.protocolName,
+                downloadedBytes: persistedFinalTraffic.downloadedBytes,
+                uploadedBytes: persistedFinalTraffic.uploadedBytes
             )
         }
 
         Task { [liveActivityController, eventNotifier] in
             await liveActivityController.end(
                 descriptor: activeStatisticsSession.descriptor,
-                traffic: finalTraffic
+                traffic: persistedFinalTraffic
             )
             if notifyDisconnect {
                 await eventNotifier.emit(VPNNotificationPayload(
                     event: .disconnected,
                     descriptor: activeStatisticsSession.descriptor,
-                    traffic: finalTraffic
+                    traffic: persistedFinalTraffic
                 ))
             }
         }
@@ -1532,6 +1635,72 @@ private extension AppModel {
         VPNSharedSessionStore.clear()
         self.activeStatisticsSession = nil
         pendingStatisticsRequest = nil
+    }
+
+    func finalizeOrphanedSessionIfNeeded(endedAt: Date) {
+        guard let descriptor = VPNSharedSessionStore.loadDescriptor() else { return }
+
+        guard descriptor.isEstablished,
+              let userId = session?.userId else {
+            VPNSharedSessionStore.clear()
+            return
+        }
+
+        let protocolName = VPNConfigurationProtocol.allCases.first(where: {
+            $0.displayName.caseInsensitiveCompare(descriptor.protocolName) == .orderedSame
+                || ($0 == .ikev2 && descriptor.protocolName == "IKEv2/IPSec")
+        }) ?? .ikev2
+        let server = serverForSession(descriptor)
+        let storedTraffic = VPNSharedSessionStore.loadTraffic() ?? .zero(at: descriptor.connectedAt)
+        let finalTraffic = VPNSessionTraffic(
+            state: .disconnected,
+            downloadedBytes: storedTraffic.downloadedBytes,
+            uploadedBytes: storedTraffic.uploadedBytes,
+            downloadBitsPerSecond: 0,
+            uploadBitsPerSecond: 0,
+            sampledAt: max(endedAt, storedTraffic.sampledAt)
+        )
+
+        if let statisticsRecorder {
+            try? statisticsRecorder.record(
+                sessionID: descriptor.sessionID,
+                userId: userId,
+                connectedAt: descriptor.connectedAt,
+                disconnectedAt: max(finalTraffic.sampledAt, descriptor.connectedAt),
+                server: server,
+                protocolName: protocolName,
+                downloadedBytes: finalTraffic.downloadedBytes,
+                uploadedBytes: finalTraffic.uploadedBytes
+            )
+        }
+
+        sessionMetrics = VPNSessionMetrics(descriptor: descriptor, traffic: finalTraffic)
+        VPNSharedSessionStore.clear()
+    }
+
+    func serverForSession(_ descriptor: VPNSessionDescriptor) -> VPNServer {
+        if let server = servers.first(where: { $0.id == descriptor.serverID }) {
+            return server
+        }
+        return VPNServer(
+            id: descriptor.serverID,
+            serverName: descriptor.serverName,
+            serverIp: "",
+            serverHostname: nil,
+            country: descriptor.country,
+            city: nil,
+            linkSpeed: 0,
+            pricingTier: "Free",
+            load: nil,
+            activeConnections: nil,
+            latencyPingPort: 0,
+            loadDataFresh: false
+        )
+    }
+
+    func saturatingAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? .max : sum
     }
 
     func triggerKillSwitchNotification(for active: ActiveStatisticsSession) {
@@ -1556,7 +1725,8 @@ private extension AppModel {
 
     func makeSessionDescriptor(
         for request: VPNConnectRequest,
-        connectedAt: Date
+        connectedAt: Date,
+        isEstablished: Bool = true
     ) -> VPNSessionDescriptor {
         VPNSessionDescriptor(
             sessionID: request.sessionID,
@@ -1566,6 +1736,7 @@ private extension AppModel {
             countryFlag: request.server.flagEmoji,
             protocolName: request.protocolName == .ikev2 ? "IKEv2/IPSec" : request.protocolName.displayName,
             connectedAt: connectedAt,
+            isEstablished: isEstablished,
             origin: request.origin,
             killSwitchEnabled: request.killSwitchEnabled,
             onDemandEnabled: request.onDemandEnabled

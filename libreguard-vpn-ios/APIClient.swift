@@ -75,12 +75,7 @@ final class APIClient: BackendServicing {
 
     func restoreSession() async throws -> AuthSession? {
         guard sessionStore.session != nil else { return nil }
-        do {
-            return try await refreshSession()
-        } catch {
-            sessionStore.clear()
-            throw error
-        }
+        return try await refreshSession()
     }
 
     func login(email: String, password: String) async throws -> LoginResponse {
@@ -374,10 +369,20 @@ final class APIClient: BackendServicing {
         do {
             return try await task.value
         } catch {
-            sessionStore.clear()
-            onSessionInvalidated?()
+            if Self.shouldInvalidateSession(for: error) {
+                sessionStore.clear()
+                onSessionInvalidated?()
+            }
             throw error
         }
+    }
+
+    private static func shouldInvalidateSession(for error: Error) -> Bool {
+        guard let apiError = error as? APIError else { return false }
+        return apiError.statusCode == 401
+            || apiError.requiresLogin
+            || apiError.requiresDeviceRegistration
+            || apiError.code == "SESSION_EXPIRED"
     }
 
     private func send<Response: Decodable>(

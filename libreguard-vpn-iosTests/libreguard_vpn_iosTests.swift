@@ -560,7 +560,9 @@ struct libreguard_vpn_iosTests {
         ]))
 
         let start = Date().addingTimeInterval(-600)
+        let sessionID = UUID()
         try recorder.record(
+            sessionID: sessionID,
             userId: "user-1",
             connectedAt: start,
             disconnectedAt: Date(),
@@ -570,6 +572,17 @@ struct libreguard_vpn_iosTests {
             uploadedBytes: 250
         )
         try recorder.record(
+            sessionID: sessionID,
+            userId: "user-1",
+            connectedAt: start,
+            disconnectedAt: Date(),
+            server: server,
+            protocolName: .ikev2,
+            downloadedBytes: 1_200,
+            uploadedBytes: 300
+        )
+        try recorder.record(
+            sessionID: UUID(),
             userId: "user-2",
             connectedAt: start,
             disconnectedAt: Date(),
@@ -583,7 +596,7 @@ struct libreguard_vpn_iosTests {
             records: records.filter { $0.userId == "user-1" },
             interval: DateInterval(start: start.addingTimeInterval(-1), end: Date().addingTimeInterval(1))
         )
-        #expect(summary.totalBytes == 1_250)
+        #expect(summary.totalBytes == 1_500)
         #expect(summary.connectedDuration >= 599)
 
         try recorder.clear(userId: "user-1")

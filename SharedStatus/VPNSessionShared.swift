@@ -24,7 +24,7 @@ enum VPNDisconnectIntent: String, Codable, Sendable {
     case suppress
 }
 
-struct TunnelTrafficSnapshot: Equatable, Sendable {
+struct TunnelTrafficSnapshot: Codable, Equatable, Sendable {
     let downloadedBytes: Int64
     let uploadedBytes: Int64
 
@@ -44,9 +44,89 @@ struct VPNSessionDescriptor: Codable, Hashable, Sendable {
     let countryFlag: String
     let protocolName: String
     let connectedAt: Date
+    let isEstablished: Bool
     let origin: VPNConnectionOrigin
     let killSwitchEnabled: Bool
     let onDemandEnabled: Bool
+
+    init(
+        sessionID: UUID,
+        serverID: Int,
+        serverName: String,
+        country: String,
+        countryFlag: String,
+        protocolName: String,
+        connectedAt: Date,
+        isEstablished: Bool = true,
+        origin: VPNConnectionOrigin,
+        killSwitchEnabled: Bool,
+        onDemandEnabled: Bool
+    ) {
+        self.sessionID = sessionID
+        self.serverID = serverID
+        self.serverName = serverName
+        self.country = country
+        self.countryFlag = countryFlag
+        self.protocolName = protocolName
+        self.connectedAt = connectedAt
+        self.isEstablished = isEstablished
+        self.origin = origin
+        self.killSwitchEnabled = killSwitchEnabled
+        self.onDemandEnabled = onDemandEnabled
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID
+        case serverID
+        case serverName
+        case country
+        case countryFlag
+        case protocolName
+        case connectedAt
+        case isEstablished
+        case origin
+        case killSwitchEnabled
+        case onDemandEnabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            sessionID: try container.decode(UUID.self, forKey: .sessionID),
+            serverID: try container.decode(Int.self, forKey: .serverID),
+            serverName: try container.decode(String.self, forKey: .serverName),
+            country: try container.decode(String.self, forKey: .country),
+            countryFlag: try container.decode(String.self, forKey: .countryFlag),
+            protocolName: try container.decode(String.self, forKey: .protocolName),
+            connectedAt: try container.decode(Date.self, forKey: .connectedAt),
+            isEstablished: try container.decodeIfPresent(Bool.self, forKey: .isEstablished) ?? true,
+            origin: try container.decode(VPNConnectionOrigin.self, forKey: .origin),
+            killSwitchEnabled: try container.decode(Bool.self, forKey: .killSwitchEnabled),
+            onDemandEnabled: try container.decode(Bool.self, forKey: .onDemandEnabled)
+        )
+    }
+
+    func established(at date: Date) -> Self {
+        Self(
+            sessionID: sessionID,
+            serverID: serverID,
+            serverName: serverName,
+            country: country,
+            countryFlag: countryFlag,
+            protocolName: protocolName,
+            connectedAt: date,
+            isEstablished: true,
+            origin: origin,
+            killSwitchEnabled: killSwitchEnabled,
+            onDemandEnabled: onDemandEnabled
+        )
+    }
+}
+
+struct VPNTrafficCheckpoint: Codable, Equatable, Sendable {
+    let sessionID: UUID
+    let snapshot: TunnelTrafficSnapshot
+    let sampledAt: Date
 }
 
 struct VPNSessionTraffic: Codable, Hashable, Sendable {
@@ -167,11 +247,16 @@ extension VPNActivityAttributes.ContentState {
 enum VPNSharedSessionStore {
     private static let descriptorKey = "vpn.shared.active-session"
     private static let trafficKey = "vpn.shared.active-traffic"
+    private static let trafficCheckpointKey = "vpn.shared.active-traffic-checkpoint"
     private static let disconnectIntentKey = "vpn.shared.disconnect-intent"
     private static let tunnelErrorKey = "vpn.shared.tunnel-error"
 
     static func save(descriptor: VPNSessionDescriptor) {
         guard let data = try? JSONEncoder().encode(descriptor) else { return }
+        if let existing = loadDescriptor(), existing.sessionID != descriptor.sessionID {
+            defaults?.removeObject(forKey: trafficKey)
+            defaults?.removeObject(forKey: trafficCheckpointKey)
+        }
         defaults?.set(data, forKey: descriptorKey)
     }
 
@@ -180,14 +265,64 @@ enum VPNSharedSessionStore {
         return try? JSONDecoder().decode(VPNSessionDescriptor.self, from: data)
     }
 
-    static func save(traffic: VPNSessionTraffic) {
-        guard let data = try? JSONEncoder().encode(traffic) else { return }
-        defaults?.set(data, forKey: trafficKey)
+    @discardableResult
+    static func save(
+        traffic: VPNSessionTraffic,
+        sessionID: UUID? = nil
+    ) -> VPNSessionTraffic {
+        guard let defaults else {
+            return traffic
+        }
+        if let sessionID,
+           loadDescriptor()?.sessionID != sessionID {
+            return loadTraffic() ?? traffic
+        }
+
+        let persisted: VPNSessionTraffic
+        if let existing = loadTraffic() {
+            let incomingIsNewer = traffic.sampledAt >= existing.sampledAt
+            persisted = VPNSessionTraffic(
+                state: incomingIsNewer ? traffic.state : existing.state,
+                downloadedBytes: max(existing.downloadedBytes, traffic.downloadedBytes),
+                uploadedBytes: max(existing.uploadedBytes, traffic.uploadedBytes),
+                downloadBitsPerSecond: incomingIsNewer
+                    ? traffic.downloadBitsPerSecond
+                    : existing.downloadBitsPerSecond,
+                uploadBitsPerSecond: incomingIsNewer
+                    ? traffic.uploadBitsPerSecond
+                    : existing.uploadBitsPerSecond,
+                sampledAt: incomingIsNewer ? traffic.sampledAt : existing.sampledAt
+            )
+        } else {
+            persisted = traffic
+        }
+
+        guard let persistedData = try? JSONEncoder().encode(persisted) else {
+            return traffic
+        }
+        defaults.set(persistedData, forKey: trafficKey)
+        return persisted
     }
 
     static func loadTraffic() -> VPNSessionTraffic? {
         guard let data = defaults?.data(forKey: trafficKey) else { return nil }
         return try? JSONDecoder().decode(VPNSessionTraffic.self, from: data)
+    }
+
+    static func save(checkpoint: VPNTrafficCheckpoint) {
+        guard loadDescriptor()?.sessionID == checkpoint.sessionID else { return }
+        if let existing = loadCheckpoint(),
+           existing.sessionID == checkpoint.sessionID,
+           existing.sampledAt > checkpoint.sampledAt {
+            return
+        }
+        guard let data = try? JSONEncoder().encode(checkpoint) else { return }
+        defaults?.set(data, forKey: trafficCheckpointKey)
+    }
+
+    static func loadCheckpoint() -> VPNTrafficCheckpoint? {
+        guard let data = defaults?.data(forKey: trafficCheckpointKey) else { return nil }
+        return try? JSONDecoder().decode(VPNTrafficCheckpoint.self, from: data)
     }
 
     static func saveDisconnectIntent(_ intent: VPNDisconnectIntent?) {
@@ -222,6 +357,7 @@ enum VPNSharedSessionStore {
     static func clear() {
         defaults?.removeObject(forKey: descriptorKey)
         defaults?.removeObject(forKey: trafficKey)
+        defaults?.removeObject(forKey: trafficCheckpointKey)
         defaults?.removeObject(forKey: disconnectIntentKey)
         // Keep a packet-tunnel failure until OpenVPNManager consumes it after
         // the status callback; the app's disconnect bookkeeping runs first.

@@ -151,6 +151,165 @@ struct ConnectionTransitionTests {
         #expect(app.sessionMetrics != nil)
     }
 
+    @Test func statisticsUseTheNetworkExtensionConnectedDate() async throws {
+        let manager = ControlledVPNManager()
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 20)])
+        app.session = makeSession(userId: "connected-date-user")
+        let connectedDate = Date(timeIntervalSince1970: 1_234_567)
+        manager.connectedDate = connectedDate
+
+        app.requestConnectionToSelectedServer()
+        await settle()
+        manager.emit(.connected)
+        await settle()
+
+        #expect(app.sessionMetrics?.descriptor.connectedAt == connectedDate)
+        VPNSharedSessionStore.clear()
+    }
+
+    @Test func restoringIKEv2SessionRecoversTrafficSinceTheLastCheckpoint() async throws {
+        let manager = ControlledVPNManager(status: .connected)
+        manager.connectedDate = Date(timeIntervalSince1970: 2_000)
+        let sessionID = UUID()
+        let descriptor = VPNSessionDescriptor(
+            sessionID: sessionID,
+            serverID: 21,
+            serverName: "DE-21",
+            country: "Germany",
+            countryFlag: "🇩🇪",
+            protocolName: "IKEv2/IPSec",
+            connectedAt: Date(timeIntervalSince1970: 2_000),
+            origin: .manual,
+            killSwitchEnabled: false,
+            onDemandEnabled: false
+        )
+        VPNSharedSessionStore.clear()
+        VPNSharedSessionStore.save(descriptor: descriptor)
+        VPNSharedSessionStore.save(
+            traffic: VPNSessionTraffic(
+                state: .connected,
+                downloadedBytes: 100,
+                uploadedBytes: 40,
+                downloadBitsPerSecond: 0,
+                uploadBitsPerSecond: 0,
+                sampledAt: Date(timeIntervalSince1970: 2_010)
+            ),
+            sessionID: sessionID
+        )
+        VPNSharedSessionStore.save(
+            checkpoint: VPNTrafficCheckpoint(
+                sessionID: sessionID,
+                snapshot: TunnelTrafficSnapshot(downloadedBytes: 1_000, uploadedBytes: 400),
+                sampledAt: Date(timeIntervalSince1970: 2_010)
+            )
+        )
+
+        let app = makeApp(
+            manager: manager,
+            servers: [],
+            sampler: ScriptedTrafficSampler([
+                TunnelTrafficSnapshot(downloadedBytes: 1_600, uploadedBytes: 650)
+            ])
+        )
+        manager.trafficSnapshot = TunnelTrafficSnapshot(downloadedBytes: 1_600, uploadedBytes: 650)
+        app.session = makeSession(userId: "restore-user")
+
+        await app.refreshVPNStatus()
+        await settle()
+
+        #expect(app.sessionMetrics?.traffic.downloadedBytes == 700)
+        #expect(app.sessionMetrics?.traffic.uploadedBytes == 290)
+        #expect(app.selectedServerID == 21)
+        VPNSharedSessionStore.clear()
+    }
+
+    @Test func orphanedSessionIsFinalizedOnceAfterAProcessRestart() async throws {
+        let manager = ControlledVPNManager(status: .disconnected)
+        let recorder = RecordingStatisticsRecorder()
+        let sessionID = UUID()
+        let descriptor = VPNSessionDescriptor(
+            sessionID: sessionID,
+            serverID: 22,
+            serverName: "DE-22",
+            country: "Germany",
+            countryFlag: "🇩🇪",
+            protocolName: "IKEv2/IPSec",
+            connectedAt: Date(timeIntervalSince1970: 3_000),
+            origin: .manual,
+            killSwitchEnabled: false,
+            onDemandEnabled: false
+        )
+        VPNSharedSessionStore.clear()
+        VPNSharedSessionStore.save(descriptor: descriptor)
+        VPNSharedSessionStore.save(
+            traffic: VPNSessionTraffic(
+                state: .connected,
+                downloadedBytes: 500,
+                uploadedBytes: 125,
+                downloadBitsPerSecond: 0,
+                uploadBitsPerSecond: 0,
+                sampledAt: Date(timeIntervalSince1970: 3_100)
+            ),
+            sessionID: sessionID
+        )
+
+        let app = makeApp(manager: manager, servers: [], recorder: recorder)
+        app.session = makeSession(userId: "orphan-user")
+
+        await app.refreshVPNStatus()
+        await app.refreshVPNStatus()
+
+        #expect(recorder.records.count == 1)
+        #expect(recorder.records.first?.downloadedBytes == 500)
+        #expect(recorder.records.first?.uploadedBytes == 125)
+        VPNSharedSessionStore.clear()
+    }
+
+    @Test func sharedTrafficStoreKeepsTheLargestOpenVPNTotalsAcrossWriters() throws {
+        let sessionID = UUID()
+        let descriptor = VPNSessionDescriptor(
+            sessionID: sessionID,
+            serverID: 23,
+            serverName: "DE-23",
+            country: "Germany",
+            countryFlag: "🇩🇪",
+            protocolName: "OpenVPN",
+            connectedAt: Date(timeIntervalSince1970: 4_000),
+            origin: .manual,
+            killSwitchEnabled: false,
+            onDemandEnabled: false
+        )
+        VPNSharedSessionStore.clear()
+        VPNSharedSessionStore.save(descriptor: descriptor)
+
+        VPNSharedSessionStore.save(
+            traffic: VPNSessionTraffic(
+                state: .connected,
+                downloadedBytes: 1_000,
+                uploadedBytes: 400,
+                downloadBitsPerSecond: 0,
+                uploadBitsPerSecond: 0,
+                sampledAt: Date(timeIntervalSince1970: 4_010)
+            ),
+            sessionID: sessionID
+        )
+        VPNSharedSessionStore.save(
+            traffic: VPNSessionTraffic(
+                state: .connected,
+                downloadedBytes: 700,
+                uploadedBytes: 300,
+                downloadBitsPerSecond: 0,
+                uploadBitsPerSecond: 0,
+                sampledAt: Date(timeIntervalSince1970: 4_011)
+            ),
+            sessionID: sessionID
+        )
+
+        #expect(VPNSharedSessionStore.loadTraffic()?.downloadedBytes == 1_000)
+        #expect(VPNSharedSessionStore.loadTraffic()?.uploadedBytes == 400)
+        VPNSharedSessionStore.clear()
+    }
+
     @Test func reconnectCanBeCancelledWhileDisconnecting() async throws {
         let manager = ControlledVPNManager(status: .connected)
         manager.holdDisconnect = true
@@ -281,6 +440,7 @@ struct ConnectionTransitionTests {
         await app.confirmKillSwitchDisableAndDisconnect()
 
         #expect(app.isKillSwitchEnabled == false)
+        #expect(manager.policyUpdates.last == .disabled)
         #expect(manager.disconnectCalls == 1)
     }
 
@@ -475,11 +635,13 @@ private final class ControlledVPNManager: VPNManaging {
     }
 
     var status: VPNConnectionState
+    var connectedDate: Date?
     var onStatusChange: ((VPNConnectionState) -> Void)?
     var onDisconnectError: ((Error) -> Void)?
     var holdDisconnect = false
     var connectError: Error?
     var returnDisconnectedAfterStart = false
+    var trafficSnapshot: TunnelTrafficSnapshot?
     private(set) var connectCalls: [ConnectCall] = []
     private(set) var disconnectCalls = 0
     private(set) var policyUpdates: [VPNConnectionPolicy] = []
@@ -487,6 +649,8 @@ private final class ControlledVPNManager: VPNManaging {
 
     init(status: VPNConnectionState = .disconnected) {
         self.status = status
+        self.connectedDate = nil
+        self.trafficSnapshot = nil
     }
 
     func refreshStatus() async {
@@ -512,6 +676,10 @@ private final class ControlledVPNManager: VPNManaging {
     func apply(policy: VPNConnectionPolicy) async throws -> Bool {
         policyUpdates.append(policy)
         return true
+    }
+
+    func currentTrafficSnapshot() async -> TunnelTrafficSnapshot? {
+        trafficSnapshot
     }
 
     func disconnect() async {
@@ -570,6 +738,7 @@ private final class RecordingStatisticsRecorder: LocalStatisticsRecording {
     private(set) var clearedUserIDs: [String] = []
 
     func record(
+        sessionID: UUID,
         userId: String,
         connectedAt: Date,
         disconnectedAt: Date,
