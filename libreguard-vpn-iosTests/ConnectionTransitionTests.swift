@@ -382,6 +382,20 @@ struct ConnectionTransitionTests {
         #expect(ikev2.disconnectCalls == 0)
     }
 
+    @Test func coordinatorRecoversOnlyTheStoppedIKEv2Profile() async {
+        let ikev2 = ControlledVPNManager()
+        let openVPN = ControlledVPNManager()
+        let coordinator = VPNManagerCoordinator(ikev2Manager: ikev2, openVPNManager: openVPN)
+
+        let recovered = await coordinator.recoverStoppedProfile(for: .ikev2)
+        let ignored = await coordinator.recoverStoppedProfile(for: .openVPN)
+
+        #expect(recovered.isSafe)
+        #expect(ikev2.stoppedProfileRecoveryProtocols == [.ikev2])
+        #expect(openVPN.stoppedProfileRecoveryProtocols.isEmpty)
+        #expect(ignored == .notApplicable)
+    }
+
     @Test func killSwitchPolicyAlwaysEnablesOnDemand() {
         #expect(VPNConnectionPolicy.appPolicy(autoConnectEnabled: false, killSwitchEnabled: false) == .disabled)
         #expect(VPNConnectionPolicy.appPolicy(autoConnectEnabled: true, killSwitchEnabled: false).onDemandEnabled)
@@ -459,6 +473,85 @@ struct ConnectionTransitionTests {
         #expect(app.isKillSwitchEnabled == false)
         #expect(manager.policyUpdates.last == .disabled)
         #expect(manager.disconnectCalls == 1)
+    }
+
+    @Test func manualDisconnectReleasesStoppedIKEv2ProfileWhenKillSwitchIsOff() async throws {
+        let manager = ControlledVPNManager(status: .connected)
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)])
+
+        await app.disconnectVPN()
+        await settle()
+
+        #expect(manager.stoppedProfileRecoveryProtocols == [.ikev2])
+    }
+
+    @Test func unexpectedIKEv2DisconnectRecoversStoppedProfile() async throws {
+        let manager = ControlledVPNManager()
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)])
+        app.session = makeSession(userId: "recovery-user")
+
+        app.requestConnectionToSelectedServer()
+        await settle()
+        manager.emit(.connected)
+        await settle()
+        manager.emit(.disconnected)
+        await settle()
+
+        #expect(manager.stoppedProfileRecoveryProtocols == [.ikev2])
+    }
+
+    @Test func stoppedProfileRecoveryFailureIsShownToTheUser() async throws {
+        let manager = ControlledVPNManager()
+        manager.stoppedProfileRecoveryResult = VPNStoppedProfileRecoveryResult(
+            isApplicable: true,
+            routingReleased: false,
+            onDemandDisabled: true,
+            profileDisabled: true,
+            diagnostic: "save failed"
+        )
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)])
+        app.session = makeSession(userId: "recovery-failure-user")
+
+        app.requestConnectionToSelectedServer()
+        await settle()
+        manager.emit(.connected)
+        await settle()
+        manager.emit(.disconnected)
+        await settle()
+
+        #expect(app.presentedError?.code == "VPN_STOPPED_PROFILE_RECOVERY_FAILED")
+    }
+
+    @Test func unexpectedDisconnectKeepsKillSwitchProfileProtected() async throws {
+        let manager = ControlledVPNManager()
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)])
+        app.session = makeSession(userId: "kill-switch-user")
+        app.subscription = try makeSubscription(isPro: true)
+        await app.setKillSwitchEnabled(true)
+
+        app.requestConnectionToSelectedServer()
+        await settle()
+        manager.emit(.connected)
+        await settle()
+        manager.emit(.disconnected)
+        await settle()
+
+        #expect(manager.stoppedProfileRecoveryProtocols.isEmpty)
+    }
+
+    @Test func reassertingIKEv2TunnelDoesNotRecoverStoppedProfile() async throws {
+        let manager = ControlledVPNManager()
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)])
+        app.session = makeSession(userId: "reasserting-user")
+
+        app.requestConnectionToSelectedServer()
+        await settle()
+        manager.emit(.connected)
+        await settle()
+        manager.emit(.reasserting)
+        await settle()
+
+        #expect(manager.stoppedProfileRecoveryProtocols.isEmpty)
     }
 
     @Test func disconnectPersistsStatisticsForTheActiveUser() async throws {
@@ -662,6 +755,14 @@ private final class ControlledVPNManager: VPNManaging {
     private(set) var connectCalls: [ConnectCall] = []
     private(set) var disconnectCalls = 0
     private(set) var policyUpdates: [VPNConnectionPolicy] = []
+    private(set) var stoppedProfileRecoveryProtocols: [VPNConfigurationProtocol] = []
+    var stoppedProfileRecoveryResult = VPNStoppedProfileRecoveryResult(
+        isApplicable: true,
+        routingReleased: true,
+        onDemandDisabled: true,
+        profileDisabled: true,
+        diagnostic: nil
+    )
     private var disconnectContinuation: CheckedContinuation<Void, Never>?
 
     init(status: VPNConnectionState = .disconnected) {
@@ -712,6 +813,13 @@ private final class ControlledVPNManager: VPNManaging {
 
         status = .disconnected
         onStatusChange?(status)
+    }
+
+    func recoverStoppedProfile(
+        for protocolName: VPNConfigurationProtocol
+    ) async -> VPNStoppedProfileRecoveryResult {
+        stoppedProfileRecoveryProtocols.append(protocolName)
+        return stoppedProfileRecoveryResult
     }
 
     func disconnectAndForget() async -> VPNProfileCleanupResult {

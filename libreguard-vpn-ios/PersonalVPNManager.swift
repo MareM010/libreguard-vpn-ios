@@ -15,6 +15,12 @@ protocol VPNManaging: AnyObject {
     func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, policy: VPNConnectionPolicy) async throws
     @discardableResult func apply(policy: VPNConnectionPolicy) async throws -> Bool
     func disconnect() async
+    /// Releases routing owned by a confirmed-stopped profile without removing
+    /// its saved credentials or preferences. Only IKEv2 profiles participate
+    /// in this recovery path.
+    @discardableResult func recoverStoppedProfile(
+        for protocolName: VPNConfigurationProtocol
+    ) async -> VPNStoppedProfileRecoveryResult
     /// Persistently disables system on-demand behavior before an account session
     /// is discarded. Coordinators call this on every managed profile before
     /// asking either tunnel to stop.
@@ -27,6 +33,12 @@ extension VPNManaging {
     var connectedDate: Date? { nil }
     func currentTrafficSnapshot() async -> TunnelTrafficSnapshot? { nil }
     func setCertificatePreparationHandler(_ handler: ((String?) -> Void)?) {}
+    @discardableResult
+    func recoverStoppedProfile(
+        for protocolName: VPNConfigurationProtocol
+    ) async -> VPNStoppedProfileRecoveryResult {
+        .notApplicable
+    }
     @discardableResult func disableOnDemandAndProfile() async -> Bool { true }
 }
 
@@ -58,6 +70,30 @@ struct VPNProfileCleanupResult: Equatable, Sendable {
             profileRemoved: results.allSatisfy(\.profileRemoved),
             diagnostic: diagnostics.isEmpty ? nil : diagnostics
         )
+    }
+}
+
+/// The outcome of restoring ordinary network routing after Network Extension
+/// has already confirmed that an IKEv2 tunnel stopped. This intentionally does
+/// not represent profile removal: a recovered profile retains its credentials
+/// and can be configured again by the next connection attempt.
+struct VPNStoppedProfileRecoveryResult: Equatable, Sendable {
+    let isApplicable: Bool
+    let routingReleased: Bool
+    let onDemandDisabled: Bool
+    let profileDisabled: Bool
+    let diagnostic: String?
+
+    static let notApplicable = VPNStoppedProfileRecoveryResult(
+        isApplicable: false,
+        routingReleased: true,
+        onDemandDisabled: true,
+        profileDisabled: true,
+        diagnostic: nil
+    )
+
+    var isSafe: Bool {
+        !isApplicable || (routingReleased && onDemandDisabled && profileDisabled)
     }
 }
 
@@ -96,7 +132,10 @@ struct VPNConnectionPolicy: Equatable {
         // the server's negotiated traffic selectors still determine what the
         // IKEv2 tunnel can carry.
         protocolConfiguration.includeAllNetworks = true
-        protocolConfiguration.enforceRoutes = true
+        // includeAllNetworks and enforceRoutes are alternative routing
+        // controls. Keep the full-tunnel setting, but do not ask iOS to
+        // enforce a second default route that can outlive a stopped tunnel.
+        protocolConfiguration.enforceRoutes = false
     }
 }
 
@@ -229,12 +268,29 @@ final class PersonalVPNManager: VPNManaging {
         guard !isRunningInSimulator else { return false }
         try await loadPreferences()
         guard let vpnProtocol = manager.protocolConfiguration as? NEVPNProtocolIKEv2 else { return false }
-        policy.apply(to: vpnProtocol)
-        applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
+
+        let nativeStatus = manager.connection.status
+        let shouldKeepFullTunnel = policy.killSwitchEnabled || !Self.isTerminalStatus(nativeStatus)
+        if shouldKeepFullTunnel {
+            policy.apply(to: vpnProtocol)
+            applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
+        } else {
+            // A terminal non-kill-switch profile must not reintroduce the
+            // stale full-tunnel state merely because a preference changed.
+            VPNConnectionPolicy.disabled.apply(to: vpnProtocol as NEVPNProtocol)
+            applyOnDemandConfiguration(enabled: false)
+            manager.isEnabled = false
+        }
         try await savePreferences()
         try await loadPreferences()
         guard let savedProtocol = manager.protocolConfiguration else { return false }
-        return savedProtocol.includeAllNetworks && savedProtocol.enforceRoutes
+        if shouldKeepFullTunnel {
+            return savedProtocol.includeAllNetworks && !savedProtocol.enforceRoutes
+        }
+        return !savedProtocol.includeAllNetworks
+            && !savedProtocol.enforceRoutes
+            && !manager.isOnDemandEnabled
+            && !manager.isEnabled
     }
 
     func disconnect() async {
@@ -242,6 +298,88 @@ final class PersonalVPNManager: VPNManaging {
         status = .disconnecting
         manager.connection.stopVPNTunnel()
         await refreshStatus()
+    }
+
+    func recoverStoppedProfile(
+        for protocolName: VPNConfigurationProtocol
+    ) async -> VPNStoppedProfileRecoveryResult {
+        guard protocolName == .ikev2, !isRunningInSimulator else {
+            return .notApplicable
+        }
+
+        let initialStatus = manager.connection.status
+        guard Self.isTerminalStatus(initialStatus) else {
+            logger.info("Skipped IKEv2 stopped-profile recovery because status=\(initialStatus.rawValue, privacy: .public)")
+            return .notApplicable
+        }
+
+        do {
+            logger.info("Recovering stopped IKEv2 profile status=\(initialStatus.rawValue, privacy: .public)")
+            try await loadPreferences()
+            try Task.checkCancellation()
+
+            let refreshedStatus = manager.connection.status
+            guard Self.isTerminalStatus(refreshedStatus) else {
+                logger.info("Skipped IKEv2 stopped-profile recovery after refresh because status=\(refreshedStatus.rawValue, privacy: .public)")
+                return .notApplicable
+            }
+            guard let vpnProtocol = manager.protocolConfiguration as? NEVPNProtocolIKEv2 else {
+                return .notApplicable
+            }
+
+            // Deliberately apply the base policy rather than the IKEv2
+            // full-tunnel override. The tunnel is already terminal, and this
+            // profile must relinquish any routing it can still own.
+            VPNConnectionPolicy.disabled.apply(to: vpnProtocol as NEVPNProtocol)
+            manager.onDemandRules = nil
+            manager.isOnDemandEnabled = false
+            manager.isEnabled = false
+            try Task.checkCancellation()
+            try await savePreferences()
+            try Task.checkCancellation()
+            try await loadPreferences()
+
+            guard let savedProtocol = manager.protocolConfiguration else {
+                return VPNStoppedProfileRecoveryResult(
+                    isApplicable: true,
+                    routingReleased: false,
+                    onDemandDisabled: false,
+                    profileDisabled: false,
+                    diagnostic: "IKEv2 profile could not be reloaded after stopped-profile recovery."
+                )
+            }
+
+            let routingReleased = !savedProtocol.includeAllNetworks && !savedProtocol.enforceRoutes
+            let onDemandDisabled = !manager.isOnDemandEnabled && (manager.onDemandRules?.isEmpty ?? true)
+            let profileDisabled = !manager.isEnabled
+            let diagnostic: String? = routingReleased && onDemandDisabled && profileDisabled
+                ? nil
+                : "IKEv2 stopped-profile recovery could not verify released routing."
+            let result = VPNStoppedProfileRecoveryResult(
+                isApplicable: true,
+                routingReleased: routingReleased,
+                onDemandDisabled: onDemandDisabled,
+                profileDisabled: profileDisabled,
+                diagnostic: diagnostic
+            )
+            logger.info(
+                "IKEv2 stopped-profile recovery routeReleased=\(result.routingReleased, privacy: .public) onDemandDisabled=\(result.onDemandDisabled, privacy: .public) profileDisabled=\(result.profileDisabled, privacy: .public)"
+            )
+            return result
+        } catch is CancellationError {
+            logger.info("IKEv2 stopped-profile recovery cancelled")
+            return .notApplicable
+        } catch {
+            let diagnostic = "IKEv2 stopped-profile recovery failed: \(Self.describe(error))"
+            logger.error("\(diagnostic, privacy: .public)")
+            return VPNStoppedProfileRecoveryResult(
+                isApplicable: true,
+                routingReleased: false,
+                onDemandDisabled: false,
+                profileDisabled: false,
+                diagnostic: diagnostic
+            )
+        }
     }
 
     @discardableResult
@@ -440,6 +578,10 @@ final class PersonalVPNManager: VPNManaging {
             details.append("underlying \(underlying.domain)(\(underlying.code)): \(underlying.localizedDescription)")
         }
         return details.joined(separator: " | ")
+    }
+
+    nonisolated private static func isTerminalStatus(_ status: NEVPNStatus) -> Bool {
+        status == .disconnected || status == .invalid
     }
 }
 

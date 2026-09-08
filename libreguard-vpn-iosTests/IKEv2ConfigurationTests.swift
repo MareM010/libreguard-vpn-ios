@@ -181,7 +181,7 @@ struct IKEv2ConfigurationTests {
         #expect(vpnProtocol.certificateType.rawValue == 6)
         #expect(vpnProtocol.enablePFS == false)
         #expect(vpnProtocol.includeAllNetworks)
-        #expect(vpnProtocol.enforceRoutes)
+        #expect(vpnProtocol.enforceRoutes == false)
     }
 
     @Test func translatorKeepsIKEv2FullTunnelRoutingWithKillSwitchDisabled() throws {
@@ -199,7 +199,7 @@ struct IKEv2ConfigurationTests {
         )
 
         #expect(vpnProtocol.includeAllNetworks)
-        #expect(vpnProtocol.enforceRoutes)
+        #expect(vpnProtocol.enforceRoutes == false)
     }
 
     @Test func translatorSelectsECDSAP256ForAnECDSAClientIdentity() throws {

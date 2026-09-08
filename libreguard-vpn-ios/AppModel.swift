@@ -106,7 +106,10 @@ final class AppModel: ObservableObject {
     private var pendingStatisticsRequest: VPNConnectRequest?
     private var activeStatisticsSession: ActiveStatisticsSession?
     private var isExplicitDisconnectInProgress = false
+    private var shouldRecoverStoppedProfileAfterExplicitDisconnect = false
     private var killSwitchIncidentSessionID: UUID?
+    private var stoppedProfileRecoveryTask: Task<Void, Never>?
+    private var stoppedProfileRecoveryGeneration: UInt = 0
     private var queuedVPNConnectRequest: VPNConnectRequest? {
         didSet {
             hasQueuedVPNReconnect = queuedVPNConnectRequest != nil
@@ -128,6 +131,12 @@ final class AppModel: ObservableObject {
                 false
             }
         }
+    }
+
+    private enum StoppedProfileRecoveryTrigger: Equatable {
+        case unexpectedDisconnect
+        case lifecycleRefresh
+        case explicitDisconnect
     }
 
     init(
@@ -213,6 +222,7 @@ final class AppModel: ObservableObject {
         }
 
         await vpn.refreshStatus()
+        await recoverStoppedIKEv2ProfileIfNeeded(trigger: .lifecycleRefresh)
         logger.info("Launch VPN status=\(String(describing: self.vpnStatus), privacy: .public)")
         let mayHavePersistedVPN = vpnStatus.isConnected
             || vpnStatus.isBusy
@@ -937,6 +947,7 @@ final class AppModel: ObservableObject {
 
     func refreshVPNStatus() async {
         await vpn.refreshStatus()
+        await recoverStoppedIKEv2ProfileIfNeeded(trigger: .lifecycleRefresh)
         guard session != nil, activeVPNTransition == nil else { return }
         if vpnStatus.isConnected {
             await restoreActiveSessionIfNeeded()
@@ -1474,12 +1485,14 @@ final class AppModel: ObservableObject {
     }
 
     private func beginConnect(_ request: VPNConnectRequest) {
+        cancelStoppedProfileRecovery()
         vpnTransitionTask?.cancel()
         vpnTransitionGeneration &+= 1
         let generation = vpnTransitionGeneration
         activeVPNTransition = .connect(request)
         pendingStatisticsRequest = request
         isExplicitDisconnectInProgress = false
+        shouldRecoverStoppedProfileAfterExplicitDisconnect = false
         killSwitchIncidentSessionID = nil
         vpnStatus = .connecting
         VPNSharedSessionStore.saveDisconnectIntent(nil)
@@ -1537,24 +1550,29 @@ final class AppModel: ObservableObject {
             queuedVPNConnectRequest = nil
         }
 
+        cancelStoppedProfileRecovery()
         vpnTransitionTask?.cancel()
         vpnTransitionGeneration &+= 1
         let generation = vpnTransitionGeneration
         activeVPNTransition = .disconnect
         isExplicitDisconnectInProgress = true
+        shouldRecoverStoppedProfileAfterExplicitDisconnect = !preservingQueuedConnection && !isKillSwitchEnabled
         VPNSharedSessionStore.saveDisconnectIntent(preservingQueuedConnection ? .suppress : .notify)
         vpnStatus = .disconnecting
 
         vpnTransitionTask = Task { [weak self] in
             guard let self else { return }
-            _ = try? await vpn.apply(
-                policy: VPNConnectionPolicy(
-                    killSwitchEnabled: isKillSwitchEnabled,
-                    onDemandEnabled: false
+            if isKillSwitchEnabled {
+                _ = try? await vpn.apply(
+                    policy: VPNConnectionPolicy(
+                        killSwitchEnabled: true,
+                        onDemandEnabled: false
+                    )
                 )
-            )
+            }
             await refreshTrafficMetricsOnce(updateLiveActivity: true)
             await vpn.disconnect()
+            await recoverStoppedIKEv2ProfileIfNeeded(trigger: .explicitDisconnect)
             guard generation == vpnTransitionGeneration, !Task.isCancelled else { return }
             activeVPNTransition = nil
             handleVPNStatusChange(vpn.status)
@@ -1578,9 +1596,16 @@ final class AppModel: ObservableObject {
 
         let previousStatus = vpnStatus
         vpnStatus = status
+        var stoppedProfileRecoveryTrigger: StoppedProfileRecoveryTrigger?
 
         switch status {
         case .invalid, .disconnected:
+            let shouldRecoverUnexpectedProfile = canStartStoppedIKEv2ProfileRecovery(
+                trigger: .unexpectedDisconnect
+            )
+            let shouldRecoverExplicitProfile = canStartStoppedIKEv2ProfileRecovery(
+                trigger: .explicitDisconnect
+            )
             activeVPNTransition = nil
             if let active = activeStatisticsSession,
                active.descriptor.killSwitchEnabled,
@@ -1596,10 +1621,19 @@ final class AppModel: ObservableObject {
                 notifyDisconnect: !suppressDisconnect
             )
             isExplicitDisconnectInProgress = false
-            guard let queuedRequest = queuedVPNConnectRequest else { return }
-            queuedVPNConnectRequest = nil
-            beginConnect(queuedRequest)
+
+            if let queuedRequest = queuedVPNConnectRequest {
+                queuedVPNConnectRequest = nil
+                beginConnect(queuedRequest)
+                // A queued connection is about to create a fresh full-tunnel
+                // configuration, so it wins over stopped-profile recovery.
+            } else if shouldRecoverExplicitProfile {
+                stoppedProfileRecoveryTrigger = .explicitDisconnect
+            } else if shouldRecoverUnexpectedProfile {
+                stoppedProfileRecoveryTrigger = .unexpectedDisconnect
+            }
         case .connected:
+            shouldRecoverStoppedProfileAfterExplicitDisconnect = false
             activeVPNTransition = nil
             if previousStatus == .reasserting, let metrics = sessionMetrics {
                 publishSessionMetrics(metrics.replacingState(.connected))
@@ -1628,14 +1662,140 @@ final class AppModel: ObservableObject {
         case .connecting, .disconnecting:
             break
         }
+
+        if let stoppedProfileRecoveryTrigger {
+            scheduleStoppedIKEv2ProfileRecovery(trigger: stoppedProfileRecoveryTrigger)
+        }
+    }
+
+    private func recoverStoppedIKEv2ProfileIfNeeded(
+        trigger: StoppedProfileRecoveryTrigger
+    ) async {
+        if let stoppedProfileRecoveryTask {
+            await stoppedProfileRecoveryTask.value
+            return
+        }
+        guard canStartStoppedIKEv2ProfileRecovery(trigger: trigger) else { return }
+
+        stoppedProfileRecoveryGeneration &+= 1
+        let generation = stoppedProfileRecoveryGeneration
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performStoppedIKEv2ProfileRecovery(trigger: trigger)
+            guard self.stoppedProfileRecoveryGeneration == generation else { return }
+            self.stoppedProfileRecoveryTask = nil
+        }
+        stoppedProfileRecoveryTask = task
+        await task.value
+    }
+
+    private func scheduleStoppedIKEv2ProfileRecovery(
+        trigger: StoppedProfileRecoveryTrigger
+    ) {
+        guard stoppedProfileRecoveryTask == nil,
+              canStartStoppedIKEv2ProfileRecovery(trigger: trigger) else { return }
+
+        stoppedProfileRecoveryGeneration &+= 1
+        let generation = stoppedProfileRecoveryGeneration
+        stoppedProfileRecoveryTask = Task { [weak self] in
+            guard let self else { return }
+            await self.performStoppedIKEv2ProfileRecovery(trigger: trigger)
+            guard self.stoppedProfileRecoveryGeneration == generation else { return }
+            self.stoppedProfileRecoveryTask = nil
+        }
+    }
+
+    private func performStoppedIKEv2ProfileRecovery(
+        trigger: StoppedProfileRecoveryTrigger
+    ) async {
+        guard canContinueStoppedIKEv2ProfileRecovery(trigger: trigger) else { return }
+
+        let result = await vpn.recoverStoppedProfile(for: .ikev2)
+        guard !Task.isCancelled,
+              canContinueStoppedIKEv2ProfileRecovery(trigger: trigger) else { return }
+
+        if trigger == .explicitDisconnect {
+            shouldRecoverStoppedProfileAfterExplicitDisconnect = false
+        }
+
+        guard result.isSafe else {
+            let diagnostic = result.diagnostic ?? "The IKEv2 profile could not release its stopped routing."
+            logger.error("\(diagnostic, privacy: .public)")
+            present(APIError(
+                message: "Could not restore normal internet routing after the VPN stopped. Please try disconnecting again.",
+                code: "VPN_STOPPED_PROFILE_RECOVERY_FAILED"
+            ))
+            return
+        }
+
+        if result.isApplicable {
+            logger.info("Recovered stopped IKEv2 profile routing")
+        }
+
+        guard trigger != .explicitDisconnect,
+              isAutoConnectEnabled,
+              session != nil,
+              vpnStatus == .disconnected || vpnStatus == .invalid,
+              activeVPNTransition == nil,
+              queuedVPNConnectRequest == nil else { return }
+        await reconcileAutoConnectOnLaunch()
+    }
+
+    private func canStartStoppedIKEv2ProfileRecovery(
+        trigger: StoppedProfileRecoveryTrigger
+    ) -> Bool {
+        guard vpnStatus == .disconnected || vpnStatus == .invalid,
+              !isKillSwitchEnabled else { return false }
+
+        switch trigger {
+        case .unexpectedDisconnect, .lifecycleRefresh:
+            guard !isExplicitDisconnectInProgress,
+                  activeVPNTransition == nil,
+                  queuedVPNConnectRequest == nil,
+                  let descriptor = activeStatisticsSession?.descriptor ?? VPNSharedSessionStore.loadDescriptor() else {
+                return false
+            }
+            return descriptor.isEstablished && isIKEv2Session(descriptor)
+        case .explicitDisconnect:
+            return shouldRecoverStoppedProfileAfterExplicitDisconnect
+                && queuedVPNConnectRequest == nil
+        }
+    }
+
+    private func canContinueStoppedIKEv2ProfileRecovery(
+        trigger: StoppedProfileRecoveryTrigger
+    ) -> Bool {
+        guard vpnStatus == .disconnected || vpnStatus == .invalid,
+              !isKillSwitchEnabled,
+              queuedVPNConnectRequest == nil else { return false }
+
+        switch trigger {
+        case .unexpectedDisconnect, .lifecycleRefresh:
+            return !isExplicitDisconnectInProgress && activeVPNTransition == nil
+        case .explicitDisconnect:
+            return shouldRecoverStoppedProfileAfterExplicitDisconnect
+        }
+    }
+
+    private func isIKEv2Session(_ descriptor: VPNSessionDescriptor) -> Bool {
+        descriptor.protocolName == VPNConfigurationProtocol.ikev2.displayName
+            || descriptor.protocolName == "IKEv2/IPSec"
+    }
+
+    private func cancelStoppedProfileRecovery() {
+        stoppedProfileRecoveryGeneration &+= 1
+        stoppedProfileRecoveryTask?.cancel()
+        stoppedProfileRecoveryTask = nil
     }
 
     private func cancelActiveVPNTransition() {
+        cancelStoppedProfileRecovery()
         vpnTransitionGeneration &+= 1
         vpnTransitionTask?.cancel()
         vpnTransitionTask = nil
         activeVPNTransition = nil
         queuedVPNConnectRequest = nil
+        shouldRecoverStoppedProfileAfterExplicitDisconnect = false
         pendingStatisticsRequest = nil
         trafficMonitorTask?.cancel()
         trafficMonitorTask = nil

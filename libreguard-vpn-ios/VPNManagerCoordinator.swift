@@ -137,6 +137,13 @@ final class VPNManagerCoordinator: VPNManaging {
         reconcileStatus()
     }
 
+    func recoverStoppedProfile(
+        for protocolName: VPNConfigurationProtocol
+    ) async -> VPNStoppedProfileRecoveryResult {
+        guard protocolName == .ikev2 else { return .notApplicable }
+        return await ikev2Manager.recoverStoppedProfile(for: protocolName)
+    }
+
     @discardableResult
     func disableOnDemandAndProfile() async -> Bool {
         let ikev2Disabled = await ikev2Manager.disableOnDemandAndProfile()
