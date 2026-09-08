@@ -2821,7 +2821,10 @@ private struct ServerRow: View {
     let onFavorite: () -> Void
 
     var body: some View {
-        ZStack(alignment: .trailing) {
+        // The favourite control is positioned in the space above the load bar.
+        // Aligning to the top of the content keeps its centre at the midpoint
+        // between the card's top edge and the progress bar.
+        ZStack(alignment: .topTrailing) {
             Button(action: onSelect) {
                 VStack(spacing: 10) {
                     HStack(spacing: 12) {
@@ -2868,11 +2871,7 @@ private struct ServerRow: View {
 
                         // Reserve space for the independent favourite button.
                         Color.clear
-                            .frame(width: 30)
-
-                        Image(systemName: "chevron.right")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(isSelected ? Theme.primary : .secondary)
+                            .frame(width: 34)
                     }
 
                     ProgressBar(progress: loadProgress, color: loadColor, height: 5)
@@ -2885,11 +2884,13 @@ private struct ServerRow: View {
 
             Button(action: onFavorite) {
                 Image(systemName: isFavorite ? "star.fill" : "star")
+                    .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(isFavorite ? Theme.primary : .secondary)
                     .contentTransition(.symbolEffect(.replace))
                     .symbolEffect(.bounce, value: isFavorite)
-                    .frame(width: 30, height: 30)
+                    .frame(width: 34, height: 34)
             }
+            .offset(y: favoriteVerticalOffset)
             .buttonStyle(.plain)
             .rippleEffect(tint: Theme.primary, shape: Circle())
             .accessibilityLabel(isFavorite ? "Remove \(server.serverName) from favourites" : "Add \(server.serverName) to favourites")
@@ -2898,6 +2899,18 @@ private struct ServerRow: View {
         .padding(13)
         .background(isSelected ? Theme.primary.opacity(0.06) : Theme.card, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(isSelected ? Theme.primary : Theme.border, lineWidth: isSelected ? 1.4 : 1))
+    }
+
+    private var favoriteVerticalOffset: CGFloat {
+        let cardInset: CGFloat = 13
+        let serverInfoRowHeight: CGFloat = 34
+        let progressBarGap: CGFloat = 10
+        let favoriteControlSize: CGFloat = 34
+        let progressBarTopFromCardTop = cardInset + serverInfoRowHeight + progressBarGap
+        let midpointFromCardTop = progressBarTopFromCardTop / 2
+        let contentOriginFromCardTop = cardInset
+
+        return midpointFromCardTop - contentOriginFromCardTop - favoriteControlSize / 2
     }
 
     private var loadLabel: String {
