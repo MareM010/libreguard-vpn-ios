@@ -184,16 +184,80 @@ final class OpenVPNManager: VPNManaging {
         await refreshStatus()
     }
 
-    func disconnectAndForget() async {
+    @discardableResult
+    func disableOnDemandAndProfile() async -> Bool {
+        guard !isRunningInSimulator else { return true }
+        guard manager.connection.status != .invalid else { return true }
+
+        do {
+            try await loadPreferences()
+            guard manager.protocolConfiguration != nil else { return true }
+
+            manager.onDemandRules = nil
+            manager.isOnDemandEnabled = false
+            manager.isEnabled = false
+            try await savePreferences()
+            try await loadPreferences()
+
+            let hasNoOnDemandRules = manager.onDemandRules?.isEmpty ?? true
+            let disabled = !manager.isOnDemandEnabled && !manager.isEnabled && hasNoOnDemandRules
+            if !disabled {
+                logger.error("OpenVPN profile remained enabled after disabling on-demand")
+            }
+            return disabled
+        } catch {
+            logger.error("Failed to disable OpenVPN on-demand profile: \(Self.describe(error))")
+            return manager.connection.status == .invalid
+        }
+    }
+
+    func disconnectAndForget() async -> VPNProfileCleanupResult {
         logger.info("OpenVPN disconnect-and-forget requested")
+        guard !isRunningInSimulator else {
+            status = .disconnected
+            return .noProfile
+        }
+
+        let onDemandDisabled = await disableOnDemandAndProfile()
         manager.connection.stopVPNTunnel()
+
+        let tunnelStopped = await waitForTunnelToStop()
+        guard tunnelStopped else {
+            let diagnostic = "iOS did not confirm that the OpenVPN tunnel stopped."
+            logger.error("\(diagnostic, privacy: .public)")
+            return VPNProfileCleanupResult(
+                tunnelStopped: false,
+                onDemandDisabled: onDemandDisabled,
+                profileRemoved: false,
+                diagnostic: diagnostic
+            )
+        }
+
         do {
             try await removePreferences()
+            OpenVPNConnectionMetadataStore.clear()
+            status = VPNConnectionState(networkExtensionStatus: manager.connection.status)
+            let result = VPNProfileCleanupResult(
+                tunnelStopped: true,
+                onDemandDisabled: onDemandDisabled,
+                profileRemoved: true,
+                diagnostic: nil
+            )
+            logger.info("OpenVPN profile cleanup stopped=\(result.tunnelStopped, privacy: .public) onDemandDisabled=\(result.onDemandDisabled, privacy: .public) removed=\(result.profileRemoved, privacy: .public)")
+            return result
         } catch {
-            logger.error("Failed to remove OpenVPN preferences during disconnect: \(Self.describe(error))")
+            let diagnostic = "OpenVPN profile could not be removed after stopping."
+            logger.error("\(diagnostic, privacy: .public) \(Self.describe(error))")
+            status = VPNConnectionState(networkExtensionStatus: manager.connection.status)
+            let result = VPNProfileCleanupResult(
+                tunnelStopped: true,
+                onDemandDisabled: onDemandDisabled,
+                profileRemoved: false,
+                diagnostic: diagnostic
+            )
+            logger.info("OpenVPN profile cleanup stopped=\(result.tunnelStopped, privacy: .public) onDemandDisabled=\(result.onDemandDisabled, privacy: .public) removed=\(result.profileRemoved, privacy: .public)")
+            return result
         }
-        OpenVPNConnectionMetadataStore.clear()
-        status = .disconnected
     }
 
     func fetchProviderDiagnostics() async throws -> OpenVPNRuntimeDiagnostics {
@@ -307,6 +371,23 @@ final class OpenVPNManager: VPNManaging {
     private func applyOnDemandConfiguration(enabled: Bool) {
         manager.onDemandRules = enabled ? [NEOnDemandRuleConnect()] : nil
         manager.isOnDemandEnabled = enabled
+    }
+
+    private func waitForTunnelToStop(maximumAttempts: Int = 25) async -> Bool {
+        for attempt in 0...maximumAttempts {
+            let observedStatus = VPNConnectionState(networkExtensionStatus: manager.connection.status)
+            if observedStatus == .disconnected || observedStatus == .invalid {
+                status = observedStatus
+                return true
+            }
+
+            guard attempt < maximumAttempts else {
+                status = observedStatus
+                return false
+            }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        return false
     }
 
     private func resolvedProviderBundleIdentifier() throws -> String {

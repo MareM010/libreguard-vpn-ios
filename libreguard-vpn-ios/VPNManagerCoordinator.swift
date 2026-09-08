@@ -137,12 +137,25 @@ final class VPNManagerCoordinator: VPNManaging {
         reconcileStatus()
     }
 
-    func disconnectAndForget() async {
+    @discardableResult
+    func disableOnDemandAndProfile() async -> Bool {
+        let ikev2Disabled = await ikev2Manager.disableOnDemandAndProfile()
+        let openVPNDisabled = await openVPNManager.disableOnDemandAndProfile()
+        return ikev2Disabled && openVPNDisabled
+    }
+
+    func disconnectAndForget() async -> VPNProfileCleanupResult {
         requestGeneration &+= 1
         activeProtocol = nil
-        await ikev2Manager.disconnectAndForget()
-        await openVPNManager.disconnectAndForget()
+
+        // Disable every system-owned on-demand rule before stopping either
+        // tunnel. This prevents an inactive, stale protocol profile from
+        // reconnecting while the other profile is being removed.
+        _ = await disableOnDemandAndProfile()
+        let ikev2Result = await ikev2Manager.disconnectAndForget()
+        let openVPNResult = await openVPNManager.disconnectAndForget()
         reconcileStatus()
+        return VPNProfileCleanupResult.combined([ikev2Result, openVPNResult])
     }
 
     func currentTrafficSnapshot() async -> TunnelTrafficSnapshot? {

@@ -59,19 +59,9 @@ struct ContentView: View {
             } else {
                 switch app.route {
                 case .launching:
-                    LoginView(
-                        onRegister: app.showRegister,
-                        onForgotPassword: app.showForgotPassword
-                    )
-                    .overlay(alignment: .top) {
-                        ProgressView("Restoring your secure session…")
-                            .tint(Theme.primary)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
-                            .background(.ultraThinMaterial, in: Capsule())
-                            .padding(.top, 18)
-                            .allowsHitTesting(false)
-                    }
+                    SessionStartupView()
+                case .sessionCleanup:
+                    SessionCleanupView()
                 case .login:
                     LoginView(
                         onRegister: app.showRegister,
@@ -141,13 +131,80 @@ struct ContentView: View {
         }
         .onOpenURL { app.handleOpenURL($0) }
         .onChange(of: scenePhase) { _, phase in
-            guard phase == .active, case .authenticated = app.route else { return }
+            guard phase == .active else { return }
             Task {
+                await app.retrySessionValidationIfNeeded()
+                guard case .authenticated = app.route else { return }
                 await app.refreshAccountData(showErrors: false)
                 app.refreshServers()
                 await app.refreshVPNStatus()
                 await app.refreshNotificationAuthorizationStatus()
             }
+        }
+    }
+}
+
+private struct SessionStartupView: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .controlSize(.large)
+                .tint(Theme.primary)
+            Text("Restoring your secure session…")
+                .font(.headline)
+            Text("Checking your LibreGuard account and VPN connection.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("session-startup-view")
+    }
+}
+
+private struct SessionCleanupView: View {
+    @EnvironmentObject private var app: AppModel
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "shield.lefthalf.filled")
+                .font(.system(size: 42, weight: .semibold))
+                .foregroundStyle(Theme.primary)
+
+            Text("Ending expired VPN session")
+                .font(.title3.weight(.semibold))
+
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            if app.sessionCleanupState == .ending {
+                ProgressView()
+                    .tint(Theme.primary)
+                    .padding(.top, 4)
+            } else if app.sessionCleanupState == .requiresRetry {
+                Button("Retry Cleanup") {
+                    Task { await app.retrySessionCleanup() }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.primary)
+                .padding(.top, 4)
+                .accessibilityIdentifier("session-cleanup-retry-button")
+            }
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("session-cleanup-view")
+    }
+
+    private var message: String {
+        switch app.sessionCleanupState {
+        case .requiresRetry:
+            "LibreGuard is still waiting for iOS to stop the VPN profile. Retry cleanup before signing in again."
+        case .ending, nil:
+            "Auto-Connect is being turned off and the VPN profile is being disconnected before sign-in is shown."
         }
     }
 }

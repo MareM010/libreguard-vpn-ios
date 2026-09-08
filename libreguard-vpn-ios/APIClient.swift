@@ -40,8 +40,17 @@ protocol BackendServicing: AnyObject {
     func generateRecoveryCodes() async throws -> [String]
 }
 
+/// Lets the UI coordinate local VPN cleanup whenever the authentication layer
+/// has conclusively invalidated a stored session. Keeping this separate from
+/// `BackendServicing` avoids imposing callback state on lightweight backends
+/// that do not own a persistent session.
 @MainActor
-final class APIClient: BackendServicing {
+protocol SessionInvalidationObserving: AnyObject {
+    var onSessionInvalidated: (() -> Void)? { get set }
+}
+
+@MainActor
+final class APIClient: BackendServicing, SessionInvalidationObserving {
     private static let transportDiagnosticsKey = "LibreGuardLastAPITransportError"
     private static let transportDiagnosticsTimestampKey = "LibreGuardLastAPITransportErrorTimestamp"
     private static let logger = Logger(

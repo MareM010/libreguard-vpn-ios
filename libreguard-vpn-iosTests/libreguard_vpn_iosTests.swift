@@ -71,6 +71,147 @@ struct libreguard_vpn_iosTests {
         #expect(store.favoriteServerIDs(for: "user-b") == [99])
     }
 
+    @Test func validRestoredSessionKeepsConnectedVPNOnTheDashboard() async {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        defaults.set(true, forKey: "vpn.autoConnect.enabled")
+        let session = startupSession()
+        let backend = StartupBackendStub(storedSession: session, restoreResults: [.success(session)])
+        let vpn = StartupVPNManager(status: .connected)
+        let app = makeStartupApp(backend: backend, vpn: vpn, defaults: defaults)
+        VPNSharedSessionStore.clear()
+        defer { VPNSharedSessionStore.clear() }
+
+        await app.start()
+
+        if case .authenticated = app.route {
+        } else {
+            Issue.record("Expected a restored session to show the dashboard")
+        }
+        #expect(app.session?.userId == session.userId)
+        #expect(app.isAutoConnectEnabled)
+        #expect(vpn.cleanupCalls == 0)
+    }
+
+    @Test func missingSessionDisablesStoppedPersistedProfileBeforeLogin() async {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        defaults.set(true, forKey: "vpn.autoConnect.enabled")
+        defaults.set(true, forKey: "vpn.killSwitch.enabled")
+        let disabledProfileLeftInstalled = VPNProfileCleanupResult(
+            tunnelStopped: true,
+            onDemandDisabled: true,
+            profileRemoved: false,
+            diagnostic: "preference removal failed after the tunnel stopped"
+        )
+        let vpn = StartupVPNManager(status: .connected, cleanupResults: [disabledProfileLeftInstalled])
+        let app = makeStartupApp(
+            backend: StartupBackendStub(storedSession: nil, restoreResults: []),
+            vpn: vpn,
+            defaults: defaults
+        )
+        VPNSharedSessionStore.clear()
+        defer { VPNSharedSessionStore.clear() }
+
+        await app.start()
+
+        if case .login = app.route {
+        } else {
+            Issue.record("Expected login after the stopped profile was persistently disabled")
+        }
+        #expect(vpn.cleanupCalls == 1)
+        #expect(vpn.disableCalls == 1)
+        #expect(app.isAutoConnectEnabled == false)
+        #expect(app.isKillSwitchEnabled == false)
+        #expect(app.presentedError?.code == "SESSION_ENDED")
+    }
+
+    @Test func invalidStartupSessionCleansUpVPNBeforeShowingLogin() async {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        defaults.set(true, forKey: "vpn.autoConnect.enabled")
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [
+            .failure(APIError(statusCode: 401, message: "Expired", code: "SESSION_EXPIRED", requiresLogin: true))
+        ])
+        let vpn = StartupVPNManager(status: .connected)
+        let app = makeStartupApp(backend: backend, vpn: vpn, defaults: defaults)
+        VPNSharedSessionStore.clear()
+        defer { VPNSharedSessionStore.clear() }
+
+        await app.start()
+
+        if case .login = app.route {
+        } else {
+            Issue.record("Expected login only after VPN cleanup")
+        }
+        #expect(vpn.cleanupCalls == 1)
+        #expect(vpn.disableCalls == 1)
+        #expect(app.isAutoConnectEnabled == false)
+        #expect(app.session == nil)
+        #expect(app.presentedError?.code == "SESSION_ENDED")
+        #expect(backend.sessionInvalidationCallbackCount == 1)
+    }
+
+    @Test func incompleteVPNCleanupBlocksLoginUntilRetrySucceeds() async {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let unsafeCleanup = VPNProfileCleanupResult(
+            tunnelStopped: false,
+            onDemandDisabled: true,
+            profileRemoved: false,
+            diagnostic: "still stopping"
+        )
+        let vpn = StartupVPNManager(status: .connected, cleanupResults: [unsafeCleanup, .noProfile])
+        let app = makeStartupApp(backend: StartupBackendStub(storedSession: nil, restoreResults: []), vpn: vpn, defaults: defaults)
+        VPNSharedSessionStore.clear()
+        defer { VPNSharedSessionStore.clear() }
+
+        await app.start()
+
+        if case .sessionCleanup = app.route {
+        } else {
+            Issue.record("Expected cleanup screen while tunnel status is uncertain")
+        }
+        #expect(app.sessionCleanupState == .requiresRetry)
+        #expect(vpn.cleanupCalls == 1)
+
+        await app.retrySessionCleanup()
+
+        if case .login = app.route {
+        } else {
+            Issue.record("Expected login after confirmed cleanup")
+        }
+        #expect(app.sessionCleanupState == nil)
+        #expect(vpn.cleanupCalls == 2)
+    }
+
+    @Test func transientRestoreFailureKeepsCachedDashboardAndCanValidateLater() async {
+        let session = startupSession()
+        let transientError = APIError(message: "Service temporarily unavailable")
+        let backend = StartupBackendStub(storedSession: session, restoreResults: [.failure(transientError), .success(session)])
+        let vpn = StartupVPNManager(status: .connected)
+        let app = makeStartupApp(
+            backend: backend,
+            vpn: vpn,
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        VPNSharedSessionStore.clear()
+        defer { VPNSharedSessionStore.clear() }
+
+        await app.start()
+
+        if case .authenticated = app.route {
+        } else {
+            Issue.record("Expected cached dashboard after a transient restore failure")
+        }
+        #expect(app.session?.userId == session.userId)
+        #expect(vpn.cleanupCalls == 0)
+
+        await app.retrySessionValidationIfNeeded()
+
+        if case .authenticated = app.route {
+        } else {
+            Issue.record("Expected the later session validation to remain authenticated")
+        }
+        #expect(vpn.cleanupCalls == 0)
+    }
+
     @Test func themeModeUsesAndroidCopyForSubtitlesAndButtonTitles() {
         #expect(
             ThemeMode.system.subtitle(effectiveDarkMode: true) ==
@@ -882,6 +1023,30 @@ struct libreguard_vpn_iosTests {
         }
     }
 
+    private func startupSession() -> AuthSession {
+        AuthSession(
+            accessToken: "startup-access",
+            refreshToken: "startup-refresh",
+            email: "startup@example.com",
+            userId: "startup-user",
+            deviceId: "startup-device"
+        )
+    }
+
+    private func makeStartupApp(
+        backend: StartupBackendStub,
+        vpn: StartupVPNManager,
+        defaults: UserDefaults
+    ) -> AppModel {
+        AppModel(
+            api: backend,
+            appleStore: NoOpAppleSubscriptionStore(),
+            latencyProbe: NoOpLatencyProbe(),
+            vpnManager: vpn,
+            defaults: defaults
+        )
+    }
+
     func makeClient(
         sessionStore: SessionStoring? = nil,
         deviceKeyStore: VPNDeviceKeyProviding? = nil,
@@ -1084,7 +1249,145 @@ private final class DNSSettingsTestVPNManager: VPNManaging {
     ) async throws {}
     func apply(policy: VPNConnectionPolicy) async throws -> Bool { true }
     func disconnect() async {}
-    func disconnectAndForget() async {}
+    func disconnectAndForget() async -> VPNProfileCleanupResult { .noProfile }
+}
+
+@MainActor
+private final class StartupBackendStub: BackendServicing, SessionInvalidationObserving {
+    var storedSession: AuthSession?
+    let deviceId = "startup-device"
+    let appVersion = "1.0-test"
+    var onSessionInvalidated: (() -> Void)?
+    private(set) var sessionInvalidationCallbackCount = 0
+    private var restoreResults: [Result<AuthSession?, Error>]
+
+    init(storedSession: AuthSession?, restoreResults: [Result<AuthSession?, Error>]) {
+        self.storedSession = storedSession
+        self.restoreResults = restoreResults
+    }
+
+    func restoreSession() async throws -> AuthSession? {
+        guard !restoreResults.isEmpty else { return storedSession }
+        let result = restoreResults.removeFirst()
+        do {
+            let restoredSession = try result.get()
+            if let restoredSession { storedSession = restoredSession }
+            return restoredSession
+        } catch {
+            if let apiError = error as? APIError,
+               apiError.statusCode == 401 || apiError.requiresLogin || apiError.requiresDeviceRegistration || apiError.code == "SESSION_EXPIRED" {
+                sessionInvalidationCallbackCount += 1
+                onSessionInvalidated?()
+            }
+            throw error
+        }
+    }
+
+    func login(email: String, password: String) async throws -> LoginResponse { try unsupported() }
+    func loginWithGoogle(idToken: String, newsletterConsent: Bool?) async throws -> LoginResponse { try unsupported() }
+    func verifyTwoFactor(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse { try unsupported() }
+    func verifyRecoveryCode(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse { try unsupported() }
+    func register(email: String, password: String, newsletterConsent: Bool) async throws -> RegistrationResponse { try unsupported() }
+    func requestPasswordReset(email: String) async throws -> MessageResponse { try unsupported() }
+    func resetPassword(email: String, token: String, newPassword: String) async throws -> MessageResponse { try unsupported() }
+    func confirmationStatus(userId: String) async throws -> ConfirmationStatusResponse { try unsupported() }
+    func resendConfirmation(email: String) async throws { throw APIError(message: "Not configured") }
+    func removePasswordDevice(email: String, password: String, deviceId: Int) async throws { throw APIError(message: "Not configured") }
+    func removeGoogleDevice(idToken: String, deviceId: Int) async throws { throw APIError(message: "Not configured") }
+    func adoptSession(from response: LoginResponse) throws -> AuthSession { try unsupported() }
+    func clearLocalSession() { storedSession = nil }
+    func logout() async { storedSession = nil }
+    func fetchServers() async throws -> [VPNServer] { [] }
+    func fetchVPNConfig(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> VPNConfigResponse { try unsupported() }
+    func requestCertificate(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> CertificateJobCreatedResponse { try unsupported() }
+    func fetchCertificateGenerationStatus(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> CertificateGenerationStatusResponse { try unsupported() }
+    func fetchCertificateJob(jobId: Int) async throws -> CertificateJobStatusResponse { try unsupported() }
+    func fetchUsage() async throws -> UsageQuota { try unsupported() }
+    func fetchConnectionEligibility() async throws -> CanConnectResponse { try unsupported() }
+    func fetchSubscription() async throws -> SubscriptionStatus { try unsupported() }
+    func fetchDNSPreference() async throws -> DNSPreference { try unsupported() }
+    func updateDNSPreference(adBlockingEnabled: Bool) async throws -> DNSPreference { try unsupported() }
+    func fetchAppleAccountToken() async throws -> UUID { try unsupported() }
+    func verifyAppleTransaction(_ signedTransactionInfo: String, allowTransfer: Bool) async throws -> AppleTransactionVerificationResponse { try unsupported() }
+    func fetchTwoFactorStatus() async throws -> TwoFactorStatus { try unsupported() }
+    func setupTwoFactor() async throws -> AuthenticatorSetup { try unsupported() }
+    func enableTwoFactor(code: String) async throws -> [String] { try unsupported() }
+    func disableTwoFactor() async throws { throw APIError(message: "Not configured") }
+    func generateRecoveryCodes() async throws -> [String] { try unsupported() }
+
+    private func unsupported<T>() throws -> T {
+        throw APIError(message: "Not configured")
+    }
+}
+
+@MainActor
+private final class StartupVPNManager: VPNManaging {
+    var status: VPNConnectionState
+    var onStatusChange: ((VPNConnectionState) -> Void)?
+    var onDisconnectError: ((Error) -> Void)?
+    private(set) var disableCalls = 0
+    private(set) var cleanupCalls = 0
+    private var cleanupResults: [VPNProfileCleanupResult]
+
+    init(
+        status: VPNConnectionState,
+        cleanupResults: [VPNProfileCleanupResult]? = nil
+    ) {
+        self.status = status
+        self.cleanupResults = cleanupResults ?? [.noProfile]
+    }
+
+    func refreshStatus() async {
+        onStatusChange?(status)
+    }
+
+    func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, policy: VPNConnectionPolicy) async throws {
+        status = .connected
+        onStatusChange?(status)
+    }
+
+    func apply(policy: VPNConnectionPolicy) async throws -> Bool { true }
+
+    func disconnect() async {
+        status = .disconnected
+        onStatusChange?(status)
+    }
+
+    func disableOnDemandAndProfile() async -> Bool {
+        disableCalls += 1
+        return true
+    }
+
+    func disconnectAndForget() async -> VPNProfileCleanupResult {
+        cleanupCalls += 1
+        _ = await disableOnDemandAndProfile()
+        let result = cleanupResults.isEmpty ? .noProfile : cleanupResults.removeFirst()
+        if result.tunnelStopped {
+            status = .disconnected
+            onStatusChange?(status)
+        }
+        return result
+    }
+}
+
+@MainActor
+private final class NoOpAppleSubscriptionStore: AppleSubscriptionStoreServing {
+    func loadProducts() async throws -> [AppleSubscriptionProduct] { [] }
+    func purchase(productID: String, appAccountToken: UUID) async throws -> ApplePurchaseResult { throw APIError(message: "Not configured") }
+    func sync() async throws {}
+    func currentEntitlements() async -> [AppleStoreUpdate] { [] }
+    func unfinishedTransactions() async -> [AppleStoreUpdate] { [] }
+    func transactionUpdates() -> AsyncStream<AppleStoreUpdate> {
+        AsyncStream { continuation in
+            continuation.finish()
+        }
+    }
+    func finish(transactionID: UInt64) async {}
+}
+
+@MainActor
+private final class NoOpLatencyProbe: LatencyProbing {
+    func measure(_ servers: [VPNServer]) async -> [Int: Int] { [:] }
 }
 
 final class URLProtocolStub: URLProtocol, @unchecked Sendable {

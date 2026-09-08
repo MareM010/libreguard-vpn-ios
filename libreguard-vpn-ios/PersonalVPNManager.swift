@@ -15,7 +15,11 @@ protocol VPNManaging: AnyObject {
     func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, policy: VPNConnectionPolicy) async throws
     @discardableResult func apply(policy: VPNConnectionPolicy) async throws -> Bool
     func disconnect() async
-    func disconnectAndForget() async
+    /// Persistently disables system on-demand behavior before an account session
+    /// is discarded. Coordinators call this on every managed profile before
+    /// asking either tunnel to stop.
+    @discardableResult func disableOnDemandAndProfile() async -> Bool
+    @discardableResult func disconnectAndForget() async -> VPNProfileCleanupResult
     func currentTrafficSnapshot() async -> TunnelTrafficSnapshot?
 }
 
@@ -23,6 +27,38 @@ extension VPNManaging {
     var connectedDate: Date? { nil }
     func currentTrafficSnapshot() async -> TunnelTrafficSnapshot? { nil }
     func setCertificatePreparationHandler(_ handler: ((String?) -> Void)?) {}
+    @discardableResult func disableOnDemandAndProfile() async -> Bool { true }
+}
+
+/// The result of removing a persisted Network Extension profile. A profile that
+/// could not be removed is still safe to leave behind only when its on-demand
+/// behavior was disabled and its tunnel has actually stopped.
+struct VPNProfileCleanupResult: Equatable, Sendable {
+    let tunnelStopped: Bool
+    let onDemandDisabled: Bool
+    let profileRemoved: Bool
+    let diagnostic: String?
+
+    static let noProfile = VPNProfileCleanupResult(
+        tunnelStopped: true,
+        onDemandDisabled: true,
+        profileRemoved: true,
+        diagnostic: nil
+    )
+
+    var isSafeForUnauthenticatedLogin: Bool {
+        tunnelStopped && (onDemandDisabled || profileRemoved)
+    }
+
+    static func combined(_ results: [VPNProfileCleanupResult]) -> VPNProfileCleanupResult {
+        let diagnostics = results.compactMap(\.diagnostic).joined(separator: " | ")
+        return VPNProfileCleanupResult(
+            tunnelStopped: results.allSatisfy(\.tunnelStopped),
+            onDemandDisabled: results.allSatisfy(\.onDemandDisabled),
+            profileRemoved: results.allSatisfy(\.profileRemoved),
+            diagnostic: diagnostics.isEmpty ? nil : diagnostics
+        )
+    }
 }
 
 struct VPNConnectionPolicy: Equatable {
@@ -208,16 +244,82 @@ final class PersonalVPNManager: VPNManaging {
         await refreshStatus()
     }
 
-    func disconnectAndForget() async {
+    @discardableResult
+    func disableOnDemandAndProfile() async -> Bool {
+        guard !isRunningInSimulator else { return true }
+
+        // An invalid manager has no installed profile to disable. Treat it as
+        // safe rather than turning a first launch into a permanent blocker.
+        guard manager.connection.status != .invalid else { return true }
+
+        do {
+            try await loadPreferences()
+            guard manager.protocolConfiguration != nil else { return true }
+
+            manager.onDemandRules = nil
+            manager.isOnDemandEnabled = false
+            manager.isEnabled = false
+            try await savePreferences()
+            try await loadPreferences()
+
+            let hasNoOnDemandRules = manager.onDemandRules?.isEmpty ?? true
+            let disabled = !manager.isOnDemandEnabled && !manager.isEnabled && hasNoOnDemandRules
+            if !disabled {
+                logger.error("VPN profile remained enabled after disabling on-demand")
+            }
+            return disabled
+        } catch {
+            logger.error("Failed to disable VPN on-demand profile: \(Self.describe(error))")
+            return manager.connection.status == .invalid
+        }
+    }
+
+    func disconnectAndForget() async -> VPNProfileCleanupResult {
         logger.info("VPN disconnect-and-forget requested")
+        guard !isRunningInSimulator else {
+            status = .disconnected
+            return .noProfile
+        }
+
+        let onDemandDisabled = await disableOnDemandAndProfile()
         manager.connection.stopVPNTunnel()
+
+        let tunnelStopped = await waitForTunnelToStop()
+        guard tunnelStopped else {
+            let diagnostic = "iOS did not confirm that the IKEv2 tunnel stopped."
+            logger.error("\(diagnostic, privacy: .public)")
+            return VPNProfileCleanupResult(
+                tunnelStopped: false,
+                onDemandDisabled: onDemandDisabled,
+                profileRemoved: false,
+                diagnostic: diagnostic
+            )
+        }
+
         do {
             try await removePreferences()
+            status = VPNConnectionState(networkExtensionStatus: manager.connection.status)
+            let result = VPNProfileCleanupResult(
+                tunnelStopped: true,
+                onDemandDisabled: onDemandDisabled,
+                profileRemoved: true,
+                diagnostic: nil
+            )
+            logger.info("IKEv2 profile cleanup stopped=\(result.tunnelStopped, privacy: .public) onDemandDisabled=\(result.onDemandDisabled, privacy: .public) removed=\(result.profileRemoved, privacy: .public)")
+            return result
         } catch {
-            logger.error("Failed to remove VPN preferences during disconnect: \(Self.describe(error))")
-            // Clearing the session should not be blocked by preference cleanup.
+            let diagnostic = "IKEv2 VPN profile could not be removed after stopping."
+            logger.error("\(diagnostic, privacy: .public) \(Self.describe(error))")
+            status = VPNConnectionState(networkExtensionStatus: manager.connection.status)
+            let result = VPNProfileCleanupResult(
+                tunnelStopped: true,
+                onDemandDisabled: onDemandDisabled,
+                profileRemoved: false,
+                diagnostic: diagnostic
+            )
+            logger.info("IKEv2 profile cleanup stopped=\(result.tunnelStopped, privacy: .public) onDemandDisabled=\(result.onDemandDisabled, privacy: .public) removed=\(result.profileRemoved, privacy: .public)")
+            return result
         }
-        status = .disconnected
     }
 
     func currentTrafficSnapshot() async -> TunnelTrafficSnapshot? {
@@ -253,6 +355,23 @@ final class PersonalVPNManager: VPNManaging {
     private func applyOnDemandConfiguration(enabled: Bool) {
         manager.onDemandRules = enabled ? [NEOnDemandRuleConnect()] : nil
         manager.isOnDemandEnabled = enabled
+    }
+
+    private func waitForTunnelToStop(maximumAttempts: Int = 25) async -> Bool {
+        for attempt in 0...maximumAttempts {
+            let observedStatus = VPNConnectionState(networkExtensionStatus: manager.connection.status)
+            if observedStatus == .disconnected || observedStatus == .invalid {
+                status = observedStatus
+                return true
+            }
+
+            guard attempt < maximumAttempts else {
+                status = observedStatus
+                return false
+            }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        return false
     }
 
     private func updateStatus(from neStatus: NEVPNStatus) {

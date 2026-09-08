@@ -894,6 +894,7 @@ struct DeviceLimitContext: Identifiable {
 
 enum AppRoute {
     case launching
+    case sessionCleanup
     case login
     case register
     case emailConfirmation(PendingRegistration)

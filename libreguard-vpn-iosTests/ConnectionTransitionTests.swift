@@ -341,6 +341,23 @@ struct ConnectionTransitionTests {
         #expect(coordinator.status == .disconnected)
     }
 
+    @Test func coordinatorDisablesEveryOnDemandProfileBeforeForgettingEitherTunnel() async {
+        let events = CleanupEventLog()
+        let ikev2 = CleanupTrackingVPNManager(label: "ikev2", events: events)
+        let openVPN = CleanupTrackingVPNManager(label: "openvpn", events: events)
+        let coordinator = VPNManagerCoordinator(ikev2Manager: ikev2, openVPNManager: openVPN)
+
+        let result = await coordinator.disconnectAndForget()
+
+        #expect(events.entries == [
+            "ikev2:disable",
+            "openvpn:disable",
+            "ikev2:forget",
+            "openvpn:forget"
+        ])
+        #expect(result.isSafeForUnauthenticatedLogin)
+    }
+
     @Test func coordinatorRejectsAStaleStatusFromTheInactiveProtocol() async {
         let ikev2 = ControlledVPNManager(status: .connected)
         let openVPN = ControlledVPNManager(status: .disconnected)
@@ -697,9 +714,10 @@ private final class ControlledVPNManager: VPNManaging {
         onStatusChange?(status)
     }
 
-    func disconnectAndForget() async {
+    func disconnectAndForget() async -> VPNProfileCleanupResult {
         status = .disconnected
         onStatusChange?(status)
+        return .noProfile
     }
 
     func completeDisconnect() {
@@ -711,6 +729,55 @@ private final class ControlledVPNManager: VPNManaging {
     func emit(_ newStatus: VPNConnectionState) {
         status = newStatus
         onStatusChange?(status)
+    }
+}
+
+@MainActor
+private final class CleanupEventLog {
+    var entries: [String] = []
+}
+
+@MainActor
+private final class CleanupTrackingVPNManager: VPNManaging {
+    let label: String
+    let events: CleanupEventLog
+    var status: VPNConnectionState = .disconnected
+    var connectedDate: Date?
+    var onStatusChange: ((VPNConnectionState) -> Void)?
+    var onDisconnectError: ((Error) -> Void)?
+
+    init(label: String, events: CleanupEventLog) {
+        self.label = label
+        self.events = events
+    }
+
+    func refreshStatus() async {}
+
+    func connect(
+        to server: VPNServer,
+        protocol protocolName: VPNConfigurationProtocol,
+        policy: VPNConnectionPolicy
+    ) async throws {}
+
+    func apply(policy: VPNConnectionPolicy) async throws -> Bool {
+        true
+    }
+
+    func disconnect() async {
+        status = .disconnected
+        onStatusChange?(status)
+    }
+
+    func disableOnDemandAndProfile() async -> Bool {
+        events.entries.append("\(label):disable")
+        return true
+    }
+
+    func disconnectAndForget() async -> VPNProfileCleanupResult {
+        events.entries.append("\(label):forget")
+        status = .disconnected
+        onStatusChange?(status)
+        return .noProfile
     }
 }
 

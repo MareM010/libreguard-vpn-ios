@@ -943,8 +943,9 @@ private final class SpyVPNManager: VPNManaging {
         onStatusChange?(status)
     }
 
-    func disconnectAndForget() async {
+    func disconnectAndForget() async -> VPNProfileCleanupResult {
         status = .disconnected
         onStatusChange?(status)
+        return .noProfile
     }
 }

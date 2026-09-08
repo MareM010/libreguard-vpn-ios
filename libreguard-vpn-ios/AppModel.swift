@@ -1,10 +1,16 @@
 import Foundation
 import Combine
+import OSLog
 import UserNotifications
+
+enum SessionCleanupState: Equatable {
+    case ending
+    case requiresRetry
+}
 
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var route: AppRoute = .launching
+    @Published private(set) var route: AppRoute = .launching
     @Published var presentedError: APIError?
     @Published var deviceLimitContext: DeviceLimitContext?
     @Published var isAuthenticating = false
@@ -13,6 +19,9 @@ final class AppModel: ObservableObject {
     @Published var prefilledEmail = ""
     @Published var session: AuthSession? {
         didSet {
+            if session != nil {
+                hasCompletedUnauthenticatedCleanup = false
+            }
             guard oldValue?.userId != session?.userId else { return }
             loadFavoriteServerIDs(for: session?.userId)
         }
@@ -50,6 +59,7 @@ final class AppModel: ObservableObject {
     @Published var isKillSwitchDisconnectConfirmationPresented = false
     @Published private(set) var sessionMetrics: VPNSessionMetrics?
     @Published private(set) var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
+    @Published private(set) var sessionCleanupState: SessionCleanupState?
     @Published var retryAfterSeconds = 0
 
     private let api: BackendServicing
@@ -65,6 +75,10 @@ final class AppModel: ObservableObject {
     private let notificationService: VPNNotificationService
     private let eventNotifier: VPNEventNotifying
     private let liveActivityController: VPNLiveActivityControlling
+    private let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "net.libreguard.libreguard-vpn-ios",
+        category: "SessionLifecycle"
+    )
     private let pendingRegistrationKey = "pending.registration"
     private let cachedPlanNameKey = "cached.plan.name"
     private let cachedPlanIsProKey = "cached.plan.isPro"
@@ -76,6 +90,12 @@ final class AppModel: ObservableObject {
     private var hasCachedPlan = false
     private var serverRefreshTask: Task<Void, Never>?
     private var retryCountdownTask: Task<Void, Never>?
+    private var sessionRestoreRetryTask: Task<Void, Never>?
+    private var sessionRestoreRetryAttempt = 0
+    private var isSessionRestoreRetryPending = false
+    private var sessionCleanupTask: Task<Void, Never>?
+    private var hasCompletedUnauthenticatedCleanup = false
+    private var shouldShowSessionEndedMessage = false
     private var appleTransactionListenerTask: Task<Void, Never>?
     private var processingAppleTransactionIDs: Set<UInt64> = []
     private var vpnTransitionTask: Task<Void, Never>?
@@ -90,6 +110,23 @@ final class AppModel: ObservableObject {
     private var queuedVPNConnectRequest: VPNConnectRequest? {
         didSet {
             hasQueuedVPNReconnect = queuedVPNConnectRequest != nil
+        }
+    }
+
+    private enum SessionCleanupIntent {
+        case missingSession(showMessage: Bool)
+        case invalidSession
+        case manualSignOut
+
+        var shouldShowSessionEndedMessage: Bool {
+            switch self {
+            case .invalidSession:
+                true
+            case let .missingSession(showMessage):
+                showMessage
+            case .manualSignOut:
+                false
+            }
         }
     }
 
@@ -149,8 +186,12 @@ final class AppModel: ObservableObject {
                 self?.certificatePreparationMessage = message
             }
         }
-        if let concrete = resolvedAPI as? APIClient {
-            concrete.onSessionInvalidated = { [weak self] in self?.forceSignOut() }
+        if let invalidationObserver = resolvedAPI as? SessionInvalidationObserving {
+            invalidationObserver.onSessionInvalidated = { [weak self] in
+                Task { @MainActor [weak self] in
+                    await self?.beginSessionCleanup(intent: .invalidSession)
+                }
+            }
         }
     }
 
@@ -164,56 +205,206 @@ final class AppModel: ObservableObject {
             clearPendingRegistration()
             persistAutoConnectEnabled(false)
             persistKillSwitch(enabled: false, activation: .off)
-            await vpn.disconnectAndForget()
+            _ = await vpn.disconnectAndForget()
             await liveActivityController.endAll()
             VPNSharedSessionStore.clear()
             route = .login
             return
         }
+
         await vpn.refreshStatus()
-        if let storedSession = api.storedSession {
-            do {
-                session = try await api.restoreSession()
-                route = .authenticated
-                await refreshAccountData(showErrors: false)
-                await reconcileUnfinishedAppleTransactions()
-                if vpnStatus.isConnected {
-                    refreshServers()
-                    await serverRefreshTask?.value
-                    await restoreActiveSessionIfNeeded()
-                } else {
-                    await liveActivityController.endAll()
-                    finalizeOrphanedSessionIfNeeded(endedAt: Date())
-                }
-                await reconcileKillSwitchOnLaunch()
-                await reconcileAutoConnectOnLaunch()
-                return
-            } catch let error as APIError where error.code == "APP_VERSION_BLOCKED" || error.code == "APP_VERSION_REQUIRED" {
-                presentedError = error
-            } catch let error as APIError where isAuthenticationFailure(error) {
-                clearCachedPlan()
-            } catch {
-                // Keep the local account and active VPN available when the
-                // refresh failed for a transient network or server reason.
-                session = storedSession
-                route = .authenticated
-                if vpnStatus.isConnected {
-                    refreshServers()
-                    await serverRefreshTask?.value
-                    await restoreActiveSessionIfNeeded()
-                } else {
-                    finalizeOrphanedSessionIfNeeded(endedAt: Date())
-                }
-                await reconcileKillSwitchOnLaunch()
+        logger.info("Launch VPN status=\(String(describing: self.vpnStatus), privacy: .public)")
+        let mayHavePersistedVPN = vpnStatus.isConnected
+            || vpnStatus.isBusy
+            || isAutoConnectEnabled
+            || isKillSwitchEnabled
+
+        guard let storedSession = api.storedSession else {
+            logger.info("Session restore skipped because no local session was present; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
+            await beginSessionCleanup(intent: .missingSession(showMessage: mayHavePersistedVPN))
+            return
+        }
+
+        do {
+            guard let restoredSession = try await api.restoreSession() else {
+                await beginSessionCleanup(intent: .invalidSession)
                 return
             }
+            logger.info("Session restore succeeded; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
+            session = restoredSession
+            await finishAuthenticatedStartup()
+        } catch let error as APIError where error.code == "APP_VERSION_BLOCKED" || error.code == "APP_VERSION_REQUIRED" {
+            logger.error("Session restore was blocked by the app version; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
+            presentedError = error
+            await beginSessionCleanup(intent: .missingSession(showMessage: false))
+        } catch let error as APIError where isAuthenticationFailure(error) {
+            logger.info("Session restore was rejected by authentication; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
+            await beginSessionCleanup(intent: .invalidSession)
+        } catch {
+            // Availability takes precedence over a temporary service or
+            // connectivity failure. The cached account remains visible while
+            // a foreground retry validates it again.
+            logger.info("Session restore deferred after a transient failure; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
+            session = storedSession
+            await continueWithCachedSessionAfterTransientRestoreFailure()
+            scheduleSessionRestoreRetry()
+        }
+    }
+
+    /// Re-checks a session that was kept in memory after a temporary startup
+    /// failure. It is deliberately public to the scene lifecycle, but is a
+    /// no-op unless a retry is pending.
+    func retrySessionValidationIfNeeded() async {
+        guard isSessionRestoreRetryPending,
+              sessionCleanupTask == nil,
+              case .authenticated = route,
+              let cachedSession = session ?? api.storedSession else { return }
+
+        sessionRestoreRetryTask?.cancel()
+        sessionRestoreRetryTask = nil
+
+        do {
+            guard let restoredSession = try await api.restoreSession() else {
+                await beginSessionCleanup(intent: .invalidSession)
+                return
+            }
+            logger.info("Deferred session validation succeeded; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
+            session = restoredSession
+            cancelSessionRestoreRetry()
+            await finishAuthenticatedStartup()
+        } catch let error as APIError where isAuthenticationFailure(error) {
+            logger.info("Deferred session validation was rejected by authentication; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
+            await beginSessionCleanup(intent: .invalidSession)
+        } catch {
+            // Preserve the same cached account across bounded retries. This
+            // avoids an API outage causing a misleading signed-out screen.
+            session = cachedSession
+            scheduleSessionRestoreRetry()
+        }
+    }
+
+    func retrySessionCleanup() async {
+        guard sessionCleanupState == .requiresRetry else { return }
+        await beginSessionCleanup(intent: .missingSession(showMessage: shouldShowSessionEndedMessage))
+    }
+
+    private func finishAuthenticatedStartup() async {
+        guard sessionCleanupTask == nil, session != nil else { return }
+
+        route = .authenticated
+        sessionCleanupState = nil
+        cancelSessionRestoreRetry()
+        await refreshAccountData(showErrors: false)
+        guard sessionCleanupTask == nil, session != nil else { return }
+
+        await reconcileUnfinishedAppleTransactions()
+        guard sessionCleanupTask == nil, session != nil else { return }
+
+        if vpnStatus.isConnected {
+            refreshServers()
+            await serverRefreshTask?.value
+            await restoreActiveSessionIfNeeded()
+        } else {
+            await liveActivityController.endAll()
+            finalizeOrphanedSessionIfNeeded(endedAt: Date())
+        }
+        guard sessionCleanupTask == nil, session != nil else { return }
+
+        await reconcileKillSwitchOnLaunch()
+        guard sessionCleanupTask == nil, session != nil else { return }
+        await reconcileAutoConnectOnLaunch()
+    }
+
+    private func continueWithCachedSessionAfterTransientRestoreFailure() async {
+        guard sessionCleanupTask == nil, session != nil else { return }
+
+        route = .authenticated
+        sessionCleanupState = nil
+        if vpnStatus.isConnected {
+            refreshServers()
+            await serverRefreshTask?.value
+            await restoreActiveSessionIfNeeded()
+        } else {
+            finalizeOrphanedSessionIfNeeded(endedAt: Date())
+        }
+        guard sessionCleanupTask == nil, session != nil else { return }
+        await reconcileKillSwitchOnLaunch()
+    }
+
+    private func scheduleSessionRestoreRetry() {
+        guard sessionCleanupTask == nil,
+              session != nil,
+              case .authenticated = route else { return }
+
+        sessionRestoreRetryTask?.cancel()
+        isSessionRestoreRetryPending = true
+        let retryDelays = [2, 4, 8, 16, 30]
+        let delay = retryDelays[min(sessionRestoreRetryAttempt, retryDelays.count - 1)]
+        sessionRestoreRetryAttempt += 1
+
+        sessionRestoreRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self else { return }
+            self.sessionRestoreRetryTask = nil
+            await self.retrySessionValidationIfNeeded()
+        }
+    }
+
+    private func cancelSessionRestoreRetry() {
+        sessionRestoreRetryTask?.cancel()
+        sessionRestoreRetryTask = nil
+        sessionRestoreRetryAttempt = 0
+        isSessionRestoreRetryPending = false
+    }
+
+    private func beginSessionCleanup(intent: SessionCleanupIntent) async {
+        // `APIClient` can invoke its invalidation callback just after startup
+        // has handled the same failed refresh. Once the profile was safely
+        // cleaned up, that late callback must be a no-op rather than briefly
+        // showing the blocker a second time.
+        guard !hasCompletedUnauthenticatedCleanup else { return }
+
+        if intent.shouldShowSessionEndedMessage {
+            shouldShowSessionEndedMessage = true
+        }
+        if let task = sessionCleanupTask {
+            await task.value
+            return
+        }
+
+        cancelSessionRestoreRetry()
+        sessionCleanupState = .ending
+        route = .sessionCleanup
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performSessionCleanup()
+        }
+        sessionCleanupTask = task
+        await task.value
+    }
+
+    private func performSessionCleanup() async {
+        isExplicitDisconnectInProgress = true
+        await refreshTrafficMetricsOnce(updateLiveActivity: true)
+        cancelActiveVPNTransition()
+        persistAutoConnectEnabled(false)
+        persistKillSwitch(enabled: false, activation: .off)
+
+        let cleanupResult = await vpn.disconnectAndForget()
+        logger.info("Unauthenticated VPN cleanup finished stopped=\(cleanupResult.tunnelStopped, privacy: .public) onDemandDisabled=\(cleanupResult.onDemandDisabled, privacy: .public) removed=\(cleanupResult.profileRemoved, privacy: .public)")
+
+        guard cleanupResult.isSafeForUnauthenticatedLogin else {
+            sessionCleanupState = .requiresRetry
+            sessionCleanupTask = nil
+            return
         }
 
         await liveActivityController.endAll()
-        persistAutoConnectEnabled(false)
-        persistKillSwitch(enabled: false, activation: .off)
-        await vpn.disconnectAndForget()
-        VPNSharedSessionStore.clear()
+        persistActiveStatisticsSessionIfNeeded(endedAt: Date(), notifyDisconnect: true)
+        clearSessionState(route: nil)
+        hasCompletedUnauthenticatedCleanup = true
+        sessionCleanupState = nil
+        sessionCleanupTask = nil
 
         if let pending = loadPendingRegistration() {
             prefilledEmail = pending.email
@@ -221,15 +412,31 @@ final class AppModel: ObservableObject {
         } else {
             route = .login
         }
+
+        if shouldShowSessionEndedMessage {
+            presentedError = APIError(
+                message: "Your sign-in session ended. Auto-Connect was turned off and the VPN was disconnected.",
+                code: "SESSION_ENDED"
+            )
+        }
+        shouldShowSessionEndedMessage = false
     }
 
     func showLogin(prefill email: String? = nil) {
+        guard sessionCleanupState == nil else { return }
         if let email { prefilledEmail = email }
         route = .login
     }
 
-    func showRegister() { route = .register }
-    func showForgotPassword() { route = .forgotPassword }
+    func showRegister() {
+        guard sessionCleanupState == nil else { return }
+        route = .register
+    }
+
+    func showForgotPassword() {
+        guard sessionCleanupState == nil else { return }
+        route = .forgotPassword
+    }
 
     func requestPasswordReset(email: String) async -> Bool {
         let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -325,6 +532,7 @@ final class AppModel: ObservableObject {
                 password: password,
                 newsletterConsent: newsletterConsent
             )
+            guard sessionCleanupState == nil else { return }
             let pending = PendingRegistration(userId: response.userId, email: response.email)
             savePendingRegistration(pending)
             prefilledEmail = response.email
@@ -776,16 +984,12 @@ final class AppModel: ObservableObject {
     }
 
     func signOut() async {
-        isExplicitDisconnectInProgress = true
-        await refreshTrafficMetricsOnce(updateLiveActivity: true)
-        cancelActiveVPNTransition()
-        persistAutoConnectEnabled(false)
-        persistKillSwitch(enabled: false, activation: .off)
-        await vpn.disconnectAndForget()
-        persistActiveStatisticsSessionIfNeeded(endedAt: Date(), notifyDisconnect: true)
-        await api.logout()
+        // Remote logout is best effort. Never leave a locally active tunnel
+        // up while waiting for it to finish.
+        async let remoteLogout: Void = api.logout()
         google.signOut()
-        clearSessionState()
+        await beginSessionCleanup(intent: .manualSignOut)
+        await remoteLogout
     }
 
     func selectServer(_ server: VPNServer) {
@@ -919,6 +1123,7 @@ final class AppModel: ObservableObject {
     }
 
     func handleOpenURL(_ url: URL) {
+        guard sessionCleanupState == nil else { return }
         guard url.scheme?.lowercased() == "libreguardvpn" else {
             _ = google.handle(url: url)
             return
@@ -994,6 +1199,7 @@ final class AppModel: ObservableObject {
     }
 
     private func handleLogin(_ response: LoginResponse, attempt: LoginAttempt, afterTwoFactor: Bool) async throws {
+        guard sessionCleanupState == nil else { return }
         if response.requiresTwoFactor == true {
             guard let pendingToken = response.pendingLoginToken,
                   let email = response.email else {
@@ -1030,8 +1236,9 @@ final class AppModel: ObservableObject {
 
     private func present(_ error: Error) {
         if let apiError = error as? APIError {
-            if apiError.requiresLogin || apiError.requiresDeviceRegistration {
+            if isAuthenticationFailure(apiError) {
                 forceSignOut()
+                return
             }
             if let retryAfter = apiError.retryAfterSeconds, retryAfter > 0 {
                 beginRetryCountdown(retryAfter)
@@ -1043,18 +1250,15 @@ final class AppModel: ObservableObject {
     }
 
     private func forceSignOut() {
-        isExplicitDisconnectInProgress = true
-        cancelActiveVPNTransition()
-        persistAutoConnectEnabled(false)
-        persistKillSwitch(enabled: false, activation: .off)
-        persistActiveStatisticsSessionIfNeeded(endedAt: Date(), notifyDisconnect: true)
-        Task { await vpn.disconnectAndForget() }
-        clearSessionState()
+        Task { @MainActor [weak self] in
+            await self?.beginSessionCleanup(intent: .invalidSession)
+        }
     }
 
-    private func clearSessionState() {
+    private func clearSessionState(route nextRoute: AppRoute? = .login) {
         serverRefreshTask?.cancel()
         retryCountdownTask?.cancel()
+        cancelSessionRestoreRetry()
         cancelActiveVPNTransition()
         serverRefreshTask = nil
         retryCountdownTask = nil
@@ -1085,13 +1289,15 @@ final class AppModel: ObservableObject {
         servers = []
         serverLatencies = [:]
         selectedServerID = nil
-        vpnStatus = .disconnected
+        vpnStatus = vpn.status
         deviceLimitContext = nil
         pendingStatisticsRequest = nil
         activeStatisticsSession = nil
         sessionMetrics = nil
         VPNSharedSessionStore.clear()
-        route = .login
+        if let nextRoute {
+            route = nextRoute
+        }
     }
 
     private func startAppleTransactionListener() {
