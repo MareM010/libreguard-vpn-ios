@@ -150,6 +150,17 @@ struct GoogleLoginRequest: Encodable {
     let devicePublicKeyAlgorithm: String
 }
 
+struct AppleLoginRequest: Encodable {
+    let idToken: String
+    let nonce: String
+    let newsletterConsent: Bool?
+    let deviceId: String
+    let appVersion: String
+    let devicePublicKey: String
+    let devicePublicKeyId: String
+    let devicePublicKeyAlgorithm: String
+}
+
 struct RefreshTokenRequest: Encodable {
     let refreshToken: String
     let deviceId: String
@@ -287,6 +298,7 @@ struct PasswordDeviceRemovalRequest: Encodable {
 struct OAuthDeviceRemovalRequest: Encodable {
     let idToken: String
     let provider: String
+    let nonce: String?
     let deviceIdToRemove: Int
 }
 
@@ -869,6 +881,7 @@ struct PendingRegistration: Codable, Equatable {
 enum LoginAttempt {
     case password(email: String, password: String)
     case google(idToken: String, newsletterConsent: Bool?)
+    case apple(idToken: String, nonce: String, newsletterConsent: Bool?, userIdentifier: String)
 }
 
 struct TwoFactorChallenge: Identifiable {
@@ -886,7 +899,7 @@ struct DeviceLimitContext: Identifiable {
 
     var canRemoveInApp: Bool {
         switch attempt {
-        case .google: true
+        case .google, .apple: true
         case .password: !afterTwoFactor
         }
     }

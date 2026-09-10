@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import OSLog
 import UserNotifications
+import AuthenticationServices
 
 enum SessionCleanupState: Equatable {
     case ending
@@ -65,6 +66,10 @@ final class AppModel: ObservableObject {
     private let api: BackendServicing
     private let appleStore: AppleSubscriptionStoreServing
     private let google: GoogleSigning
+    private let appleSignIn: AppleSigning
+    private let appleCredentialStateChecker: AppleCredentialStateChecking
+    private let appleCredentialBindingStore: AppleCredentialBindingStoring
+    private let notificationCenter: NotificationCenter
     private let latencyProbe: LatencyProbing
     private let vpn: VPNManaging
     private let defaults: UserDefaults
@@ -97,6 +102,7 @@ final class AppModel: ObservableObject {
     private var hasCompletedUnauthenticatedCleanup = false
     private var shouldShowSessionEndedMessage = false
     private var appleTransactionListenerTask: Task<Void, Never>?
+    private var appleCredentialRevocationObserver: AnyCancellable?
     private var processingAppleTransactionIDs: Set<UInt64> = []
     private var vpnTransitionTask: Task<Void, Never>?
     private var trafficMonitorTask: Task<Void, Never>?
@@ -143,6 +149,10 @@ final class AppModel: ObservableObject {
         api: BackendServicing? = nil,
         appleStore: AppleSubscriptionStoreServing? = nil,
         google: GoogleSigning? = nil,
+        appleSignIn: AppleSigning? = nil,
+        appleCredentialStateChecker: AppleCredentialStateChecking? = nil,
+        appleCredentialBindingStore: AppleCredentialBindingStoring? = nil,
+        notificationCenter: NotificationCenter = .default,
         latencyProbe: LatencyProbing? = nil,
         vpnManager: VPNManaging? = nil,
         protocolSelectionStore: VPNProtocolSelectionStoring? = nil,
@@ -158,6 +168,10 @@ final class AppModel: ObservableObject {
         self.api = resolvedAPI
         self.appleStore = appleStore ?? AppleSubscriptionStore()
         self.google = google ?? GoogleSignInService()
+        self.appleSignIn = appleSignIn ?? AppleSignInService()
+        self.appleCredentialStateChecker = appleCredentialStateChecker ?? AppleCredentialStateService()
+        self.appleCredentialBindingStore = appleCredentialBindingStore ?? AppleCredentialBindingStore()
+        self.notificationCenter = notificationCenter
         self.latencyProbe = latencyProbe ?? NetworkLatencyProbe()
         self.protocolSelectionStore = protocolSelectionStore ?? UserDefaultsVPNProtocolSelectionStore(defaults: defaults)
         self.favoriteServerStore = favoriteServerStore ?? UserDefaultsFavoriteServerStore(defaults: defaults)
@@ -206,10 +220,12 @@ final class AppModel: ObservableObject {
 
     func start() async {
         startAppleTransactionListener()
+        startAppleCredentialRevocationObserver()
         guard case .launching = route else { return }
         await refreshNotificationAuthorizationStatus()
         if ProcessInfo.processInfo.arguments.contains("--uitesting-reset") {
             api.clearLocalSession()
+            appleCredentialBindingStore.clear()
             clearCachedPlan()
             clearPendingRegistration()
             persistAutoConnectEnabled(false)
@@ -242,6 +258,7 @@ final class AppModel: ObservableObject {
             }
             logger.info("Session restore succeeded; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
             session = restoredSession
+            guard await checkAppleCredentialStateIfNeeded() else { return }
             await finishAuthenticatedStartup()
         } catch let error as APIError where error.code == "APP_VERSION_BLOCKED" || error.code == "APP_VERSION_REQUIRED" {
             logger.error("Session restore was blocked by the app version; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
@@ -256,6 +273,7 @@ final class AppModel: ObservableObject {
             // a foreground retry validates it again.
             logger.info("Session restore deferred after a transient failure; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
             session = storedSession
+            guard await checkAppleCredentialStateIfNeeded() else { return }
             await continueWithCachedSessionAfterTransientRestoreFailure()
             scheduleSessionRestoreRetry()
         }
@@ -280,6 +298,7 @@ final class AppModel: ObservableObject {
             }
             logger.info("Deferred session validation succeeded; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
             session = restoredSession
+            guard await checkAppleCredentialStateIfNeeded() else { return }
             cancelSessionRestoreRetry()
             await finishAuthenticatedStartup()
         } catch let error as APIError where isAuthenticationFailure(error) {
@@ -524,6 +543,44 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func prepareAppleSignIn(_ request: ASAuthorizationAppleIDRequest) {
+        presentedError = nil
+        isAuthenticating = true
+        appleSignIn.prepare(request)
+    }
+
+    func completeAppleSignIn(
+        _ result: Result<ASAuthorization, Error>,
+        newsletterConsent: Bool? = nil
+    ) async {
+        defer { isAuthenticating = false }
+        do {
+            let credential = try appleSignIn.credential(from: result)
+            let attempt = LoginAttempt.apple(
+                idToken: credential.idToken,
+                nonce: credential.nonce,
+                newsletterConsent: newsletterConsent,
+                userIdentifier: credential.userIdentifier
+            )
+            do {
+                let response = try await api.loginWithApple(
+                    idToken: credential.idToken,
+                    nonce: credential.nonce,
+                    newsletterConsent: newsletterConsent
+                )
+                try await handleLogin(response, attempt: attempt, afterTwoFactor: false)
+            } catch {
+                handle(error, attempt: attempt, afterTwoFactor: false)
+            }
+        } catch where Self.isAppleSignInCancellation(error) {
+            // Cancellation is a normal outcome of the system account sheet.
+        } catch let error as APIError {
+            presentedError = error
+        } catch {
+            presentedError = APIError(message: error.localizedDescription)
+        }
+    }
+
     func register(email: String, password: String, confirmation: String, newsletterConsent: Bool = false) async {
         let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         guard password.count >= 8 else {
@@ -611,6 +668,15 @@ final class AppModel: ObservableObject {
                 deviceLimitContext = nil
                 let response = try await api.loginWithGoogle(
                     idToken: idToken,
+                    newsletterConsent: newsletterConsent
+                )
+                try await handleLogin(response, attempt: context.attempt, afterTwoFactor: false)
+            case let .apple(idToken, nonce, newsletterConsent, _):
+                try await api.removeAppleDevice(idToken: idToken, nonce: nonce, deviceId: device.id)
+                deviceLimitContext = nil
+                let response = try await api.loginWithApple(
+                    idToken: idToken,
+                    nonce: nonce,
                     newsletterConsent: newsletterConsent
                 )
                 try await handleLogin(response, attempt: context.attempt, afterTwoFactor: false)
@@ -1219,7 +1285,26 @@ final class AppModel: ObservableObject {
             route = .twoFactor(TwoFactorChallenge(email: email, pendingLoginToken: pendingToken, attempt: attempt))
             return
         }
-        session = try api.adoptSession(from: response)
+        let adoptedSession = try api.adoptSession(from: response)
+        do {
+            switch attempt {
+            case let .apple(_, _, _, userIdentifier):
+                try appleCredentialBindingStore.save(AppleCredentialBinding(
+                    userIdentifier: userIdentifier,
+                    backendUserId: adoptedSession.userId
+                ))
+            case .password, .google:
+                appleCredentialBindingStore.clear()
+            }
+        } catch {
+            api.clearLocalSession()
+            appleCredentialBindingStore.clear()
+            throw APIError(
+                message: "Your Apple credential could not be stored securely. Please try again.",
+                code: "SECURE_STORAGE_FAILED"
+            )
+        }
+        session = adoptedSession
         if let planTier = response.planTier {
             cachePlan(name: planTier.rawValue, isPro: planTier.isPro)
         }
@@ -1260,6 +1345,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private static func isAppleSignInCancellation(_ error: Error) -> Bool {
+        let error = error as NSError
+        return error.domain == ASAuthorizationError.errorDomain
+            && error.code == ASAuthorizationError.canceled.rawValue
+    }
+
     private func forceSignOut() {
         Task { @MainActor [weak self] in
             await self?.beginSessionCleanup(intent: .invalidSession)
@@ -1277,6 +1368,7 @@ final class AppModel: ObservableObject {
         trafficMonitorTask = nil
         clearCachedPlan()
         api.clearLocalSession()
+        appleCredentialBindingStore.clear()
         session = nil
         usageQuota = nil
         subscription = nil
@@ -1309,6 +1401,47 @@ final class AppModel: ObservableObject {
         if let nextRoute {
             route = nextRoute
         }
+    }
+
+    @discardableResult
+    func checkAppleCredentialStateIfNeeded() async -> Bool {
+        guard let binding = appleCredentialBindingStore.load() else { return true }
+        guard let activeSession = session ?? api.storedSession else {
+            appleCredentialBindingStore.clear()
+            return false
+        }
+        guard binding.backendUserId == activeSession.userId else {
+            // A provider change or account switch must not carry an Apple
+            // credential identifier into another LibreGuard session.
+            appleCredentialBindingStore.clear()
+            return true
+        }
+
+        do {
+            switch try await appleCredentialStateChecker.credentialState(for: binding.userIdentifier) {
+            case .authorized, .unknown:
+                return true
+            case .revoked, .notFound, .transferred:
+                await beginSessionCleanup(intent: .invalidSession)
+                return false
+            }
+        } catch {
+            // Credential-state lookup is network-backed. Availability failures
+            // must not turn into an offline logout.
+            logger.info("Apple credential state check deferred after a transient failure")
+            return true
+        }
+    }
+
+    private func startAppleCredentialRevocationObserver() {
+        guard appleCredentialRevocationObserver == nil else { return }
+        appleCredentialRevocationObserver = notificationCenter
+            .publisher(for: ASAuthorizationAppleIDProvider.credentialRevokedNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    _ = await self?.checkAppleCredentialStateIfNeeded()
+                }
+            }
     }
 
     private func startAppleTransactionListener() {

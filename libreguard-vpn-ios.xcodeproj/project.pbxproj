@@ -356,6 +356,11 @@
 					};
 					E678589B2FE6EBD7000CF95E = {
 						CreatedOnToolsVersion = 26.5;
+						SystemCapabilities = {
+							com.apple.SignInWithApple = {
+								enabled = 1;
+							};
+						};
 					};
 					E67858A82FE6EBD9000CF95E = {
 						CreatedOnToolsVersion = 26.5;

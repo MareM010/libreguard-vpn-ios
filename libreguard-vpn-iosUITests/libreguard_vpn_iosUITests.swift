@@ -31,13 +31,14 @@ final class libreguard_vpn_iosUITests: XCTestCase {
 
         XCTAssertTrue(app.scrollViews["login-screen"].waitForExistence(timeout: 20))
         XCTAssertTrue(app.buttons["login-sign-in-button"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["apple-sign-in-button"].exists)
         XCTAssertTrue(app.buttons["google-sign-in-button"].exists)
         XCTAssertTrue(app.buttons["create-account-button"].exists)
         XCTAssertFalse(app.switches["newsletter-consent-checkbox"].exists)
     }
 
     @MainActor
-    func testRegistrationScreenShowsOptionalNewsletterConsentAndGoogleSignup() throws {
+    func testRegistrationScreenShowsOptionalNewsletterConsentAndProviderSignup() throws {
         let app = XCUIApplication()
         app.launchArguments.append("--uitesting-reset")
         app.launch()
@@ -47,6 +48,7 @@ final class libreguard_vpn_iosUITests: XCTestCase {
 
         XCTAssertTrue(app.switches["newsletter-consent-checkbox"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.switches["newsletter-consent-checkbox"].isSelected)
+        XCTAssertTrue(app.buttons["apple-register-button"].exists)
         XCTAssertTrue(app.buttons["google-register-button"].exists)
     }
 

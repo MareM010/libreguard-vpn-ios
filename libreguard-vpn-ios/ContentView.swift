@@ -11,6 +11,7 @@ import SwiftData
 import CoreImage.CIFilterBuiltins
 import UserNotifications
 import StoreKit
+import AuthenticationServices
 
 struct ContentView: View {
     @EnvironmentObject private var app: AppModel
@@ -135,6 +136,7 @@ struct ContentView: View {
             Task {
                 await app.retrySessionValidationIfNeeded()
                 guard case .authenticated = app.route else { return }
+                guard await app.checkAppleCredentialStateIfNeeded() else { return }
                 await app.refreshAccountData(showErrors: false)
                 app.refreshServers()
                 await app.refreshVPNStatus()
@@ -390,6 +392,7 @@ private struct MainAppView: View {
 
 private struct LoginView: View {
     @EnvironmentObject private var app: AppModel
+    @Environment(\.colorScheme) private var colorScheme
     @State private var email = ""
     @State private var password = ""
     @State private var showPassword = false
@@ -435,6 +438,17 @@ private struct LoginView: View {
 
                 DividerWithText(text: "Or continue with")
 
+                SignInWithAppleButton(.signIn) { request in
+                    app.prepareAppleSignIn(request)
+                } onCompletion: { result in
+                    Task { await app.completeAppleSignIn(result) }
+                }
+                .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
+                .frame(height: 50)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .disabled(app.isAuthenticating)
+                .accessibilityIdentifier("apple-sign-in-button")
+
                 Button {
                     Task { await app.loginWithGoogle() }
                 } label: {
@@ -478,6 +492,7 @@ private struct LoginView: View {
 
 private struct RegisterView: View {
     @EnvironmentObject private var app: AppModel
+    @Environment(\.colorScheme) private var colorScheme
     @State private var email = ""
     @State private var password = ""
     @State private var confirmPassword = ""
@@ -535,6 +550,22 @@ private struct RegisterView: View {
                     .accessibilityIdentifier("newsletter-consent-checkbox")
 
                     DividerWithText(text: "Or continue with")
+
+                    SignInWithAppleButton(.continue) { request in
+                        app.prepareAppleSignIn(request)
+                    } onCompletion: { result in
+                        Task {
+                            await app.completeAppleSignIn(
+                                result,
+                                newsletterConsent: newsletterConsent
+                            )
+                        }
+                    }
+                    .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
+                    .frame(height: 50)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .disabled(app.isAuthenticating)
+                    .accessibilityIdentifier("apple-register-button")
 
                     Button {
                         Task { await app.loginWithGoogle(newsletterConsent: newsletterConsent) }

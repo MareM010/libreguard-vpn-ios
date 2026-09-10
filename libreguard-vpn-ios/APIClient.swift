@@ -9,6 +9,7 @@ protocol BackendServicing: AnyObject {
     func restoreSession() async throws -> AuthSession?
     func login(email: String, password: String) async throws -> LoginResponse
     func loginWithGoogle(idToken: String, newsletterConsent: Bool?) async throws -> LoginResponse
+    func loginWithApple(idToken: String, nonce: String, newsletterConsent: Bool?) async throws -> LoginResponse
     func verifyTwoFactor(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse
     func verifyRecoveryCode(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse
     func register(email: String, password: String, newsletterConsent: Bool) async throws -> RegistrationResponse
@@ -18,6 +19,7 @@ protocol BackendServicing: AnyObject {
     func resendConfirmation(email: String) async throws
     func removePasswordDevice(email: String, password: String, deviceId: Int) async throws
     func removeGoogleDevice(idToken: String, deviceId: Int) async throws
+    func removeAppleDevice(idToken: String, nonce: String, deviceId: Int) async throws
     func adoptSession(from response: LoginResponse) throws -> AuthSession
     func clearLocalSession()
     func logout() async
@@ -126,6 +128,26 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         return response
     }
 
+    func loginWithApple(idToken: String, nonce: String, newsletterConsent: Bool? = nil) async throws -> LoginResponse {
+        let keyPayload = try deviceKeyStore.publicKeyPayload()
+        let response: LoginResponse = try await send(
+            .post,
+            path: "/api/login/apple",
+            body: AppleLoginRequest(
+                idToken: idToken,
+                nonce: nonce,
+                newsletterConsent: newsletterConsent,
+                deviceId: deviceId,
+                appVersion: appVersion,
+                devicePublicKey: keyPayload.devicePublicKey,
+                devicePublicKeyId: keyPayload.devicePublicKeyId,
+                devicePublicKeyAlgorithm: keyPayload.devicePublicKeyAlgorithm
+            ),
+            authorized: false
+        )
+        return response
+    }
+
     func verifyTwoFactor(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse {
         let response: LoginResponse = try await send(
             .post,
@@ -213,7 +235,16 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         let _: DeviceRemovalResponse = try await send(
             .post,
             path: "/api/devices/pre-auth/oauth/remove",
-            body: OAuthDeviceRemovalRequest(idToken: idToken, provider: "Google", deviceIdToRemove: deviceId),
+            body: OAuthDeviceRemovalRequest(idToken: idToken, provider: "Google", nonce: nil, deviceIdToRemove: deviceId),
+            authorized: false
+        )
+    }
+
+    func removeAppleDevice(idToken: String, nonce: String, deviceId: Int) async throws {
+        let _: DeviceRemovalResponse = try await send(
+            .post,
+            path: "/api/devices/pre-auth/oauth/remove",
+            body: OAuthDeviceRemovalRequest(idToken: idToken, provider: "Apple", nonce: nonce, deviceIdToRemove: deviceId),
             authorized: false
         )
     }

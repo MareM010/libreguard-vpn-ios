@@ -1,4 +1,5 @@
 import Foundation
+import AuthenticationServices
 import SwiftData
 import SwiftUI
 import Testing
@@ -270,6 +271,347 @@ struct libreguard_vpn_iosTests {
             #expect(receivedValues[0] == nil)
             #expect(receivedValues[1] == true)
         }
+    }
+
+    @Test func appleLoginSendsNonceDeviceKeyAndOptionalConsent() async throws {
+        try await withSerializedRequests {
+            var receivedBodies: [[String: Any]] = []
+            let client = makeClient { request in
+                #expect(request.url?.path == "/api/login/apple")
+                receivedBodies.append(try #require(
+                    JSONSerialization.jsonObject(with: requestBody(from: request)) as? [String: Any]
+                ))
+                return try makeResponse(request, status: 200, json: [:])
+            }
+
+            _ = try await client.loginWithApple(idToken: "login-token", nonce: "login-nonce")
+            _ = try await client.loginWithApple(
+                idToken: "registration-token",
+                nonce: "registration-nonce",
+                newsletterConsent: true
+            )
+
+            #expect(receivedBodies.count == 2)
+            #expect(receivedBodies[0]["idToken"] as? String == "login-token")
+            #expect(receivedBodies[0]["nonce"] as? String == "login-nonce")
+            #expect(receivedBodies[0]["newsletterConsent"] == nil)
+            #expect(receivedBodies[0]["deviceId"] as? String == "test-device")
+            #expect(receivedBodies[0]["appVersion"] as? String == "1.0-test")
+            #expect(receivedBodies[0]["devicePublicKey"] as? String == "base64-spki")
+            #expect(receivedBodies[0]["devicePublicKeyId"] as? String == "device-key-id")
+            #expect(receivedBodies[0]["devicePublicKeyAlgorithm"] as? String == "RSA-OAEP-256")
+            #expect(receivedBodies[1]["idToken"] as? String == "registration-token")
+            #expect(receivedBodies[1]["nonce"] as? String == "registration-nonce")
+            #expect(receivedBodies[1]["newsletterConsent"] as? Bool == true)
+        }
+    }
+
+    @Test func oauthDeviceRemovalKeepsGoogleCompatibleAndAddsAppleNonce() async throws {
+        try await withSerializedRequests {
+            var receivedBodies: [[String: Any]] = []
+            let client = makeClient { request in
+                #expect(request.url?.path == "/api/devices/pre-auth/oauth/remove")
+                receivedBodies.append(try #require(
+                    JSONSerialization.jsonObject(with: requestBody(from: request)) as? [String: Any]
+                ))
+                return try makeResponse(request, status: 200, json: [
+                    "success": true,
+                    "message": "Removed",
+                    "deviceId": 42,
+                    "removedDeviceCount": 1
+                ])
+            }
+
+            try await client.removeGoogleDevice(idToken: "google-token", deviceId: 41)
+            try await client.removeAppleDevice(idToken: "apple-token", nonce: "apple-nonce", deviceId: 42)
+
+            #expect(receivedBodies.count == 2)
+            #expect(receivedBodies[0]["provider"] as? String == "Google")
+            #expect(receivedBodies[0]["idToken"] as? String == "google-token")
+            #expect(receivedBodies[0]["nonce"] == nil)
+            #expect(receivedBodies[0]["deviceIdToRemove"] as? Int == 41)
+            #expect(receivedBodies[1]["provider"] as? String == "Apple")
+            #expect(receivedBodies[1]["idToken"] as? String == "apple-token")
+            #expect(receivedBodies[1]["nonce"] as? String == "apple-nonce")
+            #expect(receivedBodies[1]["deviceIdToRemove"] as? Int == 42)
+        }
+    }
+
+    @Test func appleNonceIsRandomBase64URLAndHashesDeterministically() throws {
+        let first = try AppleSignInService.generateNonce()
+        let second = try AppleSignInService.generateNonce()
+
+        #expect(first.count == 43)
+        #expect(second.count == 43)
+        #expect(first != second)
+        #expect(first.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil)
+        #expect(AppleSignInService.sha256("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    }
+
+    @Test func appleRequestHashesNonceAndClearsItAfterCancellation() {
+        let service = AppleSignInService(nonceGenerator: { "fixed-raw-nonce" })
+        let request = ASAuthorizationAppleIDProvider().createRequest()
+        service.prepare(request)
+
+        #expect(request.requestedScopes == [.email])
+        #expect(request.nonce == AppleSignInService.sha256("fixed-raw-nonce"))
+        #expect(service.hasPendingRequest)
+
+        let cancellation = NSError(
+            domain: ASAuthorizationError.errorDomain,
+            code: ASAuthorizationError.canceled.rawValue
+        )
+        #expect(throws: Error.self) {
+            _ = try service.credential(from: .failure(cancellation))
+        }
+        #expect(!service.hasPendingRequest)
+    }
+
+    @Test func appleCancellationIsSilentAndOtherAuthorizationErrorsArePresented() async {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        let vpn = StartupVPNManager(status: .disconnected)
+        let service = AppleSignInService(nonceGenerator: { "fixed-raw-nonce" })
+        let app = makeStartupApp(
+            backend: backend,
+            vpn: vpn,
+            defaults: defaults,
+            appleSignIn: service
+        )
+
+        app.prepareAppleSignIn(ASAuthorizationAppleIDProvider().createRequest())
+        #expect(app.isAuthenticating)
+        let cancellation = NSError(
+            domain: ASAuthorizationError.errorDomain,
+            code: ASAuthorizationError.canceled.rawValue
+        )
+        await app.completeAppleSignIn(.failure(cancellation))
+        #expect(app.presentedError == nil)
+        #expect(!app.isAuthenticating)
+        #expect(!service.hasPendingRequest)
+
+        app.prepareAppleSignIn(ASAuthorizationAppleIDProvider().createRequest())
+        await app.completeAppleSignIn(.failure(NSError(
+            domain: ASAuthorizationError.errorDomain,
+            code: ASAuthorizationError.failed.rawValue,
+            userInfo: [NSLocalizedDescriptionKey: "Authorization failed"]
+        )))
+        #expect(app.presentedError?.message == "Authorization failed")
+        #expect(!service.hasPendingRequest)
+    }
+
+    @Test func appleDeviceRemovalRetryPreservesTokenNonceAndConsent() async throws {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        backend.appleLoginResponse = try JSONDecoder().decode(
+            LoginResponse.self,
+            from: Data("""
+                {
+                  "requiresTwoFactor": true,
+                  "pendingLoginToken": "pending-token",
+                  "email": "person@example.com",
+                  "userId": "user-1",
+                  "deviceId": "test-device"
+                }
+                """.utf8)
+        )
+        let limit = try JSONDecoder().decode(
+            DeviceLimitResponse.self,
+            from: Data("""
+                {
+                  "message": "Device limit reached",
+                  "errorCode": "DEVICE_LIMIT_EXCEEDED",
+                  "currentDevices": 1,
+                  "maxDevices": 1,
+                  "planType": "Free",
+                  "devices": [{ "id": 42, "deviceIdHash": "device-hash" }]
+                }
+                """.utf8)
+        )
+        let context = DeviceLimitContext(
+            response: limit,
+            attempt: .apple(
+                idToken: "apple-token",
+                nonce: "raw-nonce",
+                newsletterConsent: true,
+                userIdentifier: "apple-user"
+            ),
+            afterTwoFactor: false
+        )
+        let app = makeStartupApp(
+            backend: backend,
+            vpn: StartupVPNManager(status: .disconnected),
+            defaults: defaults
+        )
+
+        await app.removeDeviceAndRetry(try #require(limit.devices.first), context: context)
+
+        #expect(backend.removedAppleDeviceId == 42)
+        #expect(backend.removedAppleToken == "apple-token")
+        #expect(backend.removedAppleNonce == "raw-nonce")
+        #expect(backend.appleLoginIdToken == "apple-token")
+        #expect(backend.appleLoginNonce == "raw-nonce")
+        #expect(backend.appleLoginConsent == true)
+        if case let .twoFactor(challenge) = app.route {
+            if case let .apple(idToken, nonce, consent, userIdentifier) = challenge.attempt {
+                #expect(idToken == "apple-token")
+                #expect(nonce == "raw-nonce")
+                #expect(consent == true)
+                #expect(userIdentifier == "apple-user")
+            } else {
+                Issue.record("Expected the Apple login attempt to survive the 2FA transition")
+            }
+        } else {
+            Issue.record("Expected a two-factor route after retry")
+        }
+    }
+
+    @Test func successfulAppleRetryBindsCredentialToBackendSession() async throws {
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        backend.appleLoginResponse = try loginResponse(userId: "user-apple")
+        let bindingStore = InMemoryAppleCredentialBindingStore()
+        let limit = try JSONDecoder().decode(
+            DeviceLimitResponse.self,
+            from: Data("""
+                {
+                  "message": "Device limit reached",
+                  "errorCode": "DEVICE_LIMIT_EXCEEDED",
+                  "currentDevices": 1,
+                  "maxDevices": 1,
+                  "planType": "Free",
+                  "devices": [{ "id": 42, "deviceIdHash": "device-hash" }]
+                }
+                """.utf8)
+        )
+        let app = makeStartupApp(
+            backend: backend,
+            vpn: StartupVPNManager(status: .disconnected),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!,
+            appleCredentialBindingStore: bindingStore
+        )
+        let context = DeviceLimitContext(
+            response: limit,
+            attempt: .apple(
+                idToken: "apple-token",
+                nonce: "raw-nonce",
+                newsletterConsent: nil,
+                userIdentifier: "apple-user-identifier"
+            ),
+            afterTwoFactor: false
+        )
+
+        await app.removeDeviceAndRetry(try #require(limit.devices.first), context: context)
+
+        #expect(bindingStore.binding == AppleCredentialBinding(
+            userIdentifier: "apple-user-identifier",
+            backendUserId: "user-apple"
+        ))
+        #expect(app.session?.userId == "user-apple")
+    }
+
+    @Test func successfulPasswordLoginClearsPreviousAppleCredentialBinding() async throws {
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        backend.passwordLoginResponse = try loginResponse(userId: "password-user")
+        let bindingStore = InMemoryAppleCredentialBindingStore(binding: AppleCredentialBinding(
+            userIdentifier: "old-apple-user",
+            backendUserId: "old-backend-user"
+        ))
+        let app = makeStartupApp(
+            backend: backend,
+            vpn: StartupVPNManager(status: .disconnected),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!,
+            appleCredentialBindingStore: bindingStore
+        )
+
+        await app.login(email: "person@example.com", password: "Password1!")
+
+        #expect(bindingStore.binding == nil)
+        #expect(app.session?.userId == "password-user")
+    }
+
+    @Test(arguments: [
+        AppleCredentialState.revoked,
+        AppleCredentialState.notFound,
+        AppleCredentialState.transferred
+    ])
+    func terminalAppleCredentialStateDisconnectsAndClearsSessionAtStartup(
+        state: AppleCredentialState
+    ) async {
+        let session = startupSession()
+        let backend = StartupBackendStub(storedSession: session, restoreResults: [.success(session)])
+        let vpn = StartupVPNManager(status: .connected)
+        let bindingStore = InMemoryAppleCredentialBindingStore(binding: AppleCredentialBinding(
+            userIdentifier: "apple-user",
+            backendUserId: session.userId
+        ))
+        let checker = StubAppleCredentialStateChecker(result: .success(state))
+        let app = makeStartupApp(
+            backend: backend,
+            vpn: vpn,
+            defaults: UserDefaults(suiteName: UUID().uuidString)!,
+            appleCredentialStateChecker: checker,
+            appleCredentialBindingStore: bindingStore
+        )
+
+        await app.start()
+
+        #expect(app.session == nil)
+        #expect(bindingStore.binding == nil)
+        #expect(vpn.cleanupCalls == 1)
+        #expect(app.presentedError?.code == "SESSION_ENDED")
+    }
+
+    @Test func transientAppleCredentialStateFailurePreservesSession() async {
+        let session = startupSession()
+        let backend = StartupBackendStub(storedSession: session, restoreResults: [.success(session)])
+        let binding = AppleCredentialBinding(userIdentifier: "apple-user", backendUserId: session.userId)
+        let bindingStore = InMemoryAppleCredentialBindingStore(binding: binding)
+        let checker = StubAppleCredentialStateChecker(result: .failure(APIError(message: "Offline")))
+        let app = makeStartupApp(
+            backend: backend,
+            vpn: StartupVPNManager(status: .connected),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!,
+            appleCredentialStateChecker: checker,
+            appleCredentialBindingStore: bindingStore
+        )
+
+        await app.start()
+
+        #expect(app.session == session)
+        #expect(bindingStore.binding == binding)
+        if case .authenticated = app.route {
+        } else {
+            Issue.record("A transient Apple credential-state failure must preserve the session")
+        }
+    }
+
+    @Test func nativeAppleRevocationNotificationTriggersCredentialCheckAndCleanup() async {
+        let session = startupSession()
+        let backend = StartupBackendStub(storedSession: session, restoreResults: [.success(session)])
+        let vpn = StartupVPNManager(status: .connected)
+        let bindingStore = InMemoryAppleCredentialBindingStore(binding: AppleCredentialBinding(
+            userIdentifier: "apple-user",
+            backendUserId: session.userId
+        ))
+        let checker = StubAppleCredentialStateChecker(result: .success(.authorized))
+        let notificationCenter = NotificationCenter()
+        let app = makeStartupApp(
+            backend: backend,
+            vpn: vpn,
+            defaults: UserDefaults(suiteName: UUID().uuidString)!,
+            appleCredentialStateChecker: checker,
+            appleCredentialBindingStore: bindingStore,
+            notificationCenter: notificationCenter
+        )
+        await app.start()
+        checker.result = .success(.notFound)
+
+        notificationCenter.post(name: ASAuthorizationAppleIDProvider.credentialRevokedNotification, object: nil)
+        try? await Task.sleep(for: .milliseconds(50))
+
+        #expect(app.session == nil)
+        #expect(bindingStore.binding == nil)
+        #expect(vpn.cleanupCalls == 1)
     }
 
     @Test func connectionEligibilityUsesReadOnlyBackendPreflight() async throws {
@@ -1033,14 +1375,38 @@ struct libreguard_vpn_iosTests {
         )
     }
 
+    private func loginResponse(userId: String) throws -> LoginResponse {
+        try JSONDecoder().decode(
+            LoginResponse.self,
+            from: Data("""
+                {
+                  "token": "access-token",
+                  "refreshToken": "refresh-token",
+                  "email": "person@example.com",
+                  "userId": "\(userId)",
+                  "deviceId": "test-device",
+                  "planType": "Free"
+                }
+                """.utf8)
+        )
+    }
+
     private func makeStartupApp(
         backend: StartupBackendStub,
         vpn: StartupVPNManager,
-        defaults: UserDefaults
+        defaults: UserDefaults,
+        appleSignIn: AppleSigning? = nil,
+        appleCredentialStateChecker: AppleCredentialStateChecking? = nil,
+        appleCredentialBindingStore: AppleCredentialBindingStoring? = nil,
+        notificationCenter: NotificationCenter = .default
     ) -> AppModel {
         AppModel(
             api: backend,
             appleStore: NoOpAppleSubscriptionStore(),
+            appleSignIn: appleSignIn,
+            appleCredentialStateChecker: appleCredentialStateChecker,
+            appleCredentialBindingStore: appleCredentialBindingStore,
+            notificationCenter: notificationCenter,
             latencyProbe: NoOpLatencyProbe(),
             vpnManager: vpn,
             defaults: defaults
@@ -1260,6 +1626,14 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
     var onSessionInvalidated: (() -> Void)?
     private(set) var sessionInvalidationCallbackCount = 0
     private var restoreResults: [Result<AuthSession?, Error>]
+    var passwordLoginResponse: LoginResponse?
+    var appleLoginResponse: LoginResponse?
+    private(set) var appleLoginIdToken: String?
+    private(set) var appleLoginNonce: String?
+    private(set) var appleLoginConsent: Bool?
+    private(set) var removedAppleToken: String?
+    private(set) var removedAppleNonce: String?
+    private(set) var removedAppleDeviceId: Int?
 
     init(storedSession: AuthSession?, restoreResults: [Result<AuthSession?, Error>]) {
         self.storedSession = storedSession
@@ -1283,8 +1657,18 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
         }
     }
 
-    func login(email: String, password: String) async throws -> LoginResponse { try unsupported() }
+    func login(email: String, password: String) async throws -> LoginResponse {
+        guard let passwordLoginResponse else { return try unsupported() }
+        return passwordLoginResponse
+    }
     func loginWithGoogle(idToken: String, newsletterConsent: Bool?) async throws -> LoginResponse { try unsupported() }
+    func loginWithApple(idToken: String, nonce: String, newsletterConsent: Bool?) async throws -> LoginResponse {
+        appleLoginIdToken = idToken
+        appleLoginNonce = nonce
+        appleLoginConsent = newsletterConsent
+        guard let appleLoginResponse else { return try unsupported() }
+        return appleLoginResponse
+    }
     func verifyTwoFactor(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse { try unsupported() }
     func verifyRecoveryCode(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse { try unsupported() }
     func register(email: String, password: String, newsletterConsent: Bool) async throws -> RegistrationResponse { try unsupported() }
@@ -1294,7 +1678,29 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
     func resendConfirmation(email: String) async throws { throw APIError(message: "Not configured") }
     func removePasswordDevice(email: String, password: String, deviceId: Int) async throws { throw APIError(message: "Not configured") }
     func removeGoogleDevice(idToken: String, deviceId: Int) async throws { throw APIError(message: "Not configured") }
-    func adoptSession(from response: LoginResponse) throws -> AuthSession { try unsupported() }
+    func removeAppleDevice(idToken: String, nonce: String, deviceId: Int) async throws {
+        removedAppleToken = idToken
+        removedAppleNonce = nonce
+        removedAppleDeviceId = deviceId
+    }
+    func adoptSession(from response: LoginResponse) throws -> AuthSession {
+        guard let accessToken = response.token,
+              let refreshToken = response.refreshToken,
+              let email = response.email,
+              let userId = response.userId,
+              let deviceId = response.deviceId else {
+            return try unsupported()
+        }
+        let session = AuthSession(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            email: email,
+            userId: userId,
+            deviceId: deviceId
+        )
+        storedSession = session
+        return session
+    }
     func clearLocalSession() { storedSession = nil }
     func logout() async { storedSession = nil }
     func fetchServers() async throws -> [VPNServer] { [] }
@@ -1388,6 +1794,34 @@ private final class NoOpAppleSubscriptionStore: AppleSubscriptionStoreServing {
 @MainActor
 private final class NoOpLatencyProbe: LatencyProbing {
     func measure(_ servers: [VPNServer]) async -> [Int: Int] { [:] }
+}
+
+@MainActor
+private final class InMemoryAppleCredentialBindingStore: AppleCredentialBindingStoring {
+    var binding: AppleCredentialBinding?
+
+    init(binding: AppleCredentialBinding? = nil) {
+        self.binding = binding
+    }
+
+    func load() -> AppleCredentialBinding? { binding }
+    func save(_ binding: AppleCredentialBinding) throws { self.binding = binding }
+    func clear() { binding = nil }
+}
+
+@MainActor
+private final class StubAppleCredentialStateChecker: AppleCredentialStateChecking {
+    var result: Result<AppleCredentialState, Error>
+    private(set) var checkedUserIdentifiers: [String] = []
+
+    init(result: Result<AppleCredentialState, Error>) {
+        self.result = result
+    }
+
+    func credentialState(for userIdentifier: String) async throws -> AppleCredentialState {
+        checkedUserIdentifiers.append(userIdentifier)
+        return try result.get()
+    }
 }
 
 final class URLProtocolStub: URLProtocol, @unchecked Sendable {
