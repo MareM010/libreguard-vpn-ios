@@ -529,6 +529,45 @@ struct libreguard_vpn_iosTests {
         #expect(app.session?.userId == "password-user")
     }
 
+    @Test func staleAccountRefreshCannotRestorePreviousPlanAfterSignOutAndLogin() async throws {
+        let oldSession = AuthSession(
+            accessToken: "old-access",
+            refreshToken: "old-refresh",
+            email: "pro@example.com",
+            userId: "pro-user",
+            deviceId: "test-device"
+        )
+        let backend = StartupBackendStub(storedSession: oldSession, restoreResults: [])
+        backend.holdFirstSubscriptionRequest = true
+        backend.subscriptionResults = [
+            .success(try subscriptionStatus(plan: "Pro", isPro: true)),
+            .success(try subscriptionStatus(plan: "Free", isPro: false))
+        ]
+        backend.passwordLoginResponse = try loginResponse(userId: "free-user")
+        let app = makeStartupApp(
+            backend: backend,
+            vpn: StartupVPNManager(status: .disconnected),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        app.session = oldSession
+
+        let oldRefresh = Task { @MainActor in
+            await app.refreshAccountData(showErrors: false)
+        }
+        await backend.waitForFirstSubscriptionRequest()
+
+        await app.signOut()
+        await app.login(email: "free@example.com", password: "Password1!")
+
+        backend.releaseFirstSubscriptionRequest()
+        await oldRefresh.value
+
+        #expect(app.session?.userId == "free-user")
+        #expect(app.subscription?.isPro == false)
+        #expect(app.currentPlanDisplayName == "Free")
+        #expect(app.isProUser == false)
+    }
+
     @Test(arguments: [
         AppleCredentialState.revoked,
         AppleCredentialState.notFound,
@@ -1391,6 +1430,13 @@ struct libreguard_vpn_iosTests {
         )
     }
 
+    private func subscriptionStatus(plan: String, isPro: Bool) throws -> SubscriptionStatus {
+        try JSONDecoder().decode(
+            SubscriptionStatus.self,
+            from: JSONSerialization.data(withJSONObject: subscriptionJSON(plan: plan, isPro: isPro))
+        )
+    }
+
     private func makeStartupApp(
         backend: StartupBackendStub,
         vpn: StartupVPNManager,
@@ -1628,12 +1674,18 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
     private var restoreResults: [Result<AuthSession?, Error>]
     var passwordLoginResponse: LoginResponse?
     var appleLoginResponse: LoginResponse?
+    var subscriptionResults: [Result<SubscriptionStatus, Error>] = []
+    var holdFirstSubscriptionRequest = false
     private(set) var appleLoginIdToken: String?
     private(set) var appleLoginNonce: String?
     private(set) var appleLoginConsent: Bool?
     private(set) var removedAppleToken: String?
     private(set) var removedAppleNonce: String?
     private(set) var removedAppleDeviceId: Int?
+    private var subscriptionRequestCount = 0
+    private var firstSubscriptionRequestStarted = false
+    private var firstSubscriptionRequestWaiter: CheckedContinuation<Void, Never>?
+    private var firstSubscriptionRequestRelease: CheckedContinuation<Void, Never>?
 
     init(storedSession: AuthSession?, restoreResults: [Result<AuthSession?, Error>]) {
         self.storedSession = storedSession
@@ -1710,7 +1762,30 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
     func fetchCertificateJob(jobId: Int) async throws -> CertificateJobStatusResponse { try unsupported() }
     func fetchUsage() async throws -> UsageQuota { try unsupported() }
     func fetchConnectionEligibility() async throws -> CanConnectResponse { try unsupported() }
-    func fetchSubscription() async throws -> SubscriptionStatus { try unsupported() }
+    func fetchSubscription() async throws -> SubscriptionStatus {
+        subscriptionRequestCount += 1
+        guard !subscriptionResults.isEmpty else { return try unsupported() }
+        let result = subscriptionResults.removeFirst()
+        if subscriptionRequestCount == 1, holdFirstSubscriptionRequest {
+            firstSubscriptionRequestStarted = true
+            firstSubscriptionRequestWaiter?.resume()
+            firstSubscriptionRequestWaiter = nil
+            await withCheckedContinuation { continuation in
+                firstSubscriptionRequestRelease = continuation
+            }
+        }
+        return try result.get()
+    }
+    func waitForFirstSubscriptionRequest() async {
+        guard !firstSubscriptionRequestStarted else { return }
+        await withCheckedContinuation { continuation in
+            firstSubscriptionRequestWaiter = continuation
+        }
+    }
+    func releaseFirstSubscriptionRequest() {
+        firstSubscriptionRequestRelease?.resume()
+        firstSubscriptionRequestRelease = nil
+    }
     func fetchDNSPreference() async throws -> DNSPreference { try unsupported() }
     func updateDNSPreference(adBlockingEnabled: Bool) async throws -> DNSPreference { try unsupported() }
     func fetchAppleAccountToken() async throws -> UUID { try unsupported() }

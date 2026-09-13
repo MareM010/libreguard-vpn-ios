@@ -24,6 +24,17 @@ final class AppModel: ObservableObject {
                 hasCompletedUnauthenticatedCleanup = false
             }
             guard oldValue?.userId != session?.userId else { return }
+            accountStateGeneration &+= 1
+
+            // Account data is kept in memory while the authenticated view is
+            // being replaced. Drop it immediately when a different account
+            // takes over so the old tier cannot be shown while the new one is
+            // being fetched.
+            if oldValue?.userId != nil, session != nil {
+                usageQuota = nil
+                subscription = nil
+                clearCachedPlan()
+            }
             loadFavoriteServerIDs(for: session?.userId)
         }
     }
@@ -93,6 +104,7 @@ final class AppModel: ObservableObject {
     private var cachedPlanName: String?
     private var cachedPlanIsPro = false
     private var hasCachedPlan = false
+    private var accountStateGeneration: UInt = 0
     private var serverRefreshTask: Task<Void, Never>?
     private var retryCountdownTask: Task<Void, Never>?
     private var sessionRestoreRetryTask: Task<Void, Never>?
@@ -687,8 +699,9 @@ final class AppModel: ObservableObject {
     }
 
     func refreshAccountData(showErrors: Bool = true) async {
-        guard session != nil || api.storedSession != nil else { return }
+        guard let accountUserID = (session ?? api.storedSession)?.userId else { return }
         guard !isRefreshingAccount else { return }
+        let refreshGeneration = accountStateGeneration
         isRefreshingAccount = true
         defer { isRefreshingAccount = false }
 
@@ -702,6 +715,15 @@ final class AppModel: ObservableObject {
             twoFactorResult,
             dnsPreferenceResult
         )
+
+        // A refresh may have started for the previous account and completed
+        // after logout/login switched the session. Its results must never be
+        // allowed to overwrite the current account's tier or other account
+        // state.
+        guard accountStateGeneration == refreshGeneration,
+              (session ?? api.storedSession)?.userId == accountUserID else {
+            return
+        }
 
         var firstError: Error?
 

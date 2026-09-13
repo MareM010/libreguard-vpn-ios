@@ -916,12 +916,12 @@ private struct DashboardView: View {
     var body: some View {
         GeometryReader { proxy in
             let compact = proxy.size.height < 720 || status.isConnected
+            // Keep the dashboard's scale stable while the server-selection
+            // card changes from Quick Connect to a manually selected server.
             let referenceHeight: CGFloat = if status.isConnected {
                 700
-            } else if selectedServer != nil {
-                compact ? 560 : 740
             } else {
-                compact ? 500 : 680
+                compact ? 560 : 740
             }
             let scale = min(1, proxy.size.height / referenceHeight)
 
@@ -1096,17 +1096,19 @@ private struct ServerListView: View {
                     Text("Connection Protocol")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                    HStack(spacing: 8) {
+                    SegmentedControlSurface {
                         ProtocolButton(
                             title: "IKEv2/IPSec",
-                            isSelected: app.selectedVPNProtocol == .ikev2 || app.selectedVPNProtocol == .ikev2IPSec
+                            isSelected: app.selectedVPNProtocol == .ikev2 || app.selectedVPNProtocol == .ikev2IPSec,
+                            isSegmented: true
                         ) {
                             app.selectVPNProtocol(.ikev2)
                         }
                         ProtocolButton(
                             title: "OpenVPN",
                             isSelected: app.selectedVPNProtocol == .openVPN,
-                            badge: app.isOpenVPNAvailable ? nil : "PRO"
+                            badge: app.isOpenVPNAvailable ? nil : "PRO",
+                            isSegmented: true
                         ) {
                             if app.isOpenVPNAvailable {
                                 app.selectVPNProtocol(.openVPN)
@@ -1306,16 +1308,18 @@ private struct StatisticsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Statistics")
                     .font(.system(size: 26, weight: .semibold))
-                Text("Track your VPN usage")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
             }
             .padding(24)
-            .padding(.bottom, 8)
+            .padding(.bottom, 16)
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 20) {
-                    SegmentedPicker(selection: $timeRange, options: ["This Week", "This Month"])
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Track your VPN usage")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        SegmentedPicker(selection: $timeRange, options: ["This Week", "This Month"])
+                    }
 
                     if summary.filtered.isEmpty {
                         ContentUnavailableView {
@@ -1454,7 +1458,6 @@ private struct SettingsView: View {
     let themeMode: ThemeMode
     let effectiveDarkMode: Bool
     let onThemeModeChange: (ThemeMode) -> Void
-    @State private var splitTunneling = false
     @State private var showTwoFactorManagement = false
     @State private var showProtocolSelection = false
     @State private var showDNSSettings = false
@@ -1545,7 +1548,6 @@ private struct SettingsView: View {
                             )
                         )
                         .disabled(app.isUpdatingKillSwitch)
-                        ToggleRow(icon: "wifi", title: "Split Tunneling", subtitle: "Exclude apps from VPN", isOn: $splitTunneling)
                     }
 
                     SettingsSection(title: "Protocol") {
@@ -2605,6 +2607,7 @@ private struct QuickConnectCard: View {
                 Image(systemName: "chevron.right")
                     .foregroundStyle(.secondary)
             }
+            .frame(height: 40)
             .padding(14)
             .background(Theme.card, in: RoundedRectangle(cornerRadius: 14))
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
@@ -2647,6 +2650,7 @@ private struct SelectedServerCard: View {
             .rippleEffect(tint: Theme.primary, shape: Circle())
         }
         .padding(14)
+        .frame(height: 68)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
     }
@@ -2973,6 +2977,7 @@ private struct ProtocolButton: View {
     let title: String
     let isSelected: Bool
     var badge: String? = nil
+    var isSegmented = false
     let action: () -> Void
 
     var body: some View {
@@ -2980,11 +2985,21 @@ private struct ProtocolButton: View {
             ZStack(alignment: .topTrailing) {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(isSelected ? .white : .primary)
+                    .foregroundStyle(isSelected ? .white : (isSegmented ? .secondary : .primary))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 11)
-                    .background(isSelected ? Theme.primary : Theme.card, in: RoundedRectangle(cornerRadius: 14))
-                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(isSelected ? Color.clear : Theme.border))
+                    .padding(.vertical, isSegmented ? 10 : 11)
+                    .background(
+                        isSelected || !isSegmented ? (isSelected ? Theme.primary : Theme.card) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: isSegmented ? 10 : 14)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: isSegmented ? 10 : 14)
+                            .stroke(isSegmented || isSelected ? Color.clear : Theme.border)
+                    )
+                    .rippleEffect(
+                        tint: Theme.primary,
+                        shape: RoundedRectangle(cornerRadius: isSegmented ? 10 : 14, style: .continuous)
+                    )
                 if let badge {
                     Text(badge)
                         .font(.system(size: 9, weight: .bold))
@@ -2993,11 +3008,11 @@ private struct ProtocolButton: View {
                         .padding(.vertical, 3)
                         .background(Theme.primary, in: Capsule())
                         .offset(x: 5, y: -7)
+                        .zIndex(1)
                 }
             }
         }
         .buttonStyle(.plain)
-        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -3028,7 +3043,7 @@ private struct SegmentedPicker: View {
     let options: [String]
 
     var body: some View {
-        HStack(spacing: 6) {
+        SegmentedControlSurface {
             ForEach(options, id: \.self) { option in
                 Button {
                     selection = option
@@ -3044,6 +3059,17 @@ private struct SegmentedPicker: View {
                 .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
         }
+    }
+}
+
+private struct SegmentedControlSurface<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(spacing: 6) {
+            content
+        }
+        .frame(maxWidth: .infinity)
         .padding(5)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
@@ -3239,9 +3265,10 @@ private struct UpgradeCard: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
-                        HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 6) {
                             Text("✓ Unlimited bandwidth")
                             Text("✓ Up to 3 devices")
+                            Text("✓ DNS ad blocking")
                         }
                         .font(.caption)
                         .foregroundStyle(.secondary)
