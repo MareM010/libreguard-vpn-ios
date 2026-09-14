@@ -65,6 +65,20 @@ final class libreguard_vpn_iosUITests: XCTestCase {
     }
 
     @MainActor
+    func testFreeAccountOpenVPNTapPresentsUpgradeScreen() throws {
+        let app = XCUIApplication()
+        app.launchArguments.append("--uitesting-reset")
+        app.launchEnvironment["UITEST_FORCE_SERVERS"] = "1"
+        app.launch()
+
+        let openVPNButton = app.buttons["protocol-openvpn-button"]
+        XCTAssertTrue(openVPNButton.waitForExistence(timeout: 20))
+        openVPNButton.tap()
+
+        XCTAssertTrue(app.staticTexts["Upgrade to Pro"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
     func testThemeSelectorShowsThreeModesAndPersistsSelection() throws {
         let app = XCUIApplication()
         app.launchArguments.append("--uitesting-reset")

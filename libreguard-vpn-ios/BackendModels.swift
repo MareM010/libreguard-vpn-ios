@@ -793,8 +793,11 @@ struct SubscriptionStatus: Decodable, Equatable {
     let canAddDevice: Bool
 
     var planTier: AccountPlanTier {
-        if isPro { return .pro }
-        return AccountPlanTier(planName: plan) ?? .free
+        // `isPro` is the server's entitlement decision. The display name is
+        // informational and has previously remained "Pro" after access was
+        // revoked, so it must not grant or visually imply Pro access when the
+        // explicit entitlement flag is false.
+        isPro ? .pro : .free
     }
 
     var displayName: String {

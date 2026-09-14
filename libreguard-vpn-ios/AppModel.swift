@@ -36,6 +36,12 @@ final class AppModel: ObservableObject {
             guard oldValue?.userId != session?.userId else { return }
             accountStateGeneration &+= 1
 
+            let previousAccountID = oldValue?.userId ?? "none"
+            let currentAccountID = session?.userId ?? "none"
+            logger.info(
+                "Session account changed; previous=\(previousAccountID, privacy: .private(mask: .hash)), current=\(currentAccountID, privacy: .private(mask: .hash)), generation=\(String(self.accountStateGeneration), privacy: .public)"
+            )
+
             // Account data is kept in memory while the authenticated view is
             // being replaced. Drop it immediately when a different account
             // takes over so the old tier cannot be shown while the new one is
@@ -258,6 +264,10 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+        let cacheMatchesStoredAccount = storedUserID != nil && persistedPlanUserID == storedUserID
+        logger.info(
+            "Plan cache initialized; account=\((storedUserID ?? "none"), privacy: .private(mask: .hash)), cacheOwnerPresent=\(persistedPlanUserID != nil, privacy: .public), cacheMatchesAccount=\(cacheMatchesStoredAccount, privacy: .public), cachedPlanPresent=\(self.hasCachedPlan, privacy: .public), cachedIsPro=\(self.cachedPlanIsPro, privacy: .public)"
+        )
     }
 
     func start() async {
@@ -732,6 +742,9 @@ final class AppModel: ObservableObject {
         guard let accountUserID = (session ?? api.storedSession)?.userId else { return }
         guard !isRefreshingAccount else { return }
         let refreshGeneration = accountStateGeneration
+        logger.info(
+            "Account refresh started; account=\(accountUserID, privacy: .private(mask: .hash)), generation=\(String(refreshGeneration), privacy: .public)"
+        )
         isRefreshingAccount = true
         defer { isRefreshingAccount = false }
 
@@ -750,8 +763,12 @@ final class AppModel: ObservableObject {
         // after logout/login switched the session. Its results must never be
         // allowed to overwrite the current account's tier or other account
         // state.
+        let currentAccountUserID = (session ?? api.storedSession)?.userId
         guard accountStateGeneration == refreshGeneration,
-              (session ?? api.storedSession)?.userId == accountUserID else {
+              currentAccountUserID == accountUserID else {
+            logger.warning(
+                "Account refresh discarded as stale; requestedAccount=\(accountUserID, privacy: .private(mask: .hash)), currentAccount=\((currentAccountUserID ?? "none"), privacy: .private(mask: .hash)), requestedGeneration=\(String(refreshGeneration), privacy: .public), currentGeneration=\(String(self.accountStateGeneration), privacy: .public)"
+            )
             return
         }
 
@@ -768,7 +785,13 @@ final class AppModel: ObservableObject {
         case let .success(value):
             self.subscription = value
             cachePlan(name: value.displayName, isPro: value.isPro)
+            logger.info(
+                "Subscription refresh applied; account=\(accountUserID, privacy: .private(mask: .hash)), plan=\(value.displayName, privacy: .public), isPro=\(value.isPro, privacy: .public)"
+            )
         case let .failure(error):
+            logger.error(
+                "Subscription refresh failed; account=\(accountUserID, privacy: .private(mask: .hash)), error=\(String(describing: error), privacy: .public)"
+            )
             firstError = firstError ?? error
         }
 
@@ -1012,6 +1035,11 @@ final class AppModel: ObservableObject {
 
     func setAutoConnectEnabled(_ enabled: Bool) async {
         guard enabled != isAutoConnectEnabled, !isUpdatingAutoConnect else { return }
+        if enabled, !isProUser {
+            logger.info("Auto-Connect upgrade requested while current account is not Pro")
+            upgradePromptRequested = true
+            return
+        }
         isUpdatingAutoConnect = true
         defer { isUpdatingAutoConnect = false }
 
@@ -1069,6 +1097,7 @@ final class AppModel: ObservableObject {
     func setKillSwitchEnabled(_ enabled: Bool) async {
         guard enabled != isKillSwitchEnabled, !isUpdatingKillSwitch else { return }
         if enabled, !isProUser {
+            upgradePromptRequested = true
             presentedError = APIError(message: "Kill Switch requires a Pro plan.")
             return
         }
@@ -1111,6 +1140,7 @@ final class AppModel: ObservableObject {
               current.requestedEnabled != enabled else { return }
 
         if enabled, !current.canUseAdBlocking {
+            upgradePromptRequested = true
             presentedError = APIError(message: "Ad Blocking requires a Pro plan.", code: "PRO_REQUIRED")
             return
         }
@@ -1231,6 +1261,7 @@ final class AppModel: ObservableObject {
     func selectVPNProtocol(_ protocolName: VPNConfigurationProtocol) {
         guard canSelect(protocolName: protocolName) else {
             if protocolName == .openVPN {
+                requestUpgrade()
                 presentedError = APIError(message: "OpenVPN requires a Pro plan.")
             }
             return
@@ -1245,6 +1276,7 @@ final class AppModel: ObservableObject {
             return
         }
         guard canUse(server: server) else {
+            upgradePromptRequested = true
             presentedError = APIError(message: "This server requires a Pro plan.")
             return
         }
@@ -1282,6 +1314,25 @@ final class AppModel: ObservableObject {
 
     func consumeUpgradePrompt() {
         upgradePromptRequested = false
+    }
+
+    func requestUpgrade() {
+        logger.info("Upgrade screen requested; isPro=\(self.isProUser, privacy: .public)")
+        upgradePromptRequested = true
+    }
+
+    func dismissUpgrade() {
+        upgradePromptRequested = false
+    }
+
+    func handleOpenVPNSelection() {
+        let entitled = isOpenVPNAvailable
+        logger.info("OpenVPN selection tapped; isEntitled=\(entitled, privacy: .public), isPro=\(self.isProUser, privacy: .public)")
+        if entitled {
+            selectVPNProtocol(.openVPN)
+        } else {
+            requestUpgrade()
+        }
     }
 
     func requestVPNDisconnect(bypassingKillSwitchConfirmation: Bool = false) {
@@ -1435,6 +1486,9 @@ final class AppModel: ObservableObject {
             )
         }
         session = adoptedSession
+        logger.info(
+            "Login adopted account=\(adoptedSession.userId, privacy: .private(mask: .hash)), responsePlanPresent=\(response.planTier != nil, privacy: .public), responsePlan=\((response.planTier?.rawValue ?? "none"), privacy: .public), generation=\(String(self.accountStateGeneration), privacy: .public)"
+        )
         if let planTier = response.planTier {
             cachePlan(name: planTier.rawValue, isPro: planTier.isPro)
         }
@@ -1488,6 +1542,10 @@ final class AppModel: ObservableObject {
     }
 
     private func clearSessionState(route nextRoute: AppRoute? = .login) {
+        let previousAccountID = (session ?? api.storedSession)?.userId ?? "none"
+        logger.info(
+            "Clearing local account state; account=\(previousAccountID, privacy: .private(mask: .hash)), nextRoute=\(String(describing: nextRoute), privacy: .public)"
+        )
         serverRefreshGeneration &+= 1
         serverRefreshTask?.cancel()
         cancelLatencyMeasurement(reason: "sessionCleared")
@@ -1606,20 +1664,36 @@ final class AppModel: ObservableObject {
     }
 
     private func processAppleTransaction(_ transaction: AppleStoreTransaction, allowTransfer: Bool) async {
-        guard session != nil,
+        guard let accountUserID = (session ?? api.storedSession)?.userId,
               processingAppleTransactionIDs.insert(transaction.id).inserted else { return }
         defer { processingAppleTransactionIDs.remove(transaction.id) }
+        let transactionGeneration = accountStateGeneration
+        logger.info(
+            "Apple subscription verification started; account=\(accountUserID, privacy: .private(mask: .hash)), allowTransfer=\(allowTransfer, privacy: .public)"
+        )
 
         do {
             let response = try await api.verifyAppleTransaction(
                 transaction.signedTransactionInfo,
                 allowTransfer: allowTransfer
             )
+            let usage = try? await api.fetchUsage()
+            let currentAccountUserID = (session ?? api.storedSession)?.userId
+            guard accountStateGeneration == transactionGeneration,
+                  currentAccountUserID == accountUserID else {
+                logger.warning(
+                    "Apple subscription verification discarded as stale; requestedAccount=\(accountUserID, privacy: .private(mask: .hash)), currentAccount=\((currentAccountUserID ?? "none"), privacy: .private(mask: .hash)), requestedGeneration=\(String(transactionGeneration), privacy: .public), currentGeneration=\(String(self.accountStateGeneration), privacy: .public)"
+                )
+                return
+            }
             subscription = response.subscription
             cachePlan(name: response.subscription.displayName, isPro: response.subscription.isPro)
-            usageQuota = try? await api.fetchUsage()
+            usageQuota = usage
             await refreshDNSPreference(showErrors: false)
             await appleStore.finish(transactionID: transaction.id)
+            logger.info(
+                "Apple subscription verification applied; account=\(accountUserID, privacy: .private(mask: .hash)), plan=\(response.subscription.displayName, privacy: .public), isPro=\(response.subscription.isPro, privacy: .public), transferred=\(response.transferred, privacy: .public)"
+            )
             applePurchaseMessage = response.transferred
                 ? "Your Apple subscription was moved to this LibreGuard account and Pro is now active."
                 : "LibreGuard Pro is now active."
@@ -2084,6 +2158,9 @@ final class AppModel: ObservableObject {
         defaults.set(name, forKey: cachedPlanNameKey)
         defaults.set(isPro, forKey: cachedPlanIsProKey)
         defaults.set(userID, forKey: cachedPlanUserIDKey)
+        logger.info(
+            "Plan cache updated; account=\(userID, privacy: .private(mask: .hash)), plan=\(name, privacy: .public), isPro=\(isPro, privacy: .public)"
+        )
     }
 
     private func isAuthenticationFailure(_ error: APIError) -> Bool {

@@ -584,6 +584,19 @@ struct libreguard_vpn_iosTests {
         #expect(app.isProUser == false)
     }
 
+    @Test func freeAccountCannotEnableAutoConnectWithoutUpgradePrompt() async {
+        let app = makeStartupApp(
+            backend: StartupBackendStub(storedSession: nil, restoreResults: []),
+            vpn: StartupVPNManager(status: .disconnected),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+
+        await app.setAutoConnectEnabled(true)
+
+        #expect(app.isAutoConnectEnabled == false)
+        #expect(app.upgradePromptRequested)
+    }
+
     @Test(arguments: [
         AppleCredentialState.revoked,
         AppleCredentialState.notFound,
@@ -1366,6 +1379,24 @@ struct libreguard_vpn_iosTests {
 
         #expect(subscription.planTier == .pro)
         #expect(subscription.displayName == "Pro")
+    }
+
+    @Test func subscriptionDisplayNameUsesExplicitEntitlementWhenPlanNameIsStale() throws {
+        let subscription = try JSONDecoder().decode(SubscriptionStatus.self, from: JSONSerialization.data(withJSONObject: [
+            "plan": "Pro",
+            "isPro": false,
+            "status": "inactive",
+            "paymentType": NSNull(),
+            "currentPeriodEnd": NSNull(),
+            "cancelAtPeriodEnd": false,
+            "billingCycle": "monthly",
+            "activeDevices": 1,
+            "maxDevices": 1,
+            "canAddDevice": true
+        ]))
+
+        #expect(subscription.planTier == .free)
+        #expect(subscription.displayName == "Free")
     }
 
     @Test func latencyProbeUsesHTTPSPingEndpoint() async throws {

@@ -18,7 +18,6 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var systemColorScheme
     @State private var selectedTab: MainTab = .home
-    @State private var overlayScreen: OverlayScreen?
     @AppStorage("theme_mode") private var storedThemeMode = ThemeMode.system.rawValue
 
     private var themeMode: ThemeMode {
@@ -39,6 +38,7 @@ struct ContentView: View {
     var body: some View {
         let isUITestLoginMode = ProcessInfo.processInfo.environment["UITEST_FORCE_LOGIN"] == "1"
         let isUITestSettingsMode = ProcessInfo.processInfo.environment["UITEST_FORCE_SETTINGS"] == "1"
+        let isUITestServersMode = ProcessInfo.processInfo.environment["UITEST_FORCE_SERVERS"] == "1"
         ZStack {
             Theme.background.ignoresSafeArea()
 
@@ -56,6 +56,11 @@ struct ContentView: View {
                     },
                     onUpgrade: {},
                     onSignOut: {}
+                )
+            } else if isUITestServersMode {
+                ServerListView(
+                    onUpgrade: app.requestUpgrade,
+                    onSelectServer: { _ in }
                 )
             } else {
                 switch app.route {
@@ -84,7 +89,6 @@ struct ContentView: View {
                 case .authenticated:
                     MainAppView(
                         selectedTab: $selectedTab,
-                        overlayScreen: $overlayScreen,
                         themeMode: themeMode,
                         effectiveDarkMode: effectiveDarkMode,
                         onThemeModeChange: { selectedThemeMode in
@@ -94,7 +98,14 @@ struct ContentView: View {
                     )
                 }
             }
+
+            if app.upgradePromptRequested {
+                UpgradeView(onBack: app.dismissUpgrade)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .zIndex(100)
+            }
         }
+        .animation(.spring(response: 0.32, dampingFraction: 0.88), value: app.upgradePromptRequested)
         .preferredColorScheme(themeMode.colorSchemeOverride)
         .task {
             if ProcessInfo.processInfo.arguments.contains("--uitesting-reset") {
@@ -286,16 +297,6 @@ enum ThemeMode: String, CaseIterable, Identifiable {
     }
 }
 
-private enum OverlayScreen: Identifiable {
-    case upgrade
-
-    var id: String {
-        switch self {
-        case .upgrade: "upgrade"
-        }
-    }
-}
-
 enum Theme {
     static let primary = Color(red: 0.082, green: 0.439, blue: 0.937)
     static let statusConnected = Color(red: 0.063, green: 0.725, blue: 0.506)
@@ -329,7 +330,6 @@ extension VPNConnectionState {
 private struct MainAppView: View {
     @EnvironmentObject private var app: AppModel
     @Binding var selectedTab: MainTab
-    @Binding var overlayScreen: OverlayScreen?
     let themeMode: ThemeMode
     let effectiveDarkMode: Bool
     let onThemeModeChange: (ThemeMode) -> Void
@@ -341,10 +341,10 @@ private struct MainAppView: View {
                 ZStack {
                     switch selectedTab {
                     case .home:
-                        DashboardView(onUpgrade: { overlayScreen = .upgrade })
+                        DashboardView(onUpgrade: app.requestUpgrade)
                     case .servers:
                         ServerListView(
-                            onUpgrade: { overlayScreen = .upgrade },
+                            onUpgrade: app.requestUpgrade,
                             onSelectServer: { server in
                                 app.selectServer(server)
                                 selectedTab = .home
@@ -357,7 +357,7 @@ private struct MainAppView: View {
                             themeMode: themeMode,
                             effectiveDarkMode: effectiveDarkMode,
                             onThemeModeChange: onThemeModeChange,
-                            onUpgrade: { overlayScreen = .upgrade },
+                            onUpgrade: app.requestUpgrade,
                             onSignOut: onSignOut
                         )
                     }
@@ -366,26 +366,6 @@ private struct MainAppView: View {
 
                 BottomTabBar(selectedTab: $selectedTab)
             }
-
-            if let overlayScreen {
-                overlayView(for: overlayScreen)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-                    .zIndex(2)
-            }
-        }
-        .animation(.spring(response: 0.32, dampingFraction: 0.88), value: overlayScreen?.id)
-        .onChange(of: app.upgradePromptRequested) { _, requested in
-            guard requested else { return }
-            overlayScreen = .upgrade
-            app.consumeUpgradePrompt()
-        }
-    }
-
-    @ViewBuilder
-    private func overlayView(for screen: OverlayScreen) -> some View {
-        switch screen {
-        case .upgrade:
-            UpgradeView(onBack: { overlayScreen = nil })
         }
     }
 }
@@ -1110,11 +1090,7 @@ private struct ServerListView: View {
                             badge: app.isOpenVPNAvailable ? nil : "PRO",
                             isSegmented: true
                         ) {
-                            if app.isOpenVPNAvailable {
-                                app.selectVPNProtocol(.openVPN)
-                            } else {
-                                onUpgrade()
-                            }
+                            app.handleOpenVPNSelection()
                         }
                     }
                     Text(app.isOpenVPNAvailable ? "Your current plan includes OpenVPN access." : "Upgrade to Pro to unlock OpenVPN.")
@@ -1527,7 +1503,11 @@ private struct SettingsView: View {
                             isOn: Binding(
                                 get: { app.isAutoConnectEnabled },
                                 set: { enabled in
-                                    Task { await app.setAutoConnectEnabled(enabled) }
+                                    if enabled, !app.isProUser {
+                                        onUpgrade()
+                                    } else {
+                                        Task { await app.setAutoConnectEnabled(enabled) }
+                                    }
                                 }
                             )
                         )
@@ -2149,6 +2129,7 @@ private struct UpgradeView: View {
                             ("Free servers", true),
                             ("5GB data per month", true),
                             ("IKEv2 protocol", true),
+                            ("Private DNS (DNS over Tunnel)", true),
                             ("Premium servers", false),
                             ("OpenVPN protocol", false)
                         ]
@@ -2161,12 +2142,15 @@ private struct UpgradeView: View {
                         badge: "Upgrade",
                         highlighted: true,
                         features: [
-                            ("Access on up to 3 devices", true),
-                            ("Premium servers", true),
-                            ("Unlimited data", true),
-                            ("OpenVPN protocol", true),
-                            ("IKEv2 protocol", true),
-                            ("Usage tracked each billing cycle", true)
+                            ("Unlimited bandwidth", true),
+                            ("Priority Servers", true),
+                            ("Up to 3 devices", true),
+                            ("DNS ad blocking", true),
+                            ("Auto-Connect", true),
+                            ("Email Support", true),
+                            ("OpenVPN support", true),
+                            ("Manual VPN config", true),
+                            ("Private DNS (DNS over Tunnel)", true)
                         ]
                     )
 
@@ -2231,12 +2215,15 @@ private struct UpgradeView: View {
                         badge: "Current Plan",
                         highlighted: true,
                         features: [
-                            ("Access on up to \(app.maxDeviceCount) devices", true),
-                            ("Premium servers", true),
-                            ("Unlimited data", true),
-                            ("OpenVPN protocol", true),
-                            ("IKEv2 protocol", true),
-                            ("Usage tracked each billing cycle", true)
+                            ("Unlimited bandwidth", true),
+                            ("Priority Servers", true),
+                            ("Up to 3 devices", true),
+                            ("DNS ad blocking", true),
+                            ("Auto-Connect", true),
+                            ("Email Support", true),
+                            ("OpenVPN support", true),
+                            ("Manual VPN config", true),
+                            ("Private DNS (DNS over Tunnel)", true)
                         ]
                     )
 
@@ -2996,10 +2983,7 @@ private struct ProtocolButton: View {
                         RoundedRectangle(cornerRadius: isSegmented ? 10 : 14)
                             .stroke(isSegmented || isSelected ? Color.clear : Theme.border)
                     )
-                    .rippleEffect(
-                        tint: Theme.primary,
-                        shape: RoundedRectangle(cornerRadius: isSegmented ? 10 : 14, style: .continuous)
-                    )
+                    .contentShape(Rectangle())
                 if let badge {
                     Text(badge)
                         .font(.system(size: 9, weight: .bold))
@@ -3009,10 +2993,14 @@ private struct ProtocolButton: View {
                         .background(Theme.primary, in: Capsule())
                         .offset(x: 5, y: -7)
                         .zIndex(1)
+                        .allowsHitTesting(false)
                 }
             }
+            .contentShape(Rectangle())
         }
+        .contentShape(Rectangle())
         .buttonStyle(.plain)
+        .accessibilityIdentifier("protocol-\(title.lowercased().replacingOccurrences(of: "/", with: "-"))-button")
     }
 }
 
