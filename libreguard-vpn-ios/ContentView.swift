@@ -1281,22 +1281,21 @@ private struct StatisticsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 16) {
                 Text("Statistics")
                     .font(.system(size: 26, weight: .semibold))
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Track your VPN usage")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    SegmentedPicker(selection: $timeRange, options: ["This Week", "This Month"])
+                }
             }
             .padding(24)
-            .padding(.bottom, 16)
+            .padding(.bottom, 4)
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 20) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Track your VPN usage")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        SegmentedPicker(selection: $timeRange, options: ["This Week", "This Month"])
-                    }
-
                     if summary.filtered.isEmpty {
                         ContentUnavailableView {
                             Label("No Statistics Yet", systemImage: "chart.bar.xaxis")
