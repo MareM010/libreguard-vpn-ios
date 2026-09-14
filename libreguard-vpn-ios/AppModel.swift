@@ -9,6 +9,16 @@ enum SessionCleanupState: Equatable {
     case requiresRetry
 }
 
+enum ServerRefreshTrigger: String {
+    case automatic
+    case startup
+    case sceneActivation
+    case dashboardAppearance
+    case serverListAppearance
+    case manual
+    case autoConnect
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var route: AppRoute = .launching
@@ -98,14 +108,18 @@ final class AppModel: ObservableObject {
     private let pendingRegistrationKey = "pending.registration"
     private let cachedPlanNameKey = "cached.plan.name"
     private let cachedPlanIsProKey = "cached.plan.isPro"
+    private let cachedPlanUserIDKey = "cached.plan.userID"
     private let autoConnectEnabledKey = "vpn.autoConnect.enabled"
     private let killSwitchEnabledKey = "vpn.killSwitch.enabled"
     private let killSwitchActivationKey = "vpn.killSwitch.activation"
     private var cachedPlanName: String?
     private var cachedPlanIsPro = false
+    private var cachedPlanUserID: String?
     private var hasCachedPlan = false
     private var accountStateGeneration: UInt = 0
+    private var serverRefreshGeneration: UInt = 0
     private var serverRefreshTask: Task<Void, Never>?
+    private var latencyMeasurementTask: Task<[Int: Int], Never>?
     private var retryCountdownTask: Task<Void, Never>?
     private var sessionRestoreRetryTask: Task<Void, Never>?
     private var sessionRestoreRetryAttempt = 0
@@ -203,12 +217,28 @@ final class AppModel: ObservableObject {
         ) ?? (defaults.bool(forKey: "vpn.killSwitch.enabled") ? .armed : .off)
         self.vpn = vpnManager ?? VPNManagerCoordinator(api: resolvedAPI)
         self.defaults = defaults
-        self.cachedPlanName = defaults.string(forKey: cachedPlanNameKey)
-        self.cachedPlanIsPro = defaults.object(forKey: cachedPlanIsProKey) != nil
-            ? defaults.bool(forKey: cachedPlanIsProKey)
-            : false
-        self.hasCachedPlan = defaults.string(forKey: cachedPlanNameKey) != nil
-            || defaults.object(forKey: cachedPlanIsProKey) != nil
+        let storedUserID = resolvedAPI.storedSession?.userId
+        let persistedPlanUserID = defaults.string(forKey: cachedPlanUserIDKey)
+        if let storedUserID, persistedPlanUserID == storedUserID {
+            self.cachedPlanUserID = persistedPlanUserID
+            self.cachedPlanName = defaults.string(forKey: cachedPlanNameKey)
+            self.cachedPlanIsPro = defaults.object(forKey: cachedPlanIsProKey) != nil
+                ? defaults.bool(forKey: cachedPlanIsProKey)
+                : false
+            self.hasCachedPlan = defaults.string(forKey: cachedPlanNameKey) != nil
+                || defaults.object(forKey: cachedPlanIsProKey) != nil
+        } else {
+            // Before plan data was account-scoped these keys could leak the
+            // previous user's tier across logout, relaunch, and reinstall-free
+            // rebuilds. Discard unscoped or mismatched entries.
+            self.cachedPlanUserID = nil
+            self.cachedPlanName = nil
+            self.cachedPlanIsPro = false
+            self.hasCachedPlan = false
+            defaults.removeObject(forKey: cachedPlanNameKey)
+            defaults.removeObject(forKey: cachedPlanIsProKey)
+            defaults.removeObject(forKey: cachedPlanUserIDKey)
+        }
         self.vpnStatus = self.vpn.status
         self.vpn.onStatusChange = { [weak self] status in
             self?.handleVPNStatusChange(status)
@@ -342,7 +372,7 @@ final class AppModel: ObservableObject {
         guard sessionCleanupTask == nil, session != nil else { return }
 
         if vpnStatus.isConnected {
-            refreshServers()
+            refreshServers(trigger: .startup)
             await serverRefreshTask?.value
             await restoreActiveSessionIfNeeded()
         } else {
@@ -362,7 +392,7 @@ final class AppModel: ObservableObject {
         route = .authenticated
         sessionCleanupState = nil
         if vpnStatus.isConnected {
-            refreshServers()
+            refreshServers(trigger: .startup)
             await serverRefreshTask?.value
             await restoreActiveSessionIfNeeded()
         } else {
@@ -879,26 +909,105 @@ final class AppModel: ObservableObject {
         applePurchaseMessage = "The Apple subscription remains linked to its previous LibreGuard account."
     }
 
-    func refreshServers() {
-        serverRefreshTask?.cancel()
-        serverRefreshTask = Task { [weak self] in
+    func refreshServers(trigger: ServerRefreshTrigger = .automatic) {
+        guard !isRefreshingServers else {
+            logger.debug("Server refresh coalesced; trigger=\(trigger.rawValue, privacy: .public)")
+            return
+        }
+
+        serverRefreshGeneration &+= 1
+        let generation = serverRefreshGeneration
+        let accountGeneration = accountStateGeneration
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        isRefreshingServers = true
+        logger.debug(
+            "Server refresh started; trigger=\(trigger.rawValue, privacy: .public), vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)"
+        )
+
+        serverRefreshTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            isRefreshingServers = true
-            defer { isRefreshingServers = false }
+            defer {
+                if self.serverRefreshGeneration == generation {
+                    self.latencyMeasurementTask = nil
+                    self.isRefreshingServers = false
+                    let elapsed = DispatchTime.now().uptimeNanoseconds - startedAt
+                    self.logger.debug(
+                        "Server refresh finished; trigger=\(trigger.rawValue, privacy: .public), elapsedMs=\(Int((Double(elapsed) / 1_000_000).rounded()), privacy: .public)"
+                    )
+                }
+            }
+
             do {
-                let fetched = try await api.fetchServers()
-                guard !Task.isCancelled else { return }
-                servers = fetched
-                serverLatencies = await latencyProbe.measure(fetched)
+                let fetched = try await self.api.fetchServers()
+                guard self.isCurrentServerRefresh(
+                    generation: generation,
+                    accountGeneration: accountGeneration
+                ) else { return }
+
+                self.servers = fetched
+                let serverIDs = Set(fetched.map(\.id))
+                self.serverLatencies = self.serverLatencies.filter { serverIDs.contains($0.key) }
                 if let selectedServerID = self.selectedServerID,
-                   !fetched.contains(where: { $0.id == selectedServerID }) {
+                   !serverIDs.contains(selectedServerID) {
                     self.selectedServerID = nil
                 }
+
+                guard self.canMeasureServerLatencies else {
+                    self.logger.debug(
+                        "Server latency skipped; trigger=\(trigger.rawValue, privacy: .public), vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)"
+                    )
+                    return
+                }
+
+                let latencyTask = Task { @MainActor [latencyProbe = self.latencyProbe] in
+                    await latencyProbe.measure(fetched)
+                }
+                self.latencyMeasurementTask = latencyTask
+                let measuredLatencies = await latencyTask.value
+
+                guard self.isCurrentServerRefresh(
+                    generation: generation,
+                    accountGeneration: accountGeneration
+                ), self.canMeasureServerLatencies else {
+                    self.logger.debug(
+                        "Server latency result discarded; trigger=\(trigger.rawValue, privacy: .public), vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)"
+                    )
+                    return
+                }
+
+                self.serverLatencies = measuredLatencies
+                self.logger.debug(
+                    "Server latency measured; trigger=\(trigger.rawValue, privacy: .public), serverCount=\(fetched.count, privacy: .public), resultCount=\(measuredLatencies.count, privacy: .public)"
+                )
             } catch is CancellationError {
+                self.logger.debug("Server refresh cancelled; trigger=\(trigger.rawValue, privacy: .public)")
             } catch {
-                present(error)
+                guard self.isCurrentServerRefresh(
+                    generation: generation,
+                    accountGeneration: accountGeneration
+                ) else { return }
+                self.present(error)
             }
         }
+    }
+
+    private var canMeasureServerLatencies: Bool {
+        vpnStatus == .disconnected || vpnStatus == .invalid
+    }
+
+    private func isCurrentServerRefresh(generation: UInt, accountGeneration: UInt) -> Bool {
+        generation == serverRefreshGeneration
+            && accountGeneration == accountStateGeneration
+            && !Task.isCancelled
+    }
+
+    private func cancelLatencyMeasurement(reason: String) {
+        guard let task = latencyMeasurementTask else { return }
+        task.cancel()
+        latencyMeasurementTask = nil
+        logger.debug(
+            "Server latency measurement cancelled; reason=\(reason, privacy: .public), vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)"
+        )
     }
 
     func setAutoConnectEnabled(_ enabled: Bool) async {
@@ -915,7 +1024,7 @@ final class AppModel: ObservableObject {
                         persistKillSwitch(enabled: true, activation: .active)
                     }
                 } else {
-                    refreshServers()
+                    refreshServers(trigger: .autoConnect)
                     await serverRefreshTask?.value
                     guard let server = QuickConnectRanker.bestServer(
                         in: servers,
@@ -1169,7 +1278,6 @@ final class AppModel: ObservableObject {
                 origin: origin
             )
         )
-        refreshServers()
     }
 
     func consumeUpgradePrompt() {
@@ -1380,7 +1488,9 @@ final class AppModel: ObservableObject {
     }
 
     private func clearSessionState(route nextRoute: AppRoute? = .login) {
+        serverRefreshGeneration &+= 1
         serverRefreshTask?.cancel()
+        cancelLatencyMeasurement(reason: "sessionCleared")
         retryCountdownTask?.cancel()
         cancelSessionRestoreRetry()
         cancelActiveVPNTransition()
@@ -1523,7 +1633,7 @@ final class AppModel: ObservableObject {
     private func reconcileAutoConnectOnLaunch() async {
         guard isAutoConnectEnabled,
               vpnStatus == .disconnected || vpnStatus == .invalid else { return }
-        refreshServers()
+        refreshServers(trigger: .autoConnect)
         await serverRefreshTask?.value
         guard isAutoConnectEnabled,
               vpnStatus == .disconnected || vpnStatus == .invalid else { return }
@@ -1641,6 +1751,7 @@ final class AppModel: ObservableObject {
 
     private func beginConnect(_ request: VPNConnectRequest) {
         cancelStoppedProfileRecovery()
+        cancelLatencyMeasurement(reason: "connectionStarted")
         vpnTransitionTask?.cancel()
         vpnTransitionGeneration &+= 1
         let generation = vpnTransitionGeneration
@@ -1706,6 +1817,7 @@ final class AppModel: ObservableObject {
         }
 
         cancelStoppedProfileRecovery()
+        cancelLatencyMeasurement(reason: "disconnectionStarted")
         vpnTransitionTask?.cancel()
         vpnTransitionGeneration &+= 1
         let generation = vpnTransitionGeneration
@@ -1735,6 +1847,10 @@ final class AppModel: ObservableObject {
     }
 
     private func handleVPNStatusChange(_ status: VPNConnectionState) {
+        if status != .disconnected, status != .invalid {
+            cancelLatencyMeasurement(reason: "vpnStatusChanged")
+        }
+
         if case .connect = activeVPNTransition,
            status == .disconnected || status == .invalid {
             vpnStatus = .connecting
@@ -1960,11 +2076,14 @@ final class AppModel: ObservableObject {
     }
 
     private func cachePlan(name: String, isPro: Bool) {
+        guard let userID = (session ?? api.storedSession)?.userId else { return }
         cachedPlanName = name
         cachedPlanIsPro = isPro
+        cachedPlanUserID = userID
         hasCachedPlan = true
         defaults.set(name, forKey: cachedPlanNameKey)
         defaults.set(isPro, forKey: cachedPlanIsProKey)
+        defaults.set(userID, forKey: cachedPlanUserIDKey)
     }
 
     private func isAuthenticationFailure(_ error: APIError) -> Bool {
@@ -1977,9 +2096,11 @@ final class AppModel: ObservableObject {
     private func clearCachedPlan() {
         cachedPlanName = nil
         cachedPlanIsPro = false
+        cachedPlanUserID = nil
         hasCachedPlan = false
         defaults.removeObject(forKey: cachedPlanNameKey)
         defaults.removeObject(forKey: cachedPlanIsProKey)
+        defaults.removeObject(forKey: cachedPlanUserIDKey)
     }
 
     private func beginRetryCountdown(_ seconds: Int) {

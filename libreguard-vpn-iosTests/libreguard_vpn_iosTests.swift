@@ -72,6 +72,22 @@ struct libreguard_vpn_iosTests {
         #expect(store.favoriteServerIDs(for: "user-b") == [99])
     }
 
+    @Test func unscopedPlanCacheIsIgnoredForAStoredAccount() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        defaults.set("Pro", forKey: "cached.plan.name")
+        defaults.set(true, forKey: "cached.plan.isPro")
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let app = makeStartupApp(
+            backend: backend,
+            vpn: StartupVPNManager(status: .disconnected),
+            defaults: defaults
+        )
+
+        #expect(app.currentPlanDisplayName == "Free")
+        #expect(app.isProUser == false)
+        #expect(defaults.string(forKey: "cached.plan.name") == nil)
+    }
+
     @Test func validRestoredSessionKeepsConnectedVPNOnTheDashboard() async {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         defaults.set(true, forKey: "vpn.autoConnect.enabled")
@@ -939,6 +955,7 @@ struct libreguard_vpn_iosTests {
             let defaults = UserDefaults(suiteName: UUID().uuidString)!
             defaults.set("Pro", forKey: "cached.plan.name")
             defaults.set(true, forKey: "cached.plan.isPro")
+            defaults.set("user-1", forKey: "cached.plan.userID")
             let session = AuthSession(
                 accessToken: "account-access",
                 refreshToken: "refresh",
@@ -983,6 +1000,7 @@ struct libreguard_vpn_iosTests {
             let defaults = UserDefaults(suiteName: UUID().uuidString)!
             defaults.set("Pro", forKey: "cached.plan.name")
             defaults.set(true, forKey: "cached.plan.isPro")
+            defaults.set("user-1", forKey: "cached.plan.userID")
             let session = AuthSession(
                 accessToken: "account-access",
                 refreshToken: "refresh",
@@ -1404,6 +1422,203 @@ struct libreguard_vpn_iosTests {
         }
     }
 
+    @Test func latencyProbeWarmsEachServerBeforeRecordingLatency() async throws {
+        try await withSerializedRequests {
+            let server = makeLatencyServer(id: 1, hostname: "warm.example.com")
+            let requestCount = ThreadSafeProbeStats()
+            URLProtocolStub.handler = { request in
+                requestCount.recordRequest()
+                #expect(request.cachePolicy == .reloadIgnoringLocalCacheData)
+                return try self.makeResponse(request, status: 200, json: ["pong": true])
+            }
+
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [URLProtocolStub.self]
+            let probe = NetworkLatencyProbe(urlSession: URLSession(configuration: configuration))
+            let latencies = await probe.measure([server])
+
+            #expect(requestCount.requestCount == 2)
+            #expect(latencies[server.id] != nil)
+        }
+    }
+
+    @Test func latencyProbeLimitsConcurrentServerWorkersToEight() async throws {
+        try await withSerializedRequests {
+            let servers = (1...16).map { makeLatencyServer(id: $0, hostname: "probe-\($0).example.com") }
+            let probeStats = ThreadSafeProbeStats()
+            ConcurrentURLProtocolStub.handler = { request in
+                let active = probeStats.beginRequest()
+                probeStats.recordMaximumActiveRequests(active)
+                Thread.sleep(forTimeInterval: 0.02)
+                probeStats.endRequest()
+                return try self.makeResponse(request, status: 200, json: ["pong": true])
+            }
+
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [ConcurrentURLProtocolStub.self]
+            let probe = NetworkLatencyProbe(urlSession: URLSession(configuration: configuration))
+            let latencies = await probe.measure(servers)
+
+            #expect(latencies.count == servers.count)
+            #expect(probeStats.maximumActiveRequests <= 8)
+            #expect(probeStats.maximumActiveRequests > 1)
+        }
+    }
+
+    @Test func connectedServerRefreshUpdatesCatalogWithoutMeasuringLatency() async throws {
+        let server = makeLatencyServer(id: 1, hostname: "connected.example.com")
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        backend.serverResponse = [server]
+        let probe = RecordingLatencyProbe(result: [server.id: 12])
+        let vpn = StartupVPNManager(status: .connected)
+        let app = AppModel(
+            api: backend,
+            latencyProbe: probe,
+            vpnManager: vpn,
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        app.session = startupSession()
+        app.serverLatencies = [server.id: 88]
+
+        app.refreshServers(trigger: .sceneActivation)
+        await waitForServerRefresh(app)
+
+        #expect(backend.fetchServersCallCount == 1)
+        #expect(app.servers == [server])
+        #expect(app.serverLatencies == [server.id: 88])
+        #expect(probe.measurementCalls.isEmpty)
+    }
+
+    @Test func busyVPNStatesSkipServerLatencyMeasurement() async throws {
+        for status in [
+            VPNConnectionState.connecting,
+            .connected,
+            .reasserting,
+            .disconnecting
+        ] {
+            let server = makeLatencyServer(id: 1, hostname: "busy-\(String(describing: status)).example.com")
+            let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+            backend.serverResponse = [server]
+            let probe = RecordingLatencyProbe(result: [server.id: 12])
+            let app = AppModel(
+                api: backend,
+                latencyProbe: probe,
+                vpnManager: StartupVPNManager(status: status),
+                defaults: UserDefaults(suiteName: UUID().uuidString)!
+            )
+            app.session = startupSession()
+
+            app.refreshServers(trigger: .automatic)
+            await waitForServerRefresh(app)
+
+            #expect(probe.measurementCalls.isEmpty)
+        }
+    }
+
+    @Test func disconnectedRefreshMeasuresLatencyAndDuplicateRequestsCoalesce() async throws {
+        let first = makeLatencyServer(id: 1, hostname: "first.example.com")
+        let second = makeLatencyServer(id: 2, hostname: "second.example.com")
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        backend.serverResponse = [first, second]
+        let probe = RecordingLatencyProbe(result: [first.id: 24, second.id: 36])
+        let app = AppModel(
+            api: backend,
+            latencyProbe: probe,
+            vpnManager: StartupVPNManager(status: .disconnected),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        app.session = startupSession()
+
+        app.refreshServers(trigger: .sceneActivation)
+        app.refreshServers(trigger: .dashboardAppearance)
+        await waitForServerRefresh(app)
+
+        #expect(backend.fetchServersCallCount == 1)
+        #expect(probe.measurementCalls.count == 1)
+        #expect(app.serverLatencies == [first.id: 24, second.id: 36])
+    }
+
+    @Test func disconnectedRefreshPreservesFailureSemantics() async throws {
+        let server = makeLatencyServer(id: 1, hostname: "failed-refresh.example.com")
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        backend.serverError = APIError(message: "Server catalog unavailable")
+        let probe = RecordingLatencyProbe(result: [server.id: 12])
+        let app = AppModel(
+            api: backend,
+            latencyProbe: probe,
+            vpnManager: StartupVPNManager(status: .disconnected),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        app.session = startupSession()
+        app.servers = [server]
+        app.serverLatencies = [server.id: 88]
+
+        app.refreshServers(trigger: .manual)
+        await waitForServerRefresh(app)
+
+        #expect(backend.fetchServersCallCount == 1)
+        #expect(app.servers == [server])
+        #expect(app.serverLatencies == [server.id: 88])
+        #expect(app.presentedError?.message == "Server catalog unavailable")
+        #expect(probe.measurementCalls.isEmpty)
+    }
+
+    @Test func quickConnectDoesNotStartAnotherServerRefresh() async throws {
+        let server = makeLatencyServer(id: 1, hostname: "quick-connect.example.com")
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        let vpn = StartupVPNManager(status: .disconnected)
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let app = AppModel(
+            api: backend,
+            latencyProbe: RecordingLatencyProbe(result: [server.id: 12]),
+            vpnManager: vpn,
+            defaults: defaults
+        )
+        app.session = startupSession()
+        app.subscription = try subscriptionStatus(plan: "Pro", isPro: true)
+        app.servers = [server]
+
+        app.requestQuickConnect()
+        for _ in 0..<20 { await Task.yield() }
+
+        #expect(backend.fetchServersCallCount == 0)
+        #expect(vpn.status == .connected)
+    }
+
+    @Test func connectingDuringLatencyMeasurementDiscardsTheResult() async throws {
+        let server = makeLatencyServer(id: 1, hostname: "transition.example.com")
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        backend.serverResponse = [server]
+        let probe = RecordingLatencyProbe(result: [server.id: 999], holdMeasurement: true)
+        let vpn = StartupVPNManager(status: .disconnected)
+        let app = AppModel(
+            api: backend,
+            latencyProbe: probe,
+            vpnManager: vpn,
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        app.session = startupSession()
+        app.serverLatencies = [server.id: 45]
+
+        app.refreshServers(trigger: .automatic)
+        for _ in 0..<100 where probe.measurementCalls.isEmpty {
+            await Task.yield()
+        }
+        #expect(!probe.measurementCalls.isEmpty)
+        vpn.emit(.connected)
+        await waitForServerRefresh(app)
+
+        #expect(app.serverLatencies == [server.id: 45])
+    }
+
+    private func waitForServerRefresh(_ app: AppModel) async {
+        for _ in 0..<200 {
+            if !app.isRefreshingServers { return }
+            await Task.yield()
+        }
+        Issue.record("Server refresh did not finish during the test")
+    }
+
     private func startupSession() -> AuthSession {
         AuthSession(
             accessToken: "startup-access",
@@ -1686,6 +1901,9 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
     private var firstSubscriptionRequestStarted = false
     private var firstSubscriptionRequestWaiter: CheckedContinuation<Void, Never>?
     private var firstSubscriptionRequestRelease: CheckedContinuation<Void, Never>?
+    var serverResponse: [VPNServer] = []
+    var serverError: Error?
+    private(set) var fetchServersCallCount = 0
 
     init(storedSession: AuthSession?, restoreResults: [Result<AuthSession?, Error>]) {
         self.storedSession = storedSession
@@ -1755,7 +1973,11 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
     }
     func clearLocalSession() { storedSession = nil }
     func logout() async { storedSession = nil }
-    func fetchServers() async throws -> [VPNServer] { [] }
+    func fetchServers() async throws -> [VPNServer] {
+        fetchServersCallCount += 1
+        if let serverError { throw serverError }
+        return serverResponse
+    }
     func fetchVPNConfig(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> VPNConfigResponse { try unsupported() }
     func requestCertificate(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> CertificateJobCreatedResponse { try unsupported() }
     func fetchCertificateGenerationStatus(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> CertificateGenerationStatusResponse { try unsupported() }
@@ -1822,6 +2044,11 @@ private final class StartupVPNManager: VPNManaging {
         onStatusChange?(status)
     }
 
+    func emit(_ status: VPNConnectionState) {
+        self.status = status
+        onStatusChange?(status)
+    }
+
     func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, policy: VPNConnectionPolicy) async throws {
         status = .connected
         onStatusChange?(status)
@@ -1872,6 +2099,59 @@ private final class NoOpLatencyProbe: LatencyProbing {
 }
 
 @MainActor
+private final class RecordingLatencyProbe: LatencyProbing {
+    let result: [Int: Int]
+    let holdMeasurement: Bool
+    private(set) var measurementCalls: [[VPNServer]] = []
+
+    init(result: [Int: Int], holdMeasurement: Bool = false) {
+        self.result = result
+        self.holdMeasurement = holdMeasurement
+    }
+
+    func measure(_ servers: [VPNServer]) async -> [Int: Int] {
+        measurementCalls.append(servers)
+        while holdMeasurement, !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return result
+    }
+}
+
+final class ThreadSafeProbeStats: @unchecked Sendable {
+    private let lock = NSLock()
+    private var activeRequests = 0
+    private(set) var requestCount = 0
+    private(set) var maximumActiveRequests = 0
+
+    func recordRequest() {
+        lock.lock()
+        requestCount += 1
+        lock.unlock()
+    }
+
+    func beginRequest() -> Int {
+        lock.lock()
+        activeRequests += 1
+        let active = activeRequests
+        lock.unlock()
+        return active
+    }
+
+    func recordMaximumActiveRequests(_ active: Int) {
+        lock.lock()
+        maximumActiveRequests = max(maximumActiveRequests, active)
+        lock.unlock()
+    }
+
+    func endRequest() {
+        lock.lock()
+        activeRequests -= 1
+        lock.unlock()
+    }
+}
+
+@MainActor
 private final class InMemoryAppleCredentialBindingStore: AppleCredentialBindingStoring {
     var binding: AppleCredentialBinding?
 
@@ -1917,6 +2197,35 @@ final class URLProtocolStub: URLProtocol, @unchecked Sendable {
             client?.urlProtocolDidFinishLoading(self)
         } catch {
             client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+final class ConcurrentURLProtocolStub: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let client = self.client
+        let request = self.request
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: APIError(message: "Missing test handler"))
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            do {
+                let (response, data) = try handler(request)
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: data)
+                client?.urlProtocolDidFinishLoading(self)
+            } catch {
+                client?.urlProtocol(self, didFailWithError: error)
+            }
         }
     }
 

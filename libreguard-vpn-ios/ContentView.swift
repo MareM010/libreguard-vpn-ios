@@ -138,8 +138,8 @@ struct ContentView: View {
                 guard case .authenticated = app.route else { return }
                 guard await app.checkAppleCredentialStateIfNeeded() else { return }
                 await app.refreshAccountData(showErrors: false)
-                app.refreshServers()
                 await app.refreshVPNStatus()
+                app.refreshServers(trigger: .sceneActivation)
                 await app.refreshNotificationAuthorizationStatus()
             }
         }
@@ -974,8 +974,8 @@ private struct DashboardView: View {
             if app.usageQuota == nil || app.subscription == nil {
                 await app.refreshAccountData(showErrors: false)
             }
-            app.refreshServers()
             await app.refreshVPNStatus()
+            app.refreshServers(trigger: .dashboardAppearance)
         }
     }
 
@@ -1136,7 +1136,7 @@ private struct ServerListView: View {
                     .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                     Button {
-                        app.refreshServers()
+                        app.refreshServers(trigger: .manual)
                     } label: {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 19, weight: .semibold))
@@ -1223,7 +1223,7 @@ private struct ServerListView: View {
         }
         .background(Theme.background)
         .task {
-            if app.servers.isEmpty { app.refreshServers() }
+            if app.servers.isEmpty { app.refreshServers(trigger: .serverListAppearance) }
         }
     }
 
@@ -3265,10 +3265,22 @@ private struct UpgradeCard: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
-                        VStack(alignment: .leading, spacing: 6) {
+                        LazyVGrid(
+                            columns: [
+                                GridItem(.flexible(), spacing: 12),
+                                GridItem(.flexible())
+                            ],
+                            alignment: .leading,
+                            spacing: 6
+                        ) {
                             Text("✓ Unlimited bandwidth")
+                            Text("✓ Priority Servers")
                             Text("✓ Up to 3 devices")
                             Text("✓ DNS ad blocking")
+                            Text("✓ Auto-Connect")
+                            Text("✓ Email Support")
+                            Text("✓ OpenVPN support")
+                            Text("✓ Manual VPN config")
                         }
                         .font(.caption)
                         .foregroundStyle(.secondary)
