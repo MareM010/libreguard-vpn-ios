@@ -1443,19 +1443,22 @@ private struct SettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 16) {
                 Text("Settings")
                     .font(.system(size: 26, weight: .semibold))
-                Text("Configure your VPN preferences")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Configure your VPN preferences")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    AccountCard(email: app.session?.email)
+                        .frame(maxWidth: .infinity)
+                }
             }
             .padding(24)
-            .padding(.bottom, 8)
+            .padding(.bottom, 4)
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 22) {
-                    AccountCard(email: app.session?.email)
                     UpgradeCard(action: onUpgrade)
 
                     SettingsSection(title: "Security") {
@@ -3311,21 +3314,24 @@ private struct AccountCard: View {
     let email: String?
 
     var body: some View {
-        CardContainer {
-            HStack(spacing: 12) {
-                IconBox(systemName: "person.crop.circle.fill", color: Theme.primary, background: Theme.primary.opacity(0.12))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Account")
-                        .font(.headline)
-                    Text(email ?? "Signed in account")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Spacer()
+        HStack(spacing: 12) {
+            IconBox(systemName: "person.crop.circle.fill", color: Theme.primary, background: Theme.primary.opacity(0.12))
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Account")
+                    .font(.subheadline.weight(.semibold))
+                Text(email ?? "Signed in account")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
+            Spacer()
         }
+        .frame(height: 40)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 5)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(email.map { "Account, signed in as \($0)" } ?? "Account")
     }
