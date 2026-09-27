@@ -33,8 +33,8 @@ protocol BackendServicing: AnyObject {
     func fetchSubscription() async throws -> SubscriptionStatus
     func fetchDNSPreference() async throws -> DNSPreference
     func updateDNSPreference(adBlockingEnabled: Bool) async throws -> DNSPreference
-    func fetchAppleAccountToken() async throws -> UUID
-    func verifyAppleTransaction(_ signedTransactionInfo: String, allowTransfer: Bool) async throws -> AppleTransactionVerificationResponse
+    func fetchAppleAccountToken(environment: AppleAPIEnvironment) async throws -> UUID
+    func verifyAppleTransaction(_ signedTransactionInfo: String, allowTransfer: Bool, environment: AppleAPIEnvironment) async throws -> AppleTransactionVerificationResponse
     func fetchTwoFactorStatus() async throws -> TwoFactorStatus
     func setupTwoFactor() async throws -> AuthenticatorSetup
     func enableTwoFactor(code: String) async throws -> [String]
@@ -60,6 +60,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         category: "API"
     )
     private let baseURL: URL
+    private let sandboxAppleBaseURL: URL
     private let urlSession: URLSession
     private let sessionStore: SessionStoring
     private let deviceStore: DeviceIdentifying
@@ -69,12 +70,14 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
 
     init(
         baseURL: URL = URL(string: "https://management.libreguard.net")!,
+        sandboxAppleBaseURL: URL = URL(string: "https://sandbox.management.libreguard.net")!,
         urlSession: URLSession = .shared,
         sessionStore: SessionStoring? = nil,
         deviceStore: DeviceIdentifying? = nil,
         deviceKeyStore: VPNDeviceKeyProviding? = nil
     ) {
         self.baseURL = baseURL
+        self.sandboxAppleBaseURL = sandboxAppleBaseURL
         self.urlSession = urlSession
         self.sessionStore = sessionStore ?? SessionStore()
         self.deviceStore = deviceStore ?? DeviceIdentityStore()
@@ -342,20 +345,33 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         )
     }
 
-    func fetchAppleAccountToken() async throws -> UUID {
-        let response: AppleAccountTokenResponse = try await send(.get, path: "/api/subscription/apple/account-token")
+    func fetchAppleAccountToken(environment: AppleAPIEnvironment) async throws -> UUID {
+        let response: AppleAccountTokenResponse = try await send(
+            .get,
+            path: "/api/subscription/apple/account-token",
+            requestBaseURL: appleBaseURL(for: environment)
+        )
         return response.appAccountToken
     }
 
-    func verifyAppleTransaction(_ signedTransactionInfo: String, allowTransfer: Bool) async throws -> AppleTransactionVerificationResponse {
+    func verifyAppleTransaction(
+        _ signedTransactionInfo: String,
+        allowTransfer: Bool,
+        environment: AppleAPIEnvironment
+    ) async throws -> AppleTransactionVerificationResponse {
         try await send(
             .post,
             path: "/api/subscription/apple/verify",
             body: AppleTransactionVerificationRequest(
                 signedTransactionInfo: signedTransactionInfo,
                 allowTransfer: allowTransfer
-            )
+            ),
+            requestBaseURL: appleBaseURL(for: environment)
         )
+    }
+
+    private func appleBaseURL(for environment: AppleAPIEnvironment) -> URL {
+        environment == .sandbox ? sandboxAppleBaseURL : baseURL
     }
 
     func fetchTwoFactorStatus() async throws -> TwoFactorStatus {
@@ -440,9 +456,17 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         _ method: HTTPMethod,
         path: String,
         authorized: Bool = true,
-        retryAfterRefresh: Bool = true
+        retryAfterRefresh: Bool = true,
+        requestBaseURL: URL? = nil
     ) async throws -> Response {
-        try await send(method, path: path, body: Optional<EmptyBody>.none, authorized: authorized, retryAfterRefresh: retryAfterRefresh)
+        try await send(
+            method,
+            path: path,
+            body: Optional<EmptyBody>.none,
+            authorized: authorized,
+            retryAfterRefresh: retryAfterRefresh,
+            requestBaseURL: requestBaseURL
+        )
     }
 
     private func send<Response: Decodable, Body: Encodable>(
@@ -450,9 +474,10 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         path: String,
         body: Body?,
         authorized: Bool = true,
-        retryAfterRefresh: Bool = true
+        retryAfterRefresh: Bool = true,
+        requestBaseURL: URL? = nil
     ) async throws -> Response {
-        var requestURL = baseURL.appending(path: path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? path)
+        var requestURL = (requestBaseURL ?? baseURL).appending(path: path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? path)
         if let query = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).dropFirst().first,
            var components = URLComponents(url: requestURL, resolvingAgainstBaseURL: false) {
             components.query = String(query)
@@ -482,7 +507,14 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
 
             if authorized, http.statusCode == 401, retryAfterRefresh {
                 _ = try await refreshSession()
-                return try await send(method, path: path, body: body, authorized: authorized, retryAfterRefresh: false)
+                return try await send(
+                    method,
+                    path: path,
+                    body: body,
+                    authorized: authorized,
+                    retryAfterRefresh: false,
+                    requestBaseURL: requestBaseURL
+                )
             }
 
             throw decodeError(data: data, response: http)

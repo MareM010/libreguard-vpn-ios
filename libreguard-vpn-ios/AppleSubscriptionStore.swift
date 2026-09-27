@@ -12,6 +12,15 @@ enum AppleSubscriptionPeriod: String, Sendable {
     case annual
 }
 
+enum AppleAPIEnvironment: Equatable, Sendable {
+    case production
+    case sandbox
+
+    init(_ environment: AppStore.Environment) {
+        self = environment == .production ? .production : .sandbox
+    }
+}
+
 struct AppleSubscriptionProduct: Identifiable, Equatable, Sendable {
     let id: String
     let displayName: String
@@ -25,6 +34,7 @@ struct AppleStoreTransaction: Equatable, Sendable {
     let id: UInt64
     let productID: String
     let signedTransactionInfo: String
+    let environment: AppleAPIEnvironment
 }
 
 struct PendingAppleSubscriptionTransfer: Identifiable, Equatable, Sendable {
@@ -62,6 +72,7 @@ enum AppleStoreError: LocalizedError {
 
 @MainActor
 protocol AppleSubscriptionStoreServing: AnyObject {
+    func purchaseEnvironment() async throws -> AppleAPIEnvironment
     func loadProducts() async throws -> [AppleSubscriptionProduct]
     func purchase(productID: String, appAccountToken: UUID) async throws -> ApplePurchaseResult
     func sync() async throws
@@ -75,6 +86,15 @@ protocol AppleSubscriptionStoreServing: AnyObject {
 final class AppleSubscriptionStore: AppleSubscriptionStoreServing {
     private var productsByID: [String: Product] = [:]
     private var transactionsByID: [UInt64: Transaction] = [:]
+
+    func purchaseEnvironment() async throws -> AppleAPIEnvironment {
+        switch await AppTransaction.shared {
+        case let .verified(transaction):
+            AppleAPIEnvironment(transaction.environment)
+        case .unverified:
+            throw AppleStoreError.unverifiedTransaction
+        }
+    }
 
     func loadProducts() async throws -> [AppleSubscriptionProduct] {
         let products = try await Product.products(for: AppleSubscriptionCatalog.productIDs)
@@ -191,7 +211,8 @@ final class AppleSubscriptionStore: AppleSubscriptionStoreServing {
         return AppleStoreTransaction(
             id: transaction.id,
             productID: transaction.productID,
-            signedTransactionInfo: signedTransactionInfo
+            signedTransactionInfo: signedTransactionInfo,
+            environment: AppleAPIEnvironment(transaction.environment)
         )
     }
 }

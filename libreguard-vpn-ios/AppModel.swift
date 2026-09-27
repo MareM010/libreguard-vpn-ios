@@ -880,7 +880,8 @@ final class AppModel: ObservableObject {
         defer { isPurchasingAppleSubscription = false }
 
         do {
-            let accountToken = try await api.fetchAppleAccountToken()
+            let environment = try await appleStore.purchaseEnvironment()
+            let accountToken = try await api.fetchAppleAccountToken(environment: environment)
             switch try await appleStore.purchase(productID: selectedAppleProductID, appAccountToken: accountToken) {
             case let .success(transaction):
                 await processAppleTransaction(transaction, allowTransfer: false)
@@ -1675,7 +1676,8 @@ final class AppModel: ObservableObject {
         do {
             let response = try await api.verifyAppleTransaction(
                 transaction.signedTransactionInfo,
-                allowTransfer: allowTransfer
+                allowTransfer: allowTransfer,
+                environment: transaction.environment
             )
             let usage = try? await api.fetchUsage()
             let currentAccountUserID = (session ?? api.storedSession)?.userId

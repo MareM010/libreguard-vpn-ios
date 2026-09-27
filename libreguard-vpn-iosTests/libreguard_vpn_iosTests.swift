@@ -1096,8 +1096,8 @@ struct libreguard_vpn_iosTests {
                 }
             }
 
-            #expect(try await client.fetchAppleAccountToken() == token)
-            let response = try await client.verifyAppleTransaction("signed-jws", allowTransfer: true)
+            #expect(try await client.fetchAppleAccountToken(environment: .production) == token)
+            let response = try await client.verifyAppleTransaction("signed-jws", allowTransfer: true, environment: .production)
             #expect(response.transferred)
             #expect(response.subscription.isAppleBilled)
             #expect(response.subscription.billingCycle == "annual")
@@ -2041,8 +2041,8 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
     }
     func fetchDNSPreference() async throws -> DNSPreference { try unsupported() }
     func updateDNSPreference(adBlockingEnabled: Bool) async throws -> DNSPreference { try unsupported() }
-    func fetchAppleAccountToken() async throws -> UUID { try unsupported() }
-    func verifyAppleTransaction(_ signedTransactionInfo: String, allowTransfer: Bool) async throws -> AppleTransactionVerificationResponse { try unsupported() }
+    func fetchAppleAccountToken(environment: AppleAPIEnvironment) async throws -> UUID { try unsupported() }
+    func verifyAppleTransaction(_ signedTransactionInfo: String, allowTransfer: Bool, environment: AppleAPIEnvironment) async throws -> AppleTransactionVerificationResponse { try unsupported() }
     func fetchTwoFactorStatus() async throws -> TwoFactorStatus { try unsupported() }
     func setupTwoFactor() async throws -> AuthenticatorSetup { try unsupported() }
     func enableTwoFactor(code: String) async throws -> [String] { try unsupported() }
@@ -2111,6 +2111,7 @@ private final class StartupVPNManager: VPNManaging {
 
 @MainActor
 private final class NoOpAppleSubscriptionStore: AppleSubscriptionStoreServing {
+    func purchaseEnvironment() async throws -> AppleAPIEnvironment { .production }
     func loadProducts() async throws -> [AppleSubscriptionProduct] { [] }
     func purchase(productID: String, appAccountToken: UUID) async throws -> ApplePurchaseResult { throw APIError(message: "Not configured") }
     func sync() async throws {}
