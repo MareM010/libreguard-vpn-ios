@@ -381,89 +381,125 @@ private struct LoginView: View {
     let onForgotPassword: () -> Void
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 26) {
-                Spacer(minLength: 36)
+        GeometryReader { geometry in
+            let scale = min(max(geometry.size.height / 640, 0.84), 1.12)
+            let logoSize = 76 * scale
+            let logoRadius = logoSize * 0.22
 
-                VStack(spacing: 14) {
-                    LibreGuardLogo(size: 96)
-                    Text("Welcome Back")
-                        .font(.system(size: 30, weight: .semibold))
-                    Text("Sign in to your LibreGuard account")
-                        .foregroundStyle(.secondary)
-                }
-                .multilineTextAlignment(.center)
-                .padding(.bottom, 8)
+            ScrollView {
+                VStack(spacing: 0) {
+                    VStack(spacing: 16 * scale) {
+                        VStack(spacing: 8 * scale) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: logoRadius, style: .continuous)
+                                    .fill(Theme.background)
+                                LibreGuardLogo(size: logoSize)
+                                    .clipShape(RoundedRectangle(cornerRadius: logoRadius, style: .continuous))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: logoRadius, style: .continuous)
+                                            .stroke(Theme.background.opacity(0.55), lineWidth: 2)
+                                            .blur(radius: 1.5)
+                                    }
+                            }
+                            .frame(width: logoSize, height: logoSize)
 
-                VStack(spacing: 16) {
-                    FormField(label: "Email", text: $email, icon: "envelope", placeholder: "you@example.com")
-                    PasswordField(label: "Password", text: $password, showPassword: $showPassword)
+                            Text("Welcome Back")
+                                .font(.system(size: 29 * scale, weight: .semibold))
+                            Text("Sign in to your LibreGuard account")
+                                .foregroundStyle(.secondary)
+                        }
+                        .multilineTextAlignment(.center)
 
-                    HStack {
-                        Spacer()
-                        Button("Forgot password?", action: onForgotPassword)
-                            .font(.subheadline.weight(.medium))
+                        VStack(spacing: 12 * scale) {
+                            FormField(
+                                label: "Email",
+                                text: $email,
+                                icon: "envelope",
+                                placeholder: "you@example.com",
+                                labelSpacing: 5 * scale,
+                                verticalPadding: 12 * scale
+                            )
+                            PasswordField(
+                                label: "Password",
+                                text: $password,
+                                showPassword: $showPassword,
+                                labelSpacing: 5 * scale,
+                                verticalPadding: 12 * scale
+                            )
+
+                            HStack {
+                                Spacer()
+                                Button("Forgot password?", action: onForgotPassword)
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(Theme.primary)
+                                    .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            }
+
+                            PrimaryButton(
+                                title: app.isAuthenticating ? "Signing in..." : "Sign In",
+                                accessibilityIdentifier: "login-sign-in-button",
+                                verticalPadding: 13 * scale
+                            ) {
+                                Task { await app.login(email: email, password: password) }
+                            }
+                            .disabled(app.isAuthenticating)
+                        }
+
+                        DividerWithText(text: "Or continue with")
+
+                        SignInWithAppleButton(.signIn) { request in
+                            app.prepareAppleSignIn(request)
+                        } onCompletion: { result in
+                            Task { await app.completeAppleSignIn(result) }
+                        }
+                        .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
+                        .frame(height: 48 * scale)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .disabled(app.isAuthenticating)
+                        .accessibilityIdentifier("apple-sign-in-button")
+
+                        Button {
+                            Task { await app.loginWithGoogle() }
+                        } label: {
+                            HStack(spacing: 12) {
+                                GoogleGlyph(size: 22 * scale)
+                                Text("Sign in with Google")
+                            }
+                            .font(.body.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12 * scale)
+                            .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
+                        }
+                        .buttonStyle(.plain)
+                        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .disabled(app.isAuthenticating)
+                        .accessibilityIdentifier("google-sign-in-button")
+                    }
+
+                    Spacer(minLength: 18 * scale)
+
+                    HStack(spacing: 4) {
+                        Text("New here?")
+                            .foregroundStyle(.secondary)
+                        Button("Create an account", action: onRegister)
                             .foregroundStyle(Theme.primary)
+                            .fontWeight(.semibold)
                             .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .accessibilityIdentifier("create-account-button")
                     }
-
-                    PrimaryButton(
-                        title: app.isAuthenticating ? "Signing in..." : "Sign In",
-                        accessibilityIdentifier: "login-sign-in-button"
-                    ) {
-                        Task { await app.login(email: email, password: password) }
-                    }
-                    .disabled(app.isAuthenticating)
-                }
-
-                DividerWithText(text: "Or continue with")
-
-                SignInWithAppleButton(.signIn) { request in
-                    app.prepareAppleSignIn(request)
-                } onCompletion: { result in
-                    Task { await app.completeAppleSignIn(result) }
-                }
-                .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
-                .frame(height: 50)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .disabled(app.isAuthenticating)
-                .accessibilityIdentifier("apple-sign-in-button")
-
-                Button {
-                    Task { await app.loginWithGoogle() }
-                } label: {
-                    HStack(spacing: 12) {
-                        GoogleGlyph()
-                        Text("Sign in with Google")
-                    }
-                    .font(.body.weight(.semibold))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
                 }
-                .buttonStyle(.plain)
-                .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .disabled(app.isAuthenticating)
-                .accessibilityIdentifier("google-sign-in-button")
-
-                HStack(spacing: 4) {
-                    Text("New here?")
-                        .foregroundStyle(.secondary)
-                    Button("Create an account", action: onRegister)
-                        .foregroundStyle(Theme.primary)
-                        .fontWeight(.semibold)
-                        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .accessibilityIdentifier("create-account-button")
-                }
-                .padding(.top, 8)
+                .padding(.top, 12 * scale)
+                .padding(.bottom, 12 * scale)
+                .padding(.horizontal, 24)
+                .frame(maxWidth: 480)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: geometry.size.height)
             }
-            .padding(24)
-            .frame(maxWidth: 480)
-            .frame(maxWidth: .infinity)
+            .background(Theme.background)
+            .accessibilityIdentifier("login-screen")
         }
-        .background(Theme.background)
-        .accessibilityIdentifier("login-screen")
         .onAppear {
             if email.isEmpty { email = app.prefilledEmail }
         }
@@ -2409,9 +2445,11 @@ private struct FormField: View {
     let icon: String
     let placeholder: String
     var keyboardType: UIKeyboardType = .default
+    var labelSpacing: CGFloat = 8
+    var verticalPadding: CGFloat = 14
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: labelSpacing) {
             Text(label)
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
@@ -2424,7 +2462,7 @@ private struct FormField: View {
                     .keyboardType(keyboardType)
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 14)
+            .padding(.vertical, verticalPadding)
             .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
             .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -2437,9 +2475,11 @@ private struct PasswordField: View {
     @Binding var text: String
     @Binding var showPassword: Bool
     var hint: String? = nil
+    var labelSpacing: CGFloat = 8
+    var verticalPadding: CGFloat = 14
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: labelSpacing) {
             Text(label)
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
@@ -2463,7 +2503,7 @@ private struct PasswordField: View {
                 }
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 14)
+            .padding(.vertical, verticalPadding)
             .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
             .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -2481,6 +2521,7 @@ private struct PrimaryButton: View {
     let title: String
     var maxWidth: CGFloat? = nil
     var accessibilityIdentifier: String? = nil
+    var verticalPadding: CGFloat = 15
     let action: () -> Void
 
     var body: some View {
@@ -2489,7 +2530,7 @@ private struct PrimaryButton: View {
                 .font(.body.weight(.semibold))
                 .foregroundStyle(.white)
                 .frame(maxWidth: maxWidth ?? .infinity)
-                .padding(.vertical, 15)
+                .padding(.vertical, verticalPadding)
                 .background(Theme.primary, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .shadow(color: Theme.primary.opacity(0.22), radius: 12, y: 7)
         }
@@ -3444,15 +3485,17 @@ private struct DividerWithText: View {
 }
 
 private struct GoogleGlyph: View {
+    var size: CGFloat = 22
+
     var body: some View {
         ZStack {
             Circle().fill(Color.white)
             Text("G")
-                .font(.system(size: 15, weight: .bold))
+                .font(.system(size: size * 0.68, weight: .bold))
                 .foregroundStyle(Theme.primary)
         }
-        .frame(width: 22, height: 22)
-        .overlay(Circle().stroke(Color(.systemGray4)))
+        .frame(width: size, height: size)
+        .overlay(Circle().stroke(Color(.systemGray4), lineWidth: size * 0.045))
     }
 }
 
