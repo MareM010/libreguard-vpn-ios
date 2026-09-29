@@ -2,6 +2,7 @@ import Foundation
 import AuthenticationServices
 import SwiftData
 import SwiftUI
+import StoreKit
 import Testing
 @testable import libreguard_vpn_ios
 
@@ -1067,6 +1068,7 @@ struct libreguard_vpn_iosTests {
             ))) { request in
                 requestCount += 1
                 #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer apple-access")
+                #expect(request.url?.host == "management.libreguard.net")
                 switch request.url?.path {
                 case "/api/subscription/apple/account-token":
                     #expect(request.httpMethod == "GET")
@@ -1103,6 +1105,251 @@ struct libreguard_vpn_iosTests {
             #expect(response.subscription.billingCycle == "annual")
             #expect(requestCount == 2)
         }
+    }
+
+    @Test func appleSubscriptionEndpointsRouteSandboxAndRejectLocalXcodeTransactions() async throws {
+        try await withSerializedRequests {
+            var requestHosts: [String] = []
+            let client = makeClient(sessionStore: InMemorySessionStore(session: startupSession())) { request in
+                requestHosts.append(request.url?.host ?? "")
+                switch request.url?.path {
+                case "/api/subscription/apple/account-token":
+                    return try makeResponse(request, status: 200, json: ["appAccountToken": UUID().uuidString])
+                case "/api/subscription/apple/verify":
+                    return try makeResponse(request, status: 200, json: [
+                        "subscription": self.subscriptionJSON(plan: "Pro", isPro: true),
+                        "transferred": false
+                    ])
+                default:
+                    throw APIError(message: "Unexpected endpoint")
+                }
+            }
+            _ = try await client.fetchAppleAccountToken(environment: .sandbox)
+            _ = try await client.verifyAppleTransaction("signed-jws", allowTransfer: false, environment: .sandbox)
+            #expect(requestHosts == ["sandbox.management.libreguard.net", "sandbox.management.libreguard.net"])
+            do {
+                _ = try await client.fetchAppleAccountToken(environment: .xcode)
+                Issue.record("Xcode account-token request must be rejected")
+            } catch is AppleStoreError {}
+            do {
+                _ = try await client.verifyAppleTransaction("signed-jws", allowTransfer: false, environment: .xcode)
+                Issue.record("Xcode verification request must be rejected")
+            } catch is AppleStoreError {}
+            #expect(requestHosts.count == 2)
+        }
+    }
+
+    @Test func appleStoreEnvironmentsRemainDistinct() {
+        #expect(AppleAPIEnvironment(.production) == .production)
+        #expect(AppleAPIEnvironment(.sandbox) == .sandbox)
+        #expect(AppleAPIEnvironment(.xcode) == .xcode)
+    }
+
+    @Test func applePurchaseRejectsExistingProAndLocalXcodeEnvironment() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let store = ControllableAppleSubscriptionStore()
+        let app = await makeApplePurchaseApp(backend: backend, store: store)
+        backend.subscriptionResults = [.success(try subscriptionStatus(plan: "Pro", isPro: true))]
+        await app.purchaseSelectedAppleSubscription()
+        #expect(store.purchaseCalls.isEmpty)
+        #expect(backend.requestedAppleEnvironments.isEmpty)
+        #expect(app.applePurchaseMessage?.contains("already active") == true)
+
+        backend.subscriptionResults = [.success(try subscriptionStatus(plan: "Free", isPro: false))]
+        store.environment = .xcode
+        await app.purchaseSelectedAppleSubscription()
+        #expect(store.purchaseCalls.isEmpty)
+        #expect(backend.requestedAppleEnvironments.isEmpty)
+        #expect(app.applePurchaseMessage?.contains("Local Xcode StoreKit") == true)
+    }
+
+    @Test func applePurchaseRestoresExistingEntitlementInsteadOfChargingAgain() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let store = ControllableAppleSubscriptionStore()
+        let transaction = appleTransaction(id: 101)
+        store.currentResults = [.verified(transaction)]
+        let pro = AppleTransactionVerificationResponse(subscription: try subscriptionStatus(plan: "Pro", isPro: true), transferred: false)
+        backend.appleVerificationResults = [.success(pro), .success(pro)]
+        backend.subscriptionResults = [.success(pro.subscription)]
+        let app = await makeApplePurchaseApp(backend: backend, store: store)
+
+        await app.purchaseSelectedAppleSubscription()
+
+        #expect(store.purchaseCalls.isEmpty)
+        #expect(store.finishedIDs == [101])
+        #expect(app.isProUser)
+        #expect(app.applePurchaseMessage?.contains("already active") == true)
+    }
+
+    @Test func applePurchaseHandlesPendingCancellationAndUnverifiedResultWithoutBackendVerification() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let store = ControllableAppleSubscriptionStore()
+        let free = try subscriptionStatus(plan: "Free", isPro: false)
+        backend.subscriptionResults = [.success(free), .success(free), .success(free)]
+        let app = await makeApplePurchaseApp(backend: backend, store: store)
+
+        store.purchaseResult = .success(.pending)
+        await app.purchaseSelectedAppleSubscription()
+        #expect(app.applePurchaseMessage?.contains("pending approval") == true)
+
+        store.purchaseResult = .success(.userCancelled)
+        await app.purchaseSelectedAppleSubscription()
+        #expect(app.applePurchaseMessage == "Purchase cancelled.")
+
+        store.purchaseResult = .failure(AppleStoreError.unverifiedTransaction)
+        await app.purchaseSelectedAppleSubscription()
+        #expect(app.applePurchaseMessage?.contains("could not verify") == true)
+        #expect(backend.appleVerificationAllowTransfer.isEmpty)
+        #expect(store.finishedIDs.isEmpty)
+    }
+
+    @Test func applePurchaseRetriesTransientVerificationAndFinishesAfterBackendConfirmation() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let store = ControllableAppleSubscriptionStore()
+        store.purchaseResult = .success(.success(appleTransaction(id: 202)))
+        backend.subscriptionResults = [.success(try subscriptionStatus(plan: "Free", isPro: false))]
+        backend.appleVerificationResults = [
+            .failure(APIError(statusCode: 503, message: "Unavailable")),
+            .success(AppleTransactionVerificationResponse(subscription: try subscriptionStatus(plan: "Pro", isPro: true), transferred: false))
+        ]
+        let app = await makeApplePurchaseApp(backend: backend, store: store, retryDelays: [0, 0])
+
+        await app.purchaseSelectedAppleSubscription()
+
+        #expect(backend.appleVerificationAllowTransfer == [false, false])
+        #expect(store.finishedIDs == [202])
+        #expect(app.isProUser)
+    }
+
+    @Test func applePurchaseDoesNotRetryTerminalBackendConflict() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let store = ControllableAppleSubscriptionStore()
+        store.purchaseResult = .success(.success(appleTransaction(id: 203)))
+        backend.subscriptionResults = [.success(try subscriptionStatus(plan: "Free", isPro: false))]
+        backend.appleVerificationResults = [
+            .failure(APIError(statusCode: 409, message: "Subscription conflict", code: "APPLE_SUBSCRIPTION_FAMILY_CONFLICT"))
+        ]
+        let app = await makeApplePurchaseApp(backend: backend, store: store, retryDelays: [0, 0])
+
+        await app.purchaseSelectedAppleSubscription()
+
+        #expect(backend.appleVerificationAllowTransfer == [false])
+        #expect(store.finishedIDs.isEmpty)
+        #expect(app.applePurchaseMessage?.contains("already linked") == true)
+    }
+
+    @Test func appleRestoreRecoversCurrentEntitlementAndTemporaryFailureKeepsTransaction() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let store = ControllableAppleSubscriptionStore()
+        store.currentResults = [.verified(appleTransaction(id: 250))]
+        backend.appleVerificationResults = [
+            .success(AppleTransactionVerificationResponse(subscription: try subscriptionStatus(plan: "Pro", isPro: true), transferred: false))
+        ]
+        let app = await makeApplePurchaseApp(backend: backend, store: store)
+        await app.restoreApplePurchases()
+        #expect(store.syncCount == 1)
+        #expect(store.finishedIDs == [250])
+        #expect(app.isProUser)
+
+        let failedBackend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let failedStore = ControllableAppleSubscriptionStore()
+        failedStore.purchaseResult = .success(.success(appleTransaction(id: 251)))
+        failedBackend.subscriptionResults = [.success(try subscriptionStatus(plan: "Free", isPro: false))]
+        failedBackend.appleVerificationResults = [
+            .failure(APIError(statusCode: 503, message: "Unavailable"))
+        ]
+        let failedApp = await makeApplePurchaseApp(backend: failedBackend, store: failedStore)
+        await failedApp.purchaseSelectedAppleSubscription()
+        #expect(failedStore.finishedIDs.isEmpty)
+        #expect(failedApp.applePurchaseMessage?.contains("Retry Restore Purchases") == true)
+        await failedApp.purchaseSelectedAppleSubscription()
+        #expect(failedStore.purchaseCalls.count == 1)
+        #expect(failedApp.applePurchaseMessage?.contains("previous Apple purchase") == true)
+
+        failedStore.unfinishedResults = [.verified(appleTransaction(id: 251))]
+        failedBackend.appleVerificationResults = [
+            .success(AppleTransactionVerificationResponse(subscription: try subscriptionStatus(plan: "Pro", isPro: true), transferred: false))
+        ]
+        await failedApp.restoreApplePurchases()
+        #expect(failedStore.finishedIDs == [251])
+        #expect(failedApp.isProUser)
+    }
+
+    @Test func applePurchaseTransferRequiresConfirmationBeforeFinishing() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let store = ControllableAppleSubscriptionStore()
+        store.purchaseResult = .success(.success(appleTransaction(id: 303)))
+        backend.subscriptionResults = [.success(try subscriptionStatus(plan: "Free", isPro: false))]
+        backend.appleVerificationResults = [
+            .failure(APIError(statusCode: 409, message: "Transfer required", code: "APPLE_SUBSCRIPTION_TRANSFER_REQUIRED")),
+            .success(AppleTransactionVerificationResponse(subscription: try subscriptionStatus(plan: "Pro", isPro: true), transferred: true))
+        ]
+        let app = await makeApplePurchaseApp(backend: backend, store: store)
+
+        await app.purchaseSelectedAppleSubscription()
+        #expect(app.pendingAppleSubscriptionTransfer?.id == 303)
+        #expect(store.finishedIDs.isEmpty)
+        await app.confirmAppleSubscriptionTransfer(appleTransaction(id: 303))
+        #expect(backend.appleVerificationAllowTransfer == [false, true])
+        #expect(store.finishedIDs == [303])
+    }
+
+    @Test func expiredRejectedTransactionFinishesOnlyWhenNoCurrentEntitlementExists() async throws {
+        let expired = appleTransaction(id: 404, expirationDate: Date().addingTimeInterval(-3600))
+        let rejection = APIError(statusCode: 409, message: "Not entitled", code: "APPLE_TRANSACTION_NOT_ENTITLED")
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let store = ControllableAppleSubscriptionStore()
+        store.unfinishedResults = [.verified(expired)]
+        backend.appleVerificationResults = [.failure(rejection)]
+        let app = await makeApplePurchaseApp(backend: backend, store: store)
+
+        await app.purchaseSelectedAppleSubscription()
+        #expect(store.finishedIDs == [404])
+        #expect(store.purchaseCalls.isEmpty)
+        #expect(app.applePurchaseMessage?.contains("expired") == true)
+
+        let backendWithEntitlement = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let storeWithEntitlement = ControllableAppleSubscriptionStore()
+        storeWithEntitlement.unfinishedResults = [.verified(expired)]
+        storeWithEntitlement.currentResults = [.unverified(productID: AppleSubscriptionCatalog.monthlyProductID, message: "Unverified")]
+        backendWithEntitlement.appleVerificationResults = [.failure(rejection)]
+        backendWithEntitlement.subscriptionResults = [.success(try subscriptionStatus(plan: "Free", isPro: false))]
+        let appWithEntitlement = await makeApplePurchaseApp(backend: backendWithEntitlement, store: storeWithEntitlement)
+
+        await appWithEntitlement.purchaseSelectedAppleSubscription()
+        #expect(storeWithEntitlement.finishedIDs.isEmpty)
+        #expect(storeWithEntitlement.purchaseCalls.isEmpty)
+
+        let unexpiredBackend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let unexpiredStore = ControllableAppleSubscriptionStore()
+        unexpiredStore.unfinishedResults = [.verified(appleTransaction(id: 405, expirationDate: Date().addingTimeInterval(3600)))]
+        unexpiredBackend.appleVerificationResults = [.failure(rejection)]
+        unexpiredBackend.subscriptionResults = [.success(try subscriptionStatus(plan: "Free", isPro: false))]
+        let unexpiredApp = await makeApplePurchaseApp(backend: unexpiredBackend, store: unexpiredStore)
+        await unexpiredApp.purchaseSelectedAppleSubscription()
+        #expect(unexpiredStore.finishedIDs.isEmpty)
+        #expect(unexpiredStore.purchaseCalls.isEmpty)
+    }
+
+    @Test func appleVerificationFromPreviousAccountCannotGrantProOrFinishTransaction() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        backend.holdFirstAppleVerification = true
+        backend.subscriptionResults = [.success(try subscriptionStatus(plan: "Free", isPro: false))]
+        backend.appleVerificationResults = [
+            .success(AppleTransactionVerificationResponse(subscription: try subscriptionStatus(plan: "Pro", isPro: true), transferred: false))
+        ]
+        let store = ControllableAppleSubscriptionStore()
+        store.purchaseResult = .success(.success(appleTransaction(id: 505)))
+        let app = await makeApplePurchaseApp(backend: backend, store: store)
+
+        let purchase = Task { await app.purchaseSelectedAppleSubscription() }
+        await backend.waitForFirstAppleVerification()
+        app.session = AuthSession(accessToken: "other", refreshToken: "other", email: "other@example.com", userId: "other-user", deviceId: "other-device")
+        backend.releaseFirstAppleVerification()
+        await purchase.value
+
+        #expect(app.subscription == nil)
+        #expect(store.finishedIDs.isEmpty)
     }
 
     @Test func passwordResetRequestsUseUnauthenticatedAccountEndpoints() async throws {
@@ -1364,7 +1611,7 @@ struct libreguard_vpn_iosTests {
     }
 
     @Test func subscriptionDisplayNameNormalizesPremiumTier() throws {
-        let subscription = try JSONDecoder().decode(SubscriptionStatus.self, from: JSONSerialization.data(withJSONObject: [
+        let subscription = try JSONDecoder().decode(libreguard_vpn_ios.SubscriptionStatus.self, from: JSONSerialization.data(withJSONObject: [
             "plan": "Premium",
             "isPro": true,
             "status": "Active",
@@ -1382,7 +1629,7 @@ struct libreguard_vpn_iosTests {
     }
 
     @Test func subscriptionDisplayNameUsesExplicitEntitlementWhenPlanNameIsStale() throws {
-        let subscription = try JSONDecoder().decode(SubscriptionStatus.self, from: JSONSerialization.data(withJSONObject: [
+        let subscription = try JSONDecoder().decode(libreguard_vpn_ios.SubscriptionStatus.self, from: JSONSerialization.data(withJSONObject: [
             "plan": "Pro",
             "isPro": false,
             "status": "inactive",
@@ -1676,17 +1923,47 @@ struct libreguard_vpn_iosTests {
         )
     }
 
-    private func subscriptionStatus(plan: String, isPro: Bool) throws -> SubscriptionStatus {
+    private func subscriptionStatus(plan: String, isPro: Bool) throws -> libreguard_vpn_ios.SubscriptionStatus {
         try JSONDecoder().decode(
-            SubscriptionStatus.self,
+            libreguard_vpn_ios.SubscriptionStatus.self,
             from: JSONSerialization.data(withJSONObject: subscriptionJSON(plan: plan, isPro: isPro))
         )
+    }
+
+    private func appleTransaction(id: UInt64, expirationDate: Date? = nil) -> AppleStoreTransaction {
+        AppleStoreTransaction(
+            id: id,
+            productID: AppleSubscriptionCatalog.monthlyProductID,
+            signedTransactionInfo: "signed-transaction-\(id)",
+            environment: .sandbox,
+            purchaseDate: Date().addingTimeInterval(-7200),
+            expirationDate: expirationDate
+        )
+    }
+
+    private func makeApplePurchaseApp(
+        backend: StartupBackendStub,
+        store: ControllableAppleSubscriptionStore,
+        retryDelays: [UInt64] = [0]
+    ) async -> AppModel {
+        let app = makeStartupApp(
+            backend: backend,
+            vpn: StartupVPNManager(status: .disconnected),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!,
+            appleStore: store,
+            appleVerificationRetryDelays: retryDelays
+        )
+        app.session = startupSession()
+        await app.loadAppleSubscriptions()
+        return app
     }
 
     private func makeStartupApp(
         backend: StartupBackendStub,
         vpn: StartupVPNManager,
         defaults: UserDefaults,
+        appleStore: AppleSubscriptionStoreServing? = nil,
+        appleVerificationRetryDelays: [UInt64] = [0, 1, 3],
         appleSignIn: AppleSigning? = nil,
         appleCredentialStateChecker: AppleCredentialStateChecking? = nil,
         appleCredentialBindingStore: AppleCredentialBindingStoring? = nil,
@@ -1694,14 +1971,15 @@ struct libreguard_vpn_iosTests {
     ) -> AppModel {
         AppModel(
             api: backend,
-            appleStore: NoOpAppleSubscriptionStore(),
+            appleStore: appleStore ?? NoOpAppleSubscriptionStore(),
             appleSignIn: appleSignIn,
             appleCredentialStateChecker: appleCredentialStateChecker,
             appleCredentialBindingStore: appleCredentialBindingStore,
             notificationCenter: notificationCenter,
             latencyProbe: NoOpLatencyProbe(),
             vpnManager: vpn,
-            defaults: defaults
+            defaults: defaults,
+            appleVerificationRetryDelays: appleVerificationRetryDelays
         )
     }
 
@@ -1920,7 +2198,15 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
     private var restoreResults: [Result<AuthSession?, Error>]
     var passwordLoginResponse: LoginResponse?
     var appleLoginResponse: LoginResponse?
-    var subscriptionResults: [Result<SubscriptionStatus, Error>] = []
+    var subscriptionResults: [Result<libreguard_vpn_ios.SubscriptionStatus, Error>] = []
+    var appleVerificationResults: [Result<AppleTransactionVerificationResponse, Error>] = []
+    var appleAccountToken = UUID()
+    private(set) var requestedAppleEnvironments: [AppleAPIEnvironment] = []
+    private(set) var appleVerificationAllowTransfer: [Bool] = []
+    var holdFirstAppleVerification = false
+    private var firstAppleVerificationStarted = false
+    private var firstAppleVerificationWaiter: CheckedContinuation<Void, Never>?
+    private var firstAppleVerificationRelease: CheckedContinuation<Void, Never>?
     var holdFirstSubscriptionRequest = false
     private(set) var appleLoginIdToken: String?
     private(set) var appleLoginNonce: String?
@@ -2015,7 +2301,7 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
     func fetchCertificateJob(jobId: Int) async throws -> CertificateJobStatusResponse { try unsupported() }
     func fetchUsage() async throws -> UsageQuota { try unsupported() }
     func fetchConnectionEligibility() async throws -> CanConnectResponse { try unsupported() }
-    func fetchSubscription() async throws -> SubscriptionStatus {
+    func fetchSubscription() async throws -> libreguard_vpn_ios.SubscriptionStatus {
         subscriptionRequestCount += 1
         guard !subscriptionResults.isEmpty else { return try unsupported() }
         let result = subscriptionResults.removeFirst()
@@ -2041,8 +2327,29 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
     }
     func fetchDNSPreference() async throws -> DNSPreference { try unsupported() }
     func updateDNSPreference(adBlockingEnabled: Bool) async throws -> DNSPreference { try unsupported() }
-    func fetchAppleAccountToken(environment: AppleAPIEnvironment) async throws -> UUID { try unsupported() }
-    func verifyAppleTransaction(_ signedTransactionInfo: String, allowTransfer: Bool, environment: AppleAPIEnvironment) async throws -> AppleTransactionVerificationResponse { try unsupported() }
+    func fetchAppleAccountToken(environment: AppleAPIEnvironment) async throws -> UUID {
+        requestedAppleEnvironments.append(environment)
+        return appleAccountToken
+    }
+    func verifyAppleTransaction(_ signedTransactionInfo: String, allowTransfer: Bool, environment: AppleAPIEnvironment) async throws -> AppleTransactionVerificationResponse {
+        appleVerificationAllowTransfer.append(allowTransfer)
+        if holdFirstAppleVerification, appleVerificationAllowTransfer.count == 1 {
+            firstAppleVerificationStarted = true
+            firstAppleVerificationWaiter?.resume()
+            firstAppleVerificationWaiter = nil
+            await withCheckedContinuation { continuation in firstAppleVerificationRelease = continuation }
+        }
+        guard !appleVerificationResults.isEmpty else { return try unsupported() }
+        return try appleVerificationResults.removeFirst().get()
+    }
+    func waitForFirstAppleVerification() async {
+        guard !firstAppleVerificationStarted else { return }
+        await withCheckedContinuation { continuation in firstAppleVerificationWaiter = continuation }
+    }
+    func releaseFirstAppleVerification() {
+        firstAppleVerificationRelease?.resume()
+        firstAppleVerificationRelease = nil
+    }
     func fetchTwoFactorStatus() async throws -> TwoFactorStatus { try unsupported() }
     func setupTwoFactor() async throws -> AuthenticatorSetup { try unsupported() }
     func enableTwoFactor(code: String) async throws -> [String] { try unsupported() }
@@ -2110,7 +2417,45 @@ private final class StartupVPNManager: VPNManaging {
 }
 
 @MainActor
+private final class ControllableAppleSubscriptionStore: AppleSubscriptionStoreServing {
+    var canMakePayments = true
+    var environment: AppleAPIEnvironment = .sandbox
+    var purchaseResult: Result<ApplePurchaseResult, Error> = .success(.userCancelled)
+    var currentResults: [AppleStoreUpdate] = []
+    var unfinishedResults: [AppleStoreUpdate] = []
+    private(set) var purchaseCalls: [String] = []
+    private(set) var finishedIDs: [UInt64] = []
+    private(set) var syncCount = 0
+
+    func purchaseEnvironment() async throws -> AppleAPIEnvironment { environment }
+    func loadProducts() async throws -> [AppleSubscriptionProduct] {
+        [
+            AppleSubscriptionProduct(id: AppleSubscriptionCatalog.annualProductID,
+                                     displayName: "Pro Annual", description: "Pro", displayPrice: "$29.99",
+                                     price: Decimal(29.99), period: .annual),
+            AppleSubscriptionProduct(id: AppleSubscriptionCatalog.monthlyProductID,
+                                     displayName: "Pro Monthly", description: "Pro", displayPrice: "$5.99",
+                                     price: Decimal(5.99), period: .monthly)
+        ]
+    }
+    func purchase(productID: String, appAccountToken: UUID) async throws -> ApplePurchaseResult {
+        purchaseCalls.append(productID)
+        return try purchaseResult.get()
+    }
+    func sync() async throws { syncCount += 1 }
+    func currentEntitlements() async -> [AppleStoreUpdate] { currentResults }
+    func unfinishedTransactions() async -> [AppleStoreUpdate] { unfinishedResults }
+    func transactionUpdates() -> AsyncStream<AppleStoreUpdate> {
+        AsyncStream { continuation in continuation.finish() }
+    }
+    func finish(transactionID: UInt64) async {
+        if !finishedIDs.contains(transactionID) { finishedIDs.append(transactionID) }
+    }
+}
+
+@MainActor
 private final class NoOpAppleSubscriptionStore: AppleSubscriptionStoreServing {
+    var canMakePayments: Bool { true }
     func purchaseEnvironment() async throws -> AppleAPIEnvironment { .production }
     func loadProducts() async throws -> [AppleSubscriptionProduct] { [] }
     func purchase(productID: String, appAccountToken: UUID) async throws -> ApplePurchaseResult { throw APIError(message: "Not configured") }

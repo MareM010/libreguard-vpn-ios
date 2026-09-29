@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import StoreKit
 
 enum AppleSubscriptionCatalog {
@@ -15,9 +16,14 @@ enum AppleSubscriptionPeriod: String, Sendable {
 enum AppleAPIEnvironment: Equatable, Sendable {
     case production
     case sandbox
+    case xcode
 
     init(_ environment: AppStore.Environment) {
-        self = environment == .production ? .production : .sandbox
+        switch environment {
+        case .production: self = .production
+        case .sandbox: self = .sandbox
+        default: self = .xcode
+        }
     }
 }
 
@@ -35,6 +41,18 @@ struct AppleStoreTransaction: Equatable, Sendable {
     let productID: String
     let signedTransactionInfo: String
     let environment: AppleAPIEnvironment
+    let purchaseDate: Date?
+    let expirationDate: Date?
+
+    init(id: UInt64, productID: String, signedTransactionInfo: String,
+         environment: AppleAPIEnvironment, purchaseDate: Date? = nil, expirationDate: Date? = nil) {
+        self.id = id
+        self.productID = productID
+        self.signedTransactionInfo = signedTransactionInfo
+        self.environment = environment
+        self.purchaseDate = purchaseDate
+        self.expirationDate = expirationDate
+    }
 }
 
 struct PendingAppleSubscriptionTransfer: Identifiable, Equatable, Sendable {
@@ -50,13 +68,15 @@ enum ApplePurchaseResult: Equatable, Sendable {
 
 enum AppleStoreUpdate: Sendable {
     case verified(AppleStoreTransaction)
-    case unverified
+    case unverified(productID: String, message: String)
 }
 
 enum AppleStoreError: LocalizedError {
     case productsUnavailable
     case unverifiedTransaction
     case unknownPurchaseResult
+    case unavailableEnvironment
+    case unsupportedEnvironment
 
     var errorDescription: String? {
         switch self {
@@ -66,12 +86,17 @@ enum AppleStoreError: LocalizedError {
             "The App Store could not verify this purchase. No changes were made to your account."
         case .unknownPurchaseResult:
             "The App Store returned an unsupported purchase result. Please try again."
+        case .unavailableEnvironment:
+            "The App Store environment could not be verified. Check your Apple account and try again."
+        case .unsupportedEnvironment:
+            "Local Xcode StoreKit transactions cannot be verified by the live subscription service. Use an Apple Sandbox tester."
         }
     }
 }
 
 @MainActor
 protocol AppleSubscriptionStoreServing: AnyObject {
+    var canMakePayments: Bool { get }
     func purchaseEnvironment() async throws -> AppleAPIEnvironment
     func loadProducts() async throws -> [AppleSubscriptionProduct]
     func purchase(productID: String, appAccountToken: UUID) async throws -> ApplePurchaseResult
@@ -86,19 +111,40 @@ protocol AppleSubscriptionStoreServing: AnyObject {
 final class AppleSubscriptionStore: AppleSubscriptionStoreServing {
     private var productsByID: [String: Product] = [:]
     private var transactionsByID: [UInt64: Transaction] = [:]
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "net.libreguard.libreguard-vpn-ios", category: "AppleSubscription")
+
+    var canMakePayments: Bool { AppStore.canMakePayments }
 
     func purchaseEnvironment() async throws -> AppleAPIEnvironment {
-        switch await AppTransaction.shared {
-        case let .verified(transaction):
-            AppleAPIEnvironment(transaction.environment)
-        case .unverified:
-            throw AppleStoreError.unverifiedTransaction
+        do {
+            return try environment(from: await AppTransaction.shared)
+        } catch {
+            logEnvironmentFailure(error, operation: "AppTransaction.shared")
         }
+        do {
+            // This method is called only from the Subscribe action. Refresh may prompt for Apple credentials.
+            return try environment(from: await AppTransaction.refresh())
+        } catch {
+            logEnvironmentFailure(error, operation: "AppTransaction.refresh")
+            throw AppleStoreError.unavailableEnvironment
+        }
+    }
+
+    private func environment(from result: VerificationResult<AppTransaction>) throws -> AppleAPIEnvironment {
+        switch result {
+        case let .verified(transaction): AppleAPIEnvironment(transaction.environment)
+        case .unverified: throw AppleStoreError.unverifiedTransaction
+        }
+    }
+
+    private func logEnvironmentFailure(_ error: Error, operation: String) {
+        let nsError = error as NSError
+        logger.error("\(operation, privacy: .public) failed [\(nsError.domain, privacy: .public):\(nsError.code, privacy: .public)]")
     }
 
     func loadProducts() async throws -> [AppleSubscriptionProduct] {
         let products = try await Product.products(for: AppleSubscriptionCatalog.productIDs)
-        productsByID = Dictionary(uniqueKeysWithValues: products.map { ($0.id, $0) })
+        productsByID = Dictionary(uniqueKeysWithValues: products.filter { $0.type == .autoRenewable }.map { ($0.id, $0) })
 
         let mapped = products.compactMap(Self.mapProduct)
         guard mapped.count == AppleSubscriptionCatalog.productIDs.count else {
@@ -180,7 +226,7 @@ final class AppleSubscriptionStore: AppleSubscriptionStoreServing {
     }
 
     private static func mapProduct(_ product: Product) -> AppleSubscriptionProduct? {
-        guard let period = product.subscription?.subscriptionPeriod else { return nil }
+        guard product.type == .autoRenewable, let period = product.subscription?.subscriptionPeriod else { return nil }
         let mappedPeriod: AppleSubscriptionPeriod
         switch (period.unit, period.value) {
         case (.month, 1): mappedPeriod = .monthly
@@ -201,8 +247,8 @@ final class AppleSubscriptionStore: AppleSubscriptionStoreServing {
         switch result {
         case let .verified(transaction):
             .verified(cache(transaction, signedTransactionInfo: result.jwsRepresentation))
-        case .unverified:
-            .unverified
+        case let .unverified(transaction, error):
+            .unverified(productID: transaction.productID, message: error.localizedDescription)
         }
     }
 
@@ -212,7 +258,9 @@ final class AppleSubscriptionStore: AppleSubscriptionStoreServing {
             id: transaction.id,
             productID: transaction.productID,
             signedTransactionInfo: signedTransactionInfo,
-            environment: AppleAPIEnvironment(transaction.environment)
+            environment: AppleAPIEnvironment(transaction.environment),
+            purchaseDate: transaction.purchaseDate,
+            expirationDate: transaction.expirationDate
         )
     }
 }

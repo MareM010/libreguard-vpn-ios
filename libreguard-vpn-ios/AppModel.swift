@@ -35,6 +35,11 @@ final class AppModel: ObservableObject {
             }
             guard oldValue?.userId != session?.userId else { return }
             accountStateGeneration &+= 1
+            appleRecoveryTask?.cancel()
+            appleRecoveryTask = nil
+            appleRecoveryAccountID = nil
+            appleExpiredTransactionNeedsRetry = false
+            unresolvedAppleTransactionIDs.removeAll()
 
             let previousAccountID = oldValue?.userId ?? "none"
             let currentAccountID = session?.userId ?? "none"
@@ -134,6 +139,11 @@ final class AppModel: ObservableObject {
     private var hasCompletedUnauthenticatedCleanup = false
     private var shouldShowSessionEndedMessage = false
     private var appleTransactionListenerTask: Task<Void, Never>?
+    private var appleRecoveryTask: Task<Void, Never>?
+    private var appleRecoveryAccountID: String?
+    private var appleExpiredTransactionNeedsRetry = false
+    private var unresolvedAppleTransactionIDs: Set<UInt64> = []
+    private let appleVerificationRetryDelays: [UInt64]
     private var appleCredentialRevocationObserver: AnyCancellable?
     private var processingAppleTransactionIDs: Set<UInt64> = []
     private var vpnTransitionTask: Task<Void, Never>?
@@ -194,11 +204,13 @@ final class AppModel: ObservableObject {
         notificationService: VPNNotificationService? = nil,
         eventNotifier: VPNEventNotifying? = nil,
         liveActivityController: VPNLiveActivityControlling? = nil,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        appleVerificationRetryDelays: [UInt64] = [0, 1, 3]
     ) {
         let resolvedAPI = api ?? APIClient()
         self.api = resolvedAPI
         self.appleStore = appleStore ?? AppleSubscriptionStore()
+        self.appleVerificationRetryDelays = appleVerificationRetryDelays.isEmpty ? [0] : appleVerificationRetryDelays
         self.google = google ?? GoogleSignInService()
         self.appleSignIn = appleSignIn ?? AppleSignInService()
         self.appleCredentialStateChecker = appleCredentialStateChecker ?? AppleCredentialStateService()
@@ -378,7 +390,7 @@ final class AppModel: ObservableObject {
         await refreshAccountData(showErrors: false)
         guard sessionCleanupTask == nil, session != nil else { return }
 
-        await reconcileUnfinishedAppleTransactions()
+        await ensureAppleRecovery()
         guard sessionCleanupTask == nil, session != nil else { return }
 
         if vpnStatus.isConnected {
@@ -869,62 +881,155 @@ final class AppModel: ObservableObject {
                 selectedAppleProductID = appleSubscriptionProducts.first?.id ?? AppleSubscriptionCatalog.annualProductID
             }
         } catch {
-            present(error)
+            logApplePurchaseFailure(error, stage: "loading subscription plans")
+            applePurchaseMessage = "Subscription plans could not be loaded. Check your connection and retry."
         }
     }
 
     func purchaseSelectedAppleSubscription() async {
-        guard session != nil, !isPurchasingAppleSubscription else { return }
+        guard let accountUserID = session?.userId,
+              !isPurchasingAppleSubscription, !isRestoringApplePurchases else { return }
+        let generation = accountStateGeneration
         isPurchasingAppleSubscription = true
         applePurchaseMessage = nil
         defer { isPurchasingAppleSubscription = false }
 
+        var stage = "recovering previous purchases"
         do {
+            await ensureAppleRecovery()
+            guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+            if appleExpiredTransactionNeedsRetry {
+                appleExpiredTransactionNeedsRetry = false
+                applePurchaseMessage = "This previous Apple subscription has expired. Select Subscribe again to start a new purchase."
+                return
+            }
+            if !unresolvedAppleTransactionIDs.isEmpty {
+                applePurchaseMessage = "A previous Apple purchase has not been confirmed yet. Retry Restore Purchases before subscribing again."
+                return
+            }
+            if pendingAppleSubscriptionTransfer != nil {
+                applePurchaseMessage = "Confirm or cancel the existing Apple subscription transfer before subscribing."
+                return
+            }
+            guard appleStore.canMakePayments else {
+                applePurchaseMessage = "Purchases are not available for this Apple Account right now."
+                return
+            }
+            guard appleSubscriptionProducts.contains(where: { $0.id == selectedAppleProductID }) else {
+                applePurchaseMessage = "This subscription plan is unavailable. Retry loading plans."
+                return
+            }
+
+            stage = "checking existing Apple subscriptions"
+            let existing = (await appleStore.currentEntitlements()).filter(isLibreGuardAppleUpdate)
+            guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+            if !existing.isEmpty {
+                for update in existing {
+                    guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+                    await processAppleUpdate(update)
+                    if pendingAppleSubscriptionTransfer != nil { return }
+                }
+                guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+                let currentStatus = try? await api.fetchSubscription()
+                guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+                if let currentStatus {
+                    subscription = currentStatus
+                    cachePlan(name: currentStatus.displayName, isPro: currentStatus.isPro)
+                }
+                applePurchaseMessage = currentStatus?.isPro == true
+                    ? "Pro is already active on this account. Manage or restore your Apple subscription."
+                    : "An existing Apple subscription could not be confirmed with LibreGuard. Restore it before purchasing another plan."
+                return
+            }
+
+            stage = "checking LibreGuard subscription status"
+            let currentStatus = try await api.fetchSubscription()
+            guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+            subscription = currentStatus
+            cachePlan(name: currentStatus.displayName, isPro: currentStatus.isPro)
+            if currentStatus.isPro {
+                applePurchaseMessage = "Pro is already active on this account. Manage or restore your subscription."
+                return
+            }
+
+            stage = "reading the StoreKit environment"
             let environment = try await appleStore.purchaseEnvironment()
+            guard environment != .xcode else { throw AppleStoreError.unsupportedEnvironment }
+            guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+            stage = "requesting the Apple account token"
             let accountToken = try await api.fetchAppleAccountToken(environment: environment)
+            guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+            stage = "starting the StoreKit purchase"
             switch try await appleStore.purchase(productID: selectedAppleProductID, appAccountToken: accountToken) {
             case let .success(transaction):
+                guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
                 await processAppleTransaction(transaction, allowTransfer: false)
             case .pending:
+                guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
                 applePurchaseMessage = "Your purchase is pending approval. Pro will activate automatically after the App Store completes it."
             case .userCancelled:
-                break
+                guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+                applePurchaseMessage = "Purchase cancelled."
             }
         } catch {
-            present(error)
+            guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+            logApplePurchaseFailure(error, stage: stage)
+            if let apiError = error as? APIError, isAuthenticationFailure(apiError) {
+                present(error)
+            } else {
+                applePurchaseMessage = applePurchaseErrorMessage(error)
+            }
         }
     }
 
     func restoreApplePurchases() async {
-        guard session != nil, !isRestoringApplePurchases else { return }
+        guard let accountUserID = session?.userId,
+              !isRestoringApplePurchases, !isPurchasingAppleSubscription else { return }
+        let generation = accountStateGeneration
         isRestoringApplePurchases = true
         applePurchaseMessage = nil
         defer { isRestoringApplePurchases = false }
 
         do {
             try await appleStore.sync()
-            let updates = await appleStore.currentEntitlements()
-            let transactions = updates.compactMap { update -> AppleStoreTransaction? in
-                guard case let .verified(transaction) = update,
-                      AppleSubscriptionCatalog.productIDs.contains(transaction.productID) else { return nil }
-                return transaction
+            guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+            let current = await appleStore.currentEntitlements()
+            let unfinished = await appleStore.unfinishedTransactions()
+            guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+            var seenIDs = Set<UInt64>()
+            let eligible = (current + unfinished).filter { update in
+                guard isLibreGuardAppleUpdate(update) else { return false }
+                if case let .verified(transaction) = update {
+                    return seenIDs.insert(transaction.id).inserted
+                }
+                return true
             }
-            guard !transactions.isEmpty else {
+            guard !eligible.isEmpty else {
+                let currentStatus = try? await api.fetchSubscription()
+                guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+                if let currentStatus {
+                    subscription = currentStatus
+                    cachePlan(name: currentStatus.displayName, isPro: currentStatus.isPro)
+                }
                 applePurchaseMessage = "No active LibreGuard Pro subscription was found for this Apple Account."
                 return
             }
-            for transaction in transactions {
-                await processAppleTransaction(transaction, allowTransfer: false)
+            for update in eligible {
+                guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+                await processAppleUpdate(update)
                 if pendingAppleSubscriptionTransfer != nil { break }
             }
         } catch {
-            present(error)
+            guard isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+            logApplePurchaseFailure(error, stage: "restoring Apple purchases")
+            applePurchaseMessage = "Purchases could not be restored. Check your connection and try again."
         }
     }
 
     func confirmAppleSubscriptionTransfer(_ transaction: AppleStoreTransaction) async {
         isRestoringApplePurchases = true
         defer { isRestoringApplePurchases = false }
+        pendingAppleSubscriptionTransfer = nil
         await processAppleTransaction(transaction, allowTransfer: true)
     }
 
@@ -1497,7 +1602,7 @@ final class AppModel: ObservableObject {
         deviceLimitContext = nil
         route = .authenticated
         await refreshAccountData(showErrors: false)
-        await reconcileUnfinishedAppleTransactions()
+        await ensureAppleRecovery()
         if response.warningRecoveryCodes == true {
             presentedError = APIError(message: "A recovery code was used. Generate a new set from Settings.")
         }
@@ -1642,67 +1747,175 @@ final class AppModel: ObservableObject {
             for await update in updates {
                 guard let self, !Task.isCancelled else { return }
                 guard self.session != nil else { continue }
-                switch update {
-                case let .verified(transaction) where AppleSubscriptionCatalog.productIDs.contains(transaction.productID):
-                    await self.processAppleTransaction(transaction, allowTransfer: false)
-                case .unverified:
-                    self.applePurchaseMessage = AppleStoreError.unverifiedTransaction.localizedDescription
-                case .verified:
-                    break
-                }
+                await self.processAppleUpdate(update)
             }
         }
     }
 
+    private func ensureAppleRecovery() async {
+        guard let accountUserID = session?.userId else { return }
+        if appleRecoveryAccountID != accountUserID {
+            appleRecoveryTask?.cancel()
+            appleRecoveryTask = nil
+            appleRecoveryAccountID = accountUserID
+        }
+        if appleRecoveryTask == nil {
+            appleRecoveryTask = Task { @MainActor [weak self] in
+                await self?.reconcileUnfinishedAppleTransactions()
+            }
+        }
+        await appleRecoveryTask?.value
+    }
+
     private func reconcileUnfinishedAppleTransactions() async {
-        guard session != nil else { return }
-        for update in await appleStore.unfinishedTransactions() {
-            guard case let .verified(transaction) = update,
-                  AppleSubscriptionCatalog.productIDs.contains(transaction.productID) else { continue }
-            await processAppleTransaction(transaction, allowTransfer: false)
+        guard let accountUserID = session?.userId else { return }
+        let generation = accountStateGeneration
+        let current = await appleStore.currentEntitlements()
+        guard !Task.isCancelled, isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+        let unfinished = await appleStore.unfinishedTransactions()
+        var seenIDs = Set<UInt64>()
+        for update in current + unfinished {
+            guard !Task.isCancelled, isCurrentAppleAccount(accountUserID, generation: generation) else { return }
+            if case let .verified(transaction) = update,
+               !seenIDs.insert(transaction.id).inserted { continue }
+            await processAppleUpdate(update)
             if pendingAppleSubscriptionTransfer != nil { break }
         }
     }
 
+    private func isLibreGuardAppleUpdate(_ update: AppleStoreUpdate) -> Bool {
+        switch update {
+        case let .verified(transaction): AppleSubscriptionCatalog.productIDs.contains(transaction.productID)
+        case let .unverified(productID, _): AppleSubscriptionCatalog.productIDs.contains(productID)
+        }
+    }
+
+    private func processAppleUpdate(_ update: AppleStoreUpdate) async {
+        guard isLibreGuardAppleUpdate(update) else { return }
+        switch update {
+        case let .verified(transaction):
+            await processAppleTransaction(transaction, allowTransfer: false)
+        case .unverified:
+            applePurchaseMessage = AppleStoreError.unverifiedTransaction.localizedDescription
+        }
+    }
+
+    private func isCurrentAppleAccount(_ userID: String, generation: UInt) -> Bool {
+        accountStateGeneration == generation && session?.userId == userID
+    }
+
     private func processAppleTransaction(_ transaction: AppleStoreTransaction, allowTransfer: Bool) async {
-        guard let accountUserID = (session ?? api.storedSession)?.userId,
+        guard let accountUserID = session?.userId,
               processingAppleTransactionIDs.insert(transaction.id).inserted else { return }
         defer { processingAppleTransactionIDs.remove(transaction.id) }
+        guard transaction.environment != .xcode else {
+            applePurchaseMessage = AppleStoreError.unsupportedEnvironment.localizedDescription
+            return
+        }
         let transactionGeneration = accountStateGeneration
         logger.info(
-            "Apple subscription verification started; account=\(accountUserID, privacy: .private(mask: .hash)), allowTransfer=\(allowTransfer, privacy: .public)"
+            "Apple subscription verification started; account=\(accountUserID, privacy: .private(mask: .hash)), environment=\(String(describing: transaction.environment), privacy: .public), allowTransfer=\(allowTransfer, privacy: .public)"
         )
 
-        do {
-            let response = try await api.verifyAppleTransaction(
-                transaction.signedTransactionInfo,
-                allowTransfer: allowTransfer,
-                environment: transaction.environment
-            )
-            let usage = try? await api.fetchUsage()
-            let currentAccountUserID = (session ?? api.storedSession)?.userId
-            guard accountStateGeneration == transactionGeneration,
-                  currentAccountUserID == accountUserID else {
-                logger.warning(
-                    "Apple subscription verification discarded as stale; requestedAccount=\(accountUserID, privacy: .private(mask: .hash)), currentAccount=\((currentAccountUserID ?? "none"), privacy: .private(mask: .hash)), requestedGeneration=\(String(transactionGeneration), privacy: .public), currentGeneration=\(String(self.accountStateGeneration), privacy: .public)"
+        for (attempt, delay) in appleVerificationRetryDelays.enumerated() {
+            if delay > 0 {
+                do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            }
+            guard !Task.isCancelled, isCurrentAppleAccount(accountUserID, generation: transactionGeneration) else { return }
+            do {
+                let response = try await api.verifyAppleTransaction(
+                    transaction.signedTransactionInfo,
+                    allowTransfer: allowTransfer,
+                    environment: transaction.environment
                 )
+                guard isCurrentAppleAccount(accountUserID, generation: transactionGeneration) else { return }
+                let usage = try? await api.fetchUsage()
+                guard isCurrentAppleAccount(accountUserID, generation: transactionGeneration) else { return }
+                subscription = response.subscription
+                cachePlan(name: response.subscription.displayName, isPro: response.subscription.isPro)
+                usageQuota = usage
+                await refreshDNSPreference(showErrors: false)
+                guard isCurrentAppleAccount(accountUserID, generation: transactionGeneration) else { return }
+                await appleStore.finish(transactionID: transaction.id)
+                guard isCurrentAppleAccount(accountUserID, generation: transactionGeneration) else { return }
+                unresolvedAppleTransactionIDs.remove(transaction.id)
+                logger.info("Apple subscription verification applied; account=\(accountUserID, privacy: .private(mask: .hash)), isPro=\(response.subscription.isPro, privacy: .public), transferred=\(response.transferred, privacy: .public)")
+                applePurchaseMessage = response.transferred
+                    ? "Your Apple subscription was moved to this LibreGuard account and Pro is now active."
+                    : (response.subscription.isPro ? "LibreGuard Pro is now active." : "Apple confirmed the transaction, but the subscription is not currently active.")
+                return
+            } catch let error as APIError {
+                guard isCurrentAppleAccount(accountUserID, generation: transactionGeneration) else { return }
+                if error.code == "APPLE_SUBSCRIPTION_TRANSFER_REQUIRED", !allowTransfer {
+                    unresolvedAppleTransactionIDs.insert(transaction.id)
+                    pendingAppleSubscriptionTransfer = PendingAppleSubscriptionTransfer(transaction: transaction)
+                    return
+                }
+                if isRetryableAppleVerificationError(error), attempt + 1 < appleVerificationRetryDelays.count { continue }
+                logApplePurchaseFailure(error, stage: "verifying the Apple transaction")
+                if error.code == "APPLE_TRANSACTION_NOT_ENTITLED",
+                   let expirationDate = transaction.expirationDate,
+                   expirationDate <= Date() {
+                    let current = await appleStore.currentEntitlements()
+                    guard isCurrentAppleAccount(accountUserID, generation: transactionGeneration) else { return }
+                    if !current.contains(where: isLibreGuardAppleUpdate) {
+                        await appleStore.finish(transactionID: transaction.id)
+                        guard isCurrentAppleAccount(accountUserID, generation: transactionGeneration) else { return }
+                        unresolvedAppleTransactionIDs.remove(transaction.id)
+                        appleExpiredTransactionNeedsRetry = true
+                        applePurchaseMessage = "This previous Apple subscription has expired. Select Subscribe again to start a new purchase."
+                        return
+                    }
+                }
+                unresolvedAppleTransactionIDs.insert(transaction.id)
+                applePurchaseMessage = applePurchaseErrorMessage(error)
+                return
+            } catch {
+                guard isCurrentAppleAccount(accountUserID, generation: transactionGeneration) else { return }
+                logApplePurchaseFailure(error, stage: "verifying the Apple transaction")
+                unresolvedAppleTransactionIDs.insert(transaction.id)
+                applePurchaseMessage = applePurchaseErrorMessage(error)
                 return
             }
-            subscription = response.subscription
-            cachePlan(name: response.subscription.displayName, isPro: response.subscription.isPro)
-            usageQuota = usage
-            await refreshDNSPreference(showErrors: false)
-            await appleStore.finish(transactionID: transaction.id)
-            logger.info(
-                "Apple subscription verification applied; account=\(accountUserID, privacy: .private(mask: .hash)), plan=\(response.subscription.displayName, privacy: .public), isPro=\(response.subscription.isPro, privacy: .public), transferred=\(response.transferred, privacy: .public)"
-            )
-            applePurchaseMessage = response.transferred
-                ? "Your Apple subscription was moved to this LibreGuard account and Pro is now active."
-                : "LibreGuard Pro is now active."
-        } catch let error as APIError where error.code == "APPLE_SUBSCRIPTION_TRANSFER_REQUIRED" && !allowTransfer {
-            pendingAppleSubscriptionTransfer = PendingAppleSubscriptionTransfer(transaction: transaction)
-        } catch {
-            present(error)
+        }
+    }
+
+    private func isRetryableAppleVerificationError(_ error: APIError) -> Bool {
+        error.code == "TRANSPORT_FAILURE"
+            || error.code == "APPLE_VERIFICATION_RETRY"
+            || error.code == "APPLE_VERIFICATION_UNAVAILABLE"
+            || (error.statusCode ?? 0) >= 500
+    }
+
+    private func applePurchaseErrorMessage(_ error: Error) -> String {
+        guard let apiError = error as? APIError else { return error.localizedDescription }
+        if (apiError.statusCode ?? 0) >= 500 {
+            return "LibreGuard could not confirm this Apple purchase yet. Retry Restore Purchases when connected."
+        }
+        switch apiError.code {
+        case "APPLE_ACCOUNT_TOKEN_MISMATCH":
+            return "This Apple purchase is linked to a different account. Contact support to resolve the account link."
+        case "APPLE_SUBSCRIPTION_FAMILY_CONFLICT":
+            return "Another active Apple subscription is already linked to this account."
+        case "ACTIVE_EXTERNAL_SUBSCRIPTION":
+            return "An active Pro subscription from another payment provider is already linked to this account."
+        case "APPLE_SANDBOX_TESTER_REQUIRED":
+            return "This account is not enabled for Apple Sandbox purchases."
+        case "APPLE_TRANSACTION_NOT_ENTITLED":
+            return "The Apple subscription is not currently active."
+        case "APPLE_VERIFICATION_RETRY", "APPLE_VERIFICATION_UNAVAILABLE", "TRANSPORT_FAILURE":
+            return "LibreGuard could not confirm this Apple purchase yet. Retry Restore Purchases when connected."
+        default:
+            return apiError.localizedDescription
+        }
+    }
+
+    private func logApplePurchaseFailure(_ error: Error, stage: String) {
+        if let apiError = error as? APIError {
+            logger.error("Apple purchase failed while \(stage, privacy: .public); HTTP=\(apiError.statusCode ?? 0, privacy: .public), backendCode=\(apiError.code ?? "none", privacy: .public)")
+        } else {
+            let nsError = error as NSError
+            logger.error("Apple purchase failed while \(stage, privacy: .public) [\(nsError.domain, privacy: .public):\(nsError.code, privacy: .public)]")
         }
     }
 

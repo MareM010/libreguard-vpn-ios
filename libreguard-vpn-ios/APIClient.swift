@@ -60,6 +60,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         category: "API"
     )
     private let baseURL: URL
+    private let productionAppleBaseURL: URL
     private let sandboxAppleBaseURL: URL
     private let urlSession: URLSession
     private let sessionStore: SessionStoring
@@ -70,6 +71,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
 
     init(
         baseURL: URL = URL(string: "https://management.libreguard.net")!,
+        productionAppleBaseURL: URL = URL(string: "https://management.libreguard.net")!,
         sandboxAppleBaseURL: URL = URL(string: "https://sandbox.management.libreguard.net")!,
         urlSession: URLSession = .shared,
         sessionStore: SessionStoring? = nil,
@@ -77,6 +79,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         deviceKeyStore: VPNDeviceKeyProviding? = nil
     ) {
         self.baseURL = baseURL
+        self.productionAppleBaseURL = productionAppleBaseURL
         self.sandboxAppleBaseURL = sandboxAppleBaseURL
         self.urlSession = urlSession
         self.sessionStore = sessionStore ?? SessionStore()
@@ -349,7 +352,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         let response: AppleAccountTokenResponse = try await send(
             .get,
             path: "/api/subscription/apple/account-token",
-            requestBaseURL: appleBaseURL(for: environment)
+            requestBaseURL: try appleBaseURL(for: environment)
         )
         return response.appAccountToken
     }
@@ -366,12 +369,16 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
                 signedTransactionInfo: signedTransactionInfo,
                 allowTransfer: allowTransfer
             ),
-            requestBaseURL: appleBaseURL(for: environment)
+            requestBaseURL: try appleBaseURL(for: environment)
         )
     }
 
-    private func appleBaseURL(for environment: AppleAPIEnvironment) -> URL {
-        environment == .sandbox ? sandboxAppleBaseURL : baseURL
+    private func appleBaseURL(for environment: AppleAPIEnvironment) throws -> URL {
+        switch environment {
+        case .production: productionAppleBaseURL
+        case .sandbox: sandboxAppleBaseURL
+        case .xcode: throw AppleStoreError.unsupportedEnvironment
+        }
     }
 
     func fetchTwoFactorStatus() async throws -> TwoFactorStatus {
@@ -496,7 +503,20 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         }
 
         do {
-            let (data, response) = try await urlSession.data(for: request)
+            let (data, response): (Data, URLResponse)
+            do {
+                (data, response) = try await urlSession.data(for: request)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if Task.isCancelled || (error as? URLError)?.code == .cancelled {
+                    throw CancellationError()
+                }
+                let diagnostic = Self.transportDiagnostic(for: error)
+                Self.saveTransportDiagnostic(diagnostic)
+                Self.logger.error("API transport request failed: \(diagnostic, privacy: .public)")
+                throw APIError(message: "Unable to reach LibreGuard. Check your connection and try again.", code: "TRANSPORT_FAILURE")
+            }
             guard let http = response as? HTTPURLResponse else {
                 throw APIError(message: "The server returned an invalid response.")
             }

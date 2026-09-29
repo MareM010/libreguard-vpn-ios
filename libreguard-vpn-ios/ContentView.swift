@@ -2169,6 +2169,12 @@ private struct UpgradeView: View {
                                     action: { app.selectedAppleProductID = product.id }
                                 )
                             }
+                            if app.appleSubscriptionProducts.isEmpty {
+                                Button("Retry Loading Plans") {
+                                    Task { await app.loadAppleSubscriptions() }
+                                }
+                                .font(.subheadline.weight(.semibold))
+                            }
                         }
                     }
 
