@@ -1163,6 +1163,27 @@ struct libreguard_vpn_iosTests {
         #expect(app.applePurchaseMessage?.contains("Local Xcode StoreKit") == true)
     }
 
+    @Test func localStoreKitPurchaseCannotBeSentToTheLiveVerifier() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        backend.subscriptionResults = [.success(try subscriptionStatus(plan: "Free", isPro: false))]
+        let store = ControllableAppleSubscriptionStore()
+        store.purchaseResult = .success(.success(AppleStoreTransaction(
+            id: 100,
+            productID: AppleSubscriptionCatalog.monthlyProductID,
+            signedTransactionInfo: "locally-signed-transaction",
+            environment: .xcode
+        )))
+        let app = await makeApplePurchaseApp(backend: backend, store: store)
+
+        await app.purchaseSelectedAppleSubscription()
+
+        #expect(store.purchaseCalls.count == 1)
+        #expect(backend.appleVerificationAllowTransfer.isEmpty)
+        #expect(store.finishedIDs.isEmpty)
+        #expect(!app.isProUser)
+        #expect(app.applePurchaseMessage?.contains("StoreKit Configuration to None") == true)
+    }
+
     @Test func applePurchaseRestoresExistingEntitlementInsteadOfChargingAgain() async throws {
         let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
         let store = ControllableAppleSubscriptionStore()
@@ -1273,6 +1294,44 @@ struct libreguard_vpn_iosTests {
         await failedApp.restoreApplePurchases()
         #expect(failedStore.finishedIDs == [251])
         #expect(failedApp.isProUser)
+    }
+
+    @Test func appleVerificationWinsOverAnEarlierAccountRefresh() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        backend.holdFirstSubscriptionRequest = true
+        backend.subscriptionResults = [.success(try subscriptionStatus(plan: "Free", isPro: false))]
+        backend.appleVerificationResults = [
+            .success(AppleTransactionVerificationResponse(
+                subscription: try subscriptionStatus(plan: "Pro", isPro: true),
+                transferred: false
+            ))
+        ]
+        let store = ControllableAppleSubscriptionStore()
+        store.currentResults = [.verified(appleTransaction(id: 252))]
+        let app = await makeApplePurchaseApp(backend: backend, store: store)
+
+        let refresh = Task { await app.refreshAccountData(showErrors: false) }
+        await backend.waitForFirstSubscriptionRequest()
+        await app.restoreApplePurchases()
+        backend.releaseFirstSubscriptionRequest()
+        await refresh.value
+
+        #expect(store.finishedIDs == [252])
+        #expect(app.isProUser)
+        #expect(app.subscription?.isPro == true)
+    }
+
+    @Test func restoreWithoutIOSPurchaseKeepsExistingLibreGuardProStatus() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        backend.subscriptionResults = [.success(try subscriptionStatus(plan: "Pro", isPro: true))]
+        let store = ControllableAppleSubscriptionStore()
+        let app = await makeApplePurchaseApp(backend: backend, store: store)
+
+        await app.restoreApplePurchases()
+
+        #expect(app.isProUser)
+        #expect(app.applePurchaseMessage?.contains("Pro is active") == true)
+        #expect(store.finishedIDs.isEmpty)
     }
 
     @Test func applePurchaseTransferRequiresConfirmationBeforeFinishing() async throws {
@@ -1626,6 +1685,17 @@ struct libreguard_vpn_iosTests {
 
         #expect(subscription.planTier == .pro)
         #expect(subscription.displayName == "Pro")
+    }
+
+    @Test func appleAppStorePaymentTypeShowsSubscriptionManagement() throws {
+        var payload = subscriptionJSON(plan: "Pro", isPro: true)
+        payload["paymentType"] = "AppleAppStore"
+        let subscription = try JSONDecoder().decode(
+            libreguard_vpn_ios.SubscriptionStatus.self,
+            from: JSONSerialization.data(withJSONObject: payload)
+        )
+
+        #expect(subscription.isAppleBilled)
     }
 
     @Test func subscriptionDisplayNameUsesExplicitEntitlementWhenPlanNameIsStale() throws {

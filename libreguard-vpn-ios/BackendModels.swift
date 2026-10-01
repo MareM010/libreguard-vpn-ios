@@ -805,7 +805,9 @@ struct SubscriptionStatus: Decodable, Equatable {
     }
 
     var isAppleBilled: Bool {
-        paymentType?.caseInsensitiveCompare("Apple") == .orderedSame
+        guard let paymentType else { return false }
+        return paymentType.caseInsensitiveCompare("AppleAppStore") == .orderedSame
+            || paymentType.caseInsensitiveCompare("Apple") == .orderedSame
     }
 }
 

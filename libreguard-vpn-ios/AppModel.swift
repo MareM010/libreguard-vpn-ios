@@ -128,6 +128,7 @@ final class AppModel: ObservableObject {
     private var cachedPlanUserID: String?
     private var hasCachedPlan = false
     private var accountStateGeneration: UInt = 0
+    private var verifiedAppleSubscriptionRevision: UInt = 0
     private var serverRefreshGeneration: UInt = 0
     private var serverRefreshTask: Task<Void, Never>?
     private var latencyMeasurementTask: Task<[Int: Int], Never>?
@@ -754,6 +755,7 @@ final class AppModel: ObservableObject {
         guard let accountUserID = (session ?? api.storedSession)?.userId else { return }
         guard !isRefreshingAccount else { return }
         let refreshGeneration = accountStateGeneration
+        let subscriptionRevision = verifiedAppleSubscriptionRevision
         logger.info(
             "Account refresh started; account=\(accountUserID, privacy: .private(mask: .hash)), generation=\(String(refreshGeneration), privacy: .public)"
         )
@@ -795,11 +797,15 @@ final class AppModel: ObservableObject {
 
         switch subscription {
         case let .success(value):
-            self.subscription = value
-            cachePlan(name: value.displayName, isPro: value.isPro)
-            logger.info(
-                "Subscription refresh applied; account=\(accountUserID, privacy: .private(mask: .hash)), plan=\(value.displayName, privacy: .public), isPro=\(value.isPro, privacy: .public)"
-            )
+            if verifiedAppleSubscriptionRevision == subscriptionRevision {
+                self.subscription = value
+                cachePlan(name: value.displayName, isPro: value.isPro)
+                logger.info(
+                    "Subscription refresh applied; account=\(accountUserID, privacy: .private(mask: .hash)), plan=\(value.displayName, privacy: .public), isPro=\(value.isPro, privacy: .public)"
+                )
+            } else {
+                logger.info("Discarded subscription refresh that started before Apple purchase verification completed")
+            }
         case let .failure(error):
             logger.error(
                 "Subscription refresh failed; account=\(accountUserID, privacy: .private(mask: .hash)), error=\(String(describing: error), privacy: .public)"
@@ -1011,7 +1017,9 @@ final class AppModel: ObservableObject {
                     subscription = currentStatus
                     cachePlan(name: currentStatus.displayName, isPro: currentStatus.isPro)
                 }
-                applePurchaseMessage = "No active LibreGuard Pro subscription was found for this Apple Account."
+                applePurchaseMessage = currentStatus?.isPro == true
+                    ? "Pro is active on this LibreGuard account. There is no iOS App Store purchase to restore for this Apple Account."
+                    : "No active iOS App Store subscription was found for this Apple Account."
                 return
             }
             for update in eligible {
@@ -1831,6 +1839,7 @@ final class AppModel: ObservableObject {
                 guard isCurrentAppleAccount(accountUserID, generation: transactionGeneration) else { return }
                 let usage = try? await api.fetchUsage()
                 guard isCurrentAppleAccount(accountUserID, generation: transactionGeneration) else { return }
+                verifiedAppleSubscriptionRevision &+= 1
                 subscription = response.subscription
                 cachePlan(name: response.subscription.displayName, isPro: response.subscription.isPro)
                 usageQuota = usage

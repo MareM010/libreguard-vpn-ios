@@ -2155,6 +2155,20 @@ private struct UpgradeView: View {
                     }
                 }
 
+                if let message = app.applePurchaseMessage {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "info.circle.fill")
+                        Text(message)
+                            .font(.subheadline)
+                    }
+                    .foregroundStyle(Theme.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(Theme.card, in: RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
+                    .accessibilityIdentifier("apple-purchase-message")
+                }
+
                 if app.shouldShowUpgradePrompt {
                     PlanCard(
                         title: "Free Plan",
@@ -2229,13 +2243,6 @@ private struct UpgradeView: View {
                             .font(.subheadline.weight(.semibold))
                             .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
                             .disabled(app.isPurchasingAppleSubscription || app.isRestoringApplePurchases)
-
-                            if let message = app.applePurchaseMessage {
-                                Text(message)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .multilineTextAlignment(.center)
-                            }
 
                             Text("Payment will be charged to your Apple Account. Subscriptions renew automatically unless canceled at least 24 hours before the end of the current period.")
                                 .font(.caption)

@@ -89,7 +89,7 @@ enum AppleStoreError: LocalizedError {
         case .unavailableEnvironment:
             "The App Store environment could not be verified. Check your Apple account and try again."
         case .unsupportedEnvironment:
-            "Local Xcode StoreKit transactions cannot be verified by the live subscription service. Use an Apple Sandbox tester."
+            "Local Xcode StoreKit purchases cannot activate LibreGuard Pro because Apple does not sign them. In Xcode, set the Run scheme's StoreKit Configuration to None, then purchase with an Apple Sandbox tester."
         }
     }
 }
@@ -117,13 +117,13 @@ final class AppleSubscriptionStore: AppleSubscriptionStoreServing {
 
     func purchaseEnvironment() async throws -> AppleAPIEnvironment {
         do {
-            return try environment(from: await AppTransaction.shared)
+            return try environment(from: try await AppTransaction.shared)
         } catch {
             logEnvironmentFailure(error, operation: "AppTransaction.shared")
         }
         do {
             // This method is called only from the Subscribe action. Refresh may prompt for Apple credentials.
-            return try environment(from: await AppTransaction.refresh())
+            return try environment(from: try await AppTransaction.refresh())
         } catch {
             logEnvironmentFailure(error, operation: "AppTransaction.refresh")
             throw AppleStoreError.unavailableEnvironment
