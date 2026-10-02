@@ -3,6 +3,7 @@ import Combine
 import OSLog
 import UserNotifications
 import AuthenticationServices
+import UIKit
 
 enum SessionCleanupState: Equatable {
     case ending

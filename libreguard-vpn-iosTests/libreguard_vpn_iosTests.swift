@@ -2097,6 +2097,35 @@ struct libreguard_vpn_iosTests {
         #expect(backend.googleContinueTokens == ["ticket"])
     }
 
+    @Test func cancelledGoogleFactorCannotStoreSessionOrClearANewerLogin() async throws {
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        backend.googleBeginResponse = try googleBegin()
+        backend.googleCompleteResult = .success(try JSONDecoder().decode(LoginResponse.self, from: Data("""
+            {"requiresTwoFactor":true,"pendingLoginToken":"pending-factor","email":"person@example.com"}
+            """.utf8)))
+        backend.holdFactorResponse = true
+        let google = ControlledGoogleSigner()
+        let app = makeStartupApp(backend: backend, vpn: StartupVPNManager(status: .disconnected), defaults: UserDefaults(suiteName: UUID().uuidString)!, google: google)
+        await app.loginWithGoogle()
+        guard case let .twoFactor(challenge) = app.route else { Issue.record("Expected factor"); return }
+        let oldFactor = Task { await app.verifyTwoFactor(challenge, code: "123456", recovery: false) }
+        for _ in 0..<100 where !backend.hasPendingFactorResponse { await Task.yield() }
+        #expect(backend.hasPendingFactorResponse)
+        app.showLogin()
+        google.holdAuthorization = true
+        let newerLogin = Task { await app.loginWithGoogle() }
+        for _ in 0..<100 where google.calls < 2 { await Task.yield() }
+        #expect(google.calls == 2)
+        backend.completeFactorResponse(with: .success(try loginResponse(userId: "must-not-store")))
+        await oldFactor.value
+        #expect(app.session == nil)
+        #expect(backend.storedSession == nil)
+        #expect(app.isAuthenticating)
+        app.showLogin()
+        await newerLogin.value
+        #expect(!app.isAuthenticating)
+    }
+
     private var googleBeginJSON: [String: Any] {
         [
             "attemptId": "214e1228-4266-4b82-9cb7-41d1da0b7d41",
@@ -2448,6 +2477,14 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
     var googleContinueTokens: [String] = []
     var googleRemovedDevices: [[Int]] = []
     var factorResult: Result<LoginResponse, Error>?
+    var holdFactorResponse = false
+    private var pendingFactorResponse: CheckedContinuation<LoginResponse, Error>?
+    var hasPendingFactorResponse: Bool { pendingFactorResponse != nil }
+    func completeFactorResponse(with result: Result<LoginResponse, Error>) {
+        let response = pendingFactorResponse
+        pendingFactorResponse = nil
+        response?.resume(with: result)
+    }
     var passwordLoginResponse: LoginResponse?
     var appleLoginResponse: LoginResponse?
     var subscriptionResults: [Result<libreguard_vpn_ios.SubscriptionStatus, Error>] = []
@@ -2524,6 +2561,9 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
         return appleLoginResponse
     }
     func verifyTwoFactor(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse {
+        if holdFactorResponse {
+            return try await withCheckedThrowingContinuation { pendingFactorResponse = $0 }
+        }
         guard let factorResult else { return try unsupported() }
         return try factorResult.get()
     }
