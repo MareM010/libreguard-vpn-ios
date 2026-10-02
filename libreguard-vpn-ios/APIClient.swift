@@ -63,11 +63,13 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
     private let baseURL: URL
     private let productionAppleBaseURL: URL
     private let sandboxAppleBaseURL: URL
-    private let urlSession: URLSession
+    private let transport: (URLRequest) async throws -> (Data, URLResponse)
     private let sessionStore: SessionStoring
     private let deviceStore: DeviceIdentifying
     private let deviceKeyStore: VPNDeviceKeyProviding
     private var refreshTask: Task<AuthSession, Error>?
+    private var refreshTaskID: UUID?
+    private var sessionGeneration: UInt64 = 0
     var onSessionInvalidated: (() -> Void)?
 
     init(
@@ -75,6 +77,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         productionAppleBaseURL: URL = URL(string: "https://management.libreguard.net")!,
         sandboxAppleBaseURL: URL = URL(string: "https://sandbox.management.libreguard.net")!,
         urlSession: URLSession = .shared,
+        transport: ((URLRequest) async throws -> (Data, URLResponse))? = nil,
         sessionStore: SessionStoring? = nil,
         deviceStore: DeviceIdentifying? = nil,
         deviceKeyStore: VPNDeviceKeyProviding? = nil
@@ -82,7 +85,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         self.baseURL = baseURL
         self.productionAppleBaseURL = productionAppleBaseURL
         self.sandboxAppleBaseURL = sandboxAppleBaseURL
-        self.urlSession = urlSession
+        self.transport = transport ?? { try await urlSession.data(for: $0) }
         self.sessionStore = sessionStore ?? SessionStore()
         self.deviceStore = deviceStore ?? DeviceIdentityStore()
         self.deviceKeyStore = deviceKeyStore ?? VPNDeviceKeyStore()
@@ -273,23 +276,39 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
             deviceId: response.deviceId ?? deviceId
         )
         try sessionStore.save(session)
+        retireRefresh()
         return session
     }
 
     func logout() async {
-        defer { sessionStore.clear() }
-        guard let session = sessionStore.session else { return }
+        let session = sessionStore.session
+        clearLocalSession()
+        guard let session else { return }
         let _: MessageResponse? = try? await send(
             .post,
             path: "/api/logout",
             body: LogoutRequest(refreshToken: session.refreshToken),
-            authorized: true,
-            retryAfterRefresh: false
+            authorized: false,
+            retryAfterRefresh: false,
+            explicitBearerToken: session.accessToken
         )
     }
 
     func clearLocalSession() {
+        retireRefresh()
         sessionStore.clear()
+    }
+
+    private func retireRefresh() {
+        sessionGeneration &+= 1
+        let previous = refreshTask
+        refreshTask = nil
+        refreshTaskID = nil
+        previous?.cancel()
+    }
+
+    private func isCurrentSession(_ existing: AuthSession, generation: UInt64) -> Bool {
+        sessionGeneration == generation && sessionStore.session == existing
     }
 
     func fetchServers() async throws -> [VPNServer] {
@@ -421,10 +440,15 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         guard let existing = sessionStore.session else {
             throw APIError(statusCode: 401, message: "Your session has expired.", code: "SESSION_EXPIRED", requiresLogin: true)
         }
+        let generation = sessionGeneration
+        let operationID = UUID()
         let keyPayload = try deviceKeyStore.publicKeyPayload()
 
         let task = Task { @MainActor [weak self] () throws -> AuthSession in
-            guard let self else { throw CancellationError() }
+            guard let self, self.isCurrentSession(existing, generation: generation) else {
+                throw CancellationError()
+            }
+            try Task.checkCancellation()
             let response: LoginResponse = try await self.send(
                 .post,
                 path: "/api/login/refresh",
@@ -439,15 +463,34 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
                 authorized: false,
                 retryAfterRefresh: false
             )
+            try Task.checkCancellation()
+            guard self.isCurrentSession(existing, generation: generation) else {
+                throw CancellationError()
+            }
+            guard response.userId == existing.userId,
+                  response.deviceId == nil || response.deviceId == existing.deviceId else {
+                throw APIError(message: "The server returned an invalid refreshed session.")
+            }
             return try self.adoptSession(from: response)
         }
         refreshTask = task
-        defer { refreshTask = nil }
+        refreshTaskID = operationID
+        defer {
+            if refreshTaskID == operationID {
+                refreshTask = nil
+                refreshTaskID = nil
+            }
+        }
         do {
             return try await task.value
         } catch {
+            // A superseded refresh cannot invalidate a newer login, even if
+            // its original credentials receive a late 401 response.
+            guard isCurrentSession(existing, generation: generation) else {
+                throw CancellationError()
+            }
             if Self.shouldInvalidateSession(for: error) {
-                sessionStore.clear()
+                clearLocalSession()
                 onSessionInvalidated?()
             }
             throw error
@@ -485,7 +528,8 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         body: Body?,
         authorized: Bool = true,
         retryAfterRefresh: Bool = true,
-        requestBaseURL: URL? = nil
+        requestBaseURL: URL? = nil,
+        explicitBearerToken: String? = nil
     ) async throws -> Response {
         var requestURL = (requestBaseURL ?? baseURL).appending(path: path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? path)
         if let query = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).dropFirst().first,
@@ -493,6 +537,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
             components.query = String(query)
             requestURL = components.url ?? requestURL
         }
+        let requestGeneration = sessionGeneration
         var request = URLRequest(url: requestURL)
         request.httpMethod = method.rawValue
         request.timeoutInterval = 20
@@ -501,24 +546,28 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
             request.httpBody = try JSONEncoder().encode(body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        if authorized, let token = sessionStore.session?.accessToken {
+        if let token = explicitBearerToken ?? (authorized ? sessionStore.session?.accessToken : nil) {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
         do {
             let (data, response): (Data, URLResponse)
             do {
-                (data, response) = try await urlSession.data(for: request)
+                (data, response) = try await transport(request)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
                 if Task.isCancelled || (error as? URLError)?.code == .cancelled {
                     throw CancellationError()
                 }
+                if authorized, sessionGeneration != requestGeneration { throw CancellationError() }
                 let diagnostic = Self.transportDiagnostic(for: error)
                 Self.saveTransportDiagnostic(diagnostic)
                 Self.logger.error("API transport request failed: \(diagnostic, privacy: .public)")
                 throw APIError(message: "Unable to reach LibreGuard. Check your connection and try again.", code: "TRANSPORT_FAILURE")
+            }
+            if authorized, sessionGeneration != requestGeneration {
+                throw CancellationError()
             }
             guard let http = response as? HTTPURLResponse else {
                 throw APIError(message: "The server returned an invalid response.")
@@ -529,7 +578,8 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
             }
 
             if authorized, http.statusCode == 401, retryAfterRefresh {
-                _ = try await refreshSession()
+                let refreshed = try await refreshSession()
+                guard sessionStore.session == refreshed else { throw CancellationError() }
                 return try await send(
                     method,
                     path: path,

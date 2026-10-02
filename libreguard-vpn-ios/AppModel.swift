@@ -31,6 +31,7 @@ final class AppModel: ObservableObject {
     @Published var prefilledEmail = ""
     @Published var session: AuthSession? {
         didSet {
+            if oldValue != session { sessionStateGeneration &+= 1 }
             if session != nil {
                 hasCompletedUnauthenticatedCleanup = false
             }
@@ -134,6 +135,7 @@ final class AppModel: ObservableObject {
     private var cachedPlanUserID: String?
     private var hasCachedPlan = false
     private var accountStateGeneration: UInt = 0
+    private var sessionStateGeneration: UInt = 0
     private var verifiedAppleSubscriptionRevision: UInt = 0
     private var serverRefreshGeneration: UInt = 0
     private var serverRefreshTask: Task<Void, Never>?
@@ -282,8 +284,15 @@ final class AppModel: ObservableObject {
         }
         if let invalidationObserver = resolvedAPI as? SessionInvalidationObserving {
             invalidationObserver.onSessionInvalidated = { [weak self] in
+                guard let self, self.api.storedSession == nil else { return }
+                let invalidatedSession = self.session
+                let generation = self.sessionStateGeneration
+                let googleID = self.googleLoginID
                 Task { @MainActor [weak self] in
-                    await self?.beginSessionCleanup(intent: .invalidSession)
+                    guard let self, self.sessionStateGeneration == generation,
+                          self.session == invalidatedSession, self.api.storedSession == nil,
+                          self.googleLoginID == googleID else { return }
+                    await self.beginSessionCleanup(intent: .invalidSession)
                 }
             }
         }
@@ -297,7 +306,10 @@ final class AppModel: ObservableObject {
         startAppleTransactionListener()
         startAppleCredentialRevocationObserver()
         guard case .launching = route else { return }
+        let generation = sessionStateGeneration
         await refreshNotificationAuthorizationStatus()
+        guard sessionStateGeneration == generation else { return }
+        guard case .launching = route else { return }
         if ProcessInfo.processInfo.arguments.contains("--uitesting-reset") {
             api.clearLocalSession()
             appleCredentialBindingStore.clear()
@@ -314,6 +326,8 @@ final class AppModel: ObservableObject {
 
         await vpn.refreshStatus()
         await recoverStoppedIKEv2ProfileIfNeeded(trigger: .lifecycleRefresh)
+        guard sessionStateGeneration == generation else { return }
+        guard case .launching = route else { return }
         logger.info("Launch VPN status=\(String(describing: self.vpnStatus), privacy: .public)")
         let mayHavePersistedVPN = vpnStatus.isConnected
             || vpnStatus.isBusy
@@ -327,29 +341,43 @@ final class AppModel: ObservableObject {
         }
 
         do {
-            guard let restoredSession = try await api.restoreSession() else {
+            let restoredSession = try await api.restoreSession()
+            guard sessionStateGeneration == generation else { return }
+            guard case .launching = route else { return }
+            guard let restoredSession else {
+                guard api.storedSession == nil || api.storedSession == storedSession else { return }
                 await beginSessionCleanup(intent: .invalidSession)
                 return
             }
+            guard api.storedSession == restoredSession else { return }
             logger.info("Session restore succeeded; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
             session = restoredSession
-            guard await checkAppleCredentialStateIfNeeded() else { return }
+            guard await checkAppleCredentialStateIfNeeded(), session == restoredSession,
+                  api.storedSession == restoredSession else { return }
             await finishAuthenticatedStartup()
+        } catch is CancellationError {
+            return
         } catch let error as APIError where error.code == "APP_VERSION_BLOCKED" || error.code == "APP_VERSION_REQUIRED" {
+            guard sessionStateGeneration == generation, case .launching = route,
+                  api.storedSession == nil || api.storedSession == storedSession else { return }
             logger.error("Session restore was blocked by the app version; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
             presentedError = error
             await beginSessionCleanup(intent: .missingSession(showMessage: false))
         } catch let error as APIError where isAuthenticationFailure(error) {
+            guard sessionStateGeneration == generation, case .launching = route,
+                  api.storedSession == nil || api.storedSession == storedSession else { return }
             logger.info("Session restore was rejected by authentication; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
             await beginSessionCleanup(intent: .invalidSession)
         } catch {
-            // Availability takes precedence over a temporary service or
-            // connectivity failure. The cached account remains visible while
-            // a foreground retry validates it again.
+            guard sessionStateGeneration == generation, case .launching = route,
+                  api.storedSession == storedSession else { return }
+            // Keep the same account visible during a temporary service outage.
             logger.info("Session restore deferred after a transient failure; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
             session = storedSession
-            guard await checkAppleCredentialStateIfNeeded() else { return }
+            guard await checkAppleCredentialStateIfNeeded(), session == storedSession,
+                  api.storedSession == storedSession else { return }
             await continueWithCachedSessionAfterTransientRestoreFailure()
+            guard session == storedSession, api.storedSession == storedSession else { return }
             scheduleSessionRestoreRetry()
         }
     }
@@ -362,27 +390,39 @@ final class AppModel: ObservableObject {
               sessionCleanupTask == nil,
               case .authenticated = route,
               let cachedSession = session ?? api.storedSession else { return }
+        let generation = sessionStateGeneration
+        let storedSnapshot = api.storedSession
 
         sessionRestoreRetryTask?.cancel()
         sessionRestoreRetryTask = nil
 
         do {
-            guard let restoredSession = try await api.restoreSession() else {
+            let restoredSession = try await api.restoreSession()
+            guard sessionStateGeneration == generation, session == cachedSession,
+                  case .authenticated = route else { return }
+            guard let restoredSession else {
+                guard api.storedSession == nil || api.storedSession == storedSnapshot else { return }
                 await beginSessionCleanup(intent: .invalidSession)
                 return
             }
+            guard api.storedSession == restoredSession else { return }
             logger.info("Deferred session validation succeeded; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
             session = restoredSession
-            guard await checkAppleCredentialStateIfNeeded() else { return }
+            guard await checkAppleCredentialStateIfNeeded(), session == restoredSession,
+                  api.storedSession == restoredSession else { return }
             cancelSessionRestoreRetry()
             await finishAuthenticatedStartup()
+        } catch is CancellationError {
+            return
         } catch let error as APIError where isAuthenticationFailure(error) {
+            guard sessionStateGeneration == generation, session == cachedSession,
+                  api.storedSession == nil || api.storedSession == storedSnapshot,
+                  case .authenticated = route else { return }
             logger.info("Deferred session validation was rejected by authentication; vpnStatus=\(String(describing: self.vpnStatus), privacy: .public)")
             await beginSessionCleanup(intent: .invalidSession)
         } catch {
-            // Preserve the same cached account across bounded retries. This
-            // avoids an API outage causing a misleading signed-out screen.
-            session = cachedSession
+            guard sessionStateGeneration == generation, session == cachedSession,
+                  api.storedSession == storedSnapshot, case .authenticated = route else { return }
             scheduleSessionRestoreRetry()
         }
     }
@@ -393,45 +433,58 @@ final class AppModel: ObservableObject {
     }
 
     private func finishAuthenticatedStartup() async {
-        guard sessionCleanupTask == nil, session != nil else { return }
+        guard sessionCleanupTask == nil, let activeSession = session else { return }
+        let generation = sessionStateGeneration
 
         route = .authenticated
         sessionCleanupState = nil
         cancelSessionRestoreRetry()
         await refreshAccountData(showErrors: false)
-        guard sessionCleanupTask == nil, session != nil else { return }
+        guard sessionCleanupTask == nil, sessionStateGeneration == generation,
+              session == activeSession, api.storedSession == activeSession else { return }
 
         await ensureAppleRecovery()
-        guard sessionCleanupTask == nil, session != nil else { return }
+        guard sessionCleanupTask == nil, sessionStateGeneration == generation,
+              session == activeSession, api.storedSession == activeSession else { return }
 
         if vpnStatus.isConnected {
             refreshServers(trigger: .startup)
             await serverRefreshTask?.value
+            guard sessionCleanupTask == nil, sessionStateGeneration == generation,
+                  session == activeSession, api.storedSession == activeSession else { return }
             await restoreActiveSessionIfNeeded()
         } else {
             await liveActivityController.endAll()
+            guard sessionCleanupTask == nil, sessionStateGeneration == generation,
+                  session == activeSession, api.storedSession == activeSession else { return }
             finalizeOrphanedSessionIfNeeded(endedAt: Date())
         }
-        guard sessionCleanupTask == nil, session != nil else { return }
+        guard sessionCleanupTask == nil, sessionStateGeneration == generation,
+              session == activeSession, api.storedSession == activeSession else { return }
 
         await reconcileKillSwitchOnLaunch()
-        guard sessionCleanupTask == nil, session != nil else { return }
+        guard sessionCleanupTask == nil, sessionStateGeneration == generation,
+              session == activeSession, api.storedSession == activeSession else { return }
         await reconcileAutoConnectOnLaunch()
     }
 
     private func continueWithCachedSessionAfterTransientRestoreFailure() async {
-        guard sessionCleanupTask == nil, session != nil else { return }
+        guard sessionCleanupTask == nil, let activeSession = session else { return }
+        let generation = sessionStateGeneration
 
         route = .authenticated
         sessionCleanupState = nil
         if vpnStatus.isConnected {
             refreshServers(trigger: .startup)
             await serverRefreshTask?.value
+            guard sessionCleanupTask == nil, sessionStateGeneration == generation,
+                  session == activeSession, api.storedSession == activeSession else { return }
             await restoreActiveSessionIfNeeded()
         } else {
             finalizeOrphanedSessionIfNeeded(endedAt: Date())
         }
-        guard sessionCleanupTask == nil, session != nil else { return }
+        guard sessionCleanupTask == nil, sessionStateGeneration == generation,
+              session == activeSession, api.storedSession == activeSession else { return }
         await reconcileKillSwitchOnLaunch()
     }
 
@@ -1745,6 +1798,7 @@ final class AppModel: ObservableObject {
     }
 
     private func present(_ error: Error) {
+        if error is CancellationError { return }
         if let apiError = error as? APIError {
             if isAuthenticationFailure(apiError) {
                 forceSignOut()
@@ -1766,8 +1820,15 @@ final class AppModel: ObservableObject {
     }
 
     private func forceSignOut() {
+        let generation = sessionStateGeneration
+        let currentSession = session
+        let storedSnapshot = api.storedSession
+        let googleID = googleLoginID
         Task { @MainActor [weak self] in
-            await self?.beginSessionCleanup(intent: .invalidSession)
+            guard let self, self.sessionStateGeneration == generation,
+                  self.session == currentSession, self.api.storedSession == storedSnapshot,
+                  self.googleLoginID == googleID else { return }
+            await self.beginSessionCleanup(intent: .invalidSession)
         }
     }
 
@@ -1838,11 +1899,16 @@ final class AppModel: ObservableObject {
             return true
         }
 
+        let generation = sessionStateGeneration
         do {
             switch try await appleCredentialStateChecker.credentialState(for: binding.userIdentifier) {
             case .authorized, .unknown:
+                guard sessionStateGeneration == generation,
+                      session == activeSession || (session == nil && api.storedSession == activeSession) else { return false }
                 return true
             case .revoked, .notFound, .transferred:
+                guard sessionStateGeneration == generation,
+                      session == activeSession || (session == nil && api.storedSession == activeSession) else { return false }
                 await beginSessionCleanup(intent: .invalidSession)
                 return false
             }
