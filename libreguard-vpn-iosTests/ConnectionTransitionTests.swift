@@ -670,7 +670,10 @@ struct ConnectionTransitionTests {
         defaults: UserDefaults? = nil
     ) -> AppModel {
         let defaults = defaults ?? UserDefaults(suiteName: UUID().uuidString)!
+        // Keep connection tests independent of the live quota endpoint.
+        // The stub's immediate error exercises the documented fail-open path.
         let app = AppModel(
+            api: StartupBackendStub(storedSession: nil, restoreResults: []),
             vpnManager: manager,
             statisticsRecorder: recorder,
             trafficSampler: sampler,

@@ -73,8 +73,13 @@ final class GoogleSignInService: GoogleSigning {
 
     var isConfigured: Bool { configuration != nil }
 
-    init(configuration: GoogleNativeConfiguration? = GoogleNativeConfiguration.load(),
-         presenter: @escaping () -> UIViewController? = { UIApplication.shared.activeViewController }) {
+    convenience init() {
+        self.init(configuration: GoogleNativeConfiguration.load(),
+                  presenter: { UIApplication.shared.activeViewController })
+    }
+
+    init(configuration: GoogleNativeConfiguration?,
+         presenter: @escaping () -> UIViewController?) {
         self.configuration = configuration
         self.presenter = presenter
     }
@@ -157,7 +162,13 @@ final class GoogleSignInService: GoogleSigning {
 
     func handle(url: URL) -> Bool {
         guard activeID != nil, configuration?.acceptsCallback(url) == true else { return false }
-        return session?.resumeExternalUserAgentFlow(with: url) ?? false
+        guard let session else { return false }
+        do {
+            _ = try session.resumeExternalUserAgentFlow(url)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func finish(id: UUID, result: Result<GoogleAuthorizationResult, Error>, cancelBrowser: Bool = false) {

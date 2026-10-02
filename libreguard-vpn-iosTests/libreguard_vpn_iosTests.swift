@@ -754,7 +754,9 @@ struct libreguard_vpn_iosTests {
     }
 
     @Test func proQuotaDecodesNullableUnlimitedFields() throws {
-        let quota = try JSONDecoder().decode(UsageQuota.self, from: JSONSerialization.data(withJSONObject: [
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let quota = try decoder.decode(UsageQuota.self, from: JSONSerialization.data(withJSONObject: [
             "bytesUsed": 2_048,
             "bytesLimit": NSNull(),
             "bytesRemaining": NSNull(),
@@ -2462,7 +2464,7 @@ private final class DNSSettingsTestVPNManager: VPNManaging {
 }
 
 @MainActor
-private final class StartupBackendStub: BackendServicing, SessionInvalidationObserving {
+final class StartupBackendStub: BackendServicing, SessionInvalidationObserving {
     var storedSession: AuthSession?
     let deviceId = "startup-device"
     let appVersion = "1.0-test"
