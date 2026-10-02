@@ -2378,8 +2378,11 @@ final class AppModel: ObservableObject {
     private func scheduleStoppedIKEv2ProfileRecovery(
         trigger: StoppedProfileRecoveryTrigger
     ) {
+        // The status handler already checked the established descriptor before
+        // finalizing statistics. Finalization clears that descriptor, so recheck
+        // only the current routing/transition conditions when scheduling.
         guard stoppedProfileRecoveryTask == nil,
-              canStartStoppedIKEv2ProfileRecovery(trigger: trigger) else { return }
+              canContinueStoppedIKEv2ProfileRecovery(trigger: trigger) else { return }
 
         stoppedProfileRecoveryGeneration &+= 1
         let generation = stoppedProfileRecoveryGeneration
