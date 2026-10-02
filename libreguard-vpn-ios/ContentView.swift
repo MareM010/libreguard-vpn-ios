@@ -115,6 +115,7 @@ struct ContentView: View {
         }
         .sheet(item: $app.deviceLimitContext) { context in
             DeviceLimitView(context: context)
+                .interactiveDismissDisabled()
                 .presentationDetents([.medium, .large])
         }
         .alert(item: $app.presentedError) { error in
@@ -461,19 +462,15 @@ private struct LoginView: View {
                         Button {
                             Task { await app.loginWithGoogle() }
                         } label: {
-                            HStack(spacing: 12) {
-                                GoogleGlyph(size: 22 * scale)
-                                Text("Sign in with Google")
-                            }
-                            .font(.body.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12 * scale)
-                            .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
+                            Image("GoogleSignInButton")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(height: 48 * scale)
+                                .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.plain)
-                        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .disabled(app.isAuthenticating)
+                        .disabled(app.isAuthenticating || !app.isGoogleSignInConfigured)
+                        .accessibilityLabel("Sign in with Google")
                         .accessibilityIdentifier("google-sign-in-button")
                     }
 
@@ -586,19 +583,15 @@ private struct RegisterView: View {
                     Button {
                         Task { await app.loginWithGoogle(newsletterConsent: newsletterConsent) }
                     } label: {
-                        HStack(spacing: 12) {
-                            GoogleGlyph()
-                            Text("Continue with Google")
-                        }
-                        .font(.body.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border))
+                        Image("GoogleSignInButton")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(height: 48)
+                            .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.plain)
-                    .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .disabled(app.isAuthenticating)
+                    .disabled(app.isAuthenticating || !app.isGoogleSignInConfigured)
+                    .accessibilityLabel("Sign in with Google")
                     .accessibilityIdentifier("google-register-button")
 
                     PrimaryButton(title: app.isAuthenticating ? "Creating Account..." : "Create Account") {
@@ -801,7 +794,7 @@ private struct DeviceLimitView: View {
                     }
                     .disabled(selectedDeviceID == nil || app.isAuthenticating || app.retryAfterSeconds > 0)
                 } else {
-                    Text("This account uses two-factor authentication. The current backend cannot authorize password-based device removal during this login step.")
+                    Text("Device removal requires a current sign-in authorization. Manage devices on the website, then sign in again.")
                         .font(.caption)
                         .foregroundStyle(Theme.destructive)
                     PrimaryButton(title: "Manage Devices on Web") {
@@ -814,6 +807,7 @@ private struct DeviceLimitView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
+                        if case .google = context.attempt { app.cancelGoogleLogin() }
                         app.deviceLimitContext = nil
                         dismiss()
                     }
@@ -3488,21 +3482,6 @@ private struct DividerWithText: View {
                 .lineLimit(1)
             Rectangle().fill(Theme.border).frame(height: 1)
         }
-    }
-}
-
-private struct GoogleGlyph: View {
-    var size: CGFloat = 22
-
-    var body: some View {
-        ZStack {
-            Circle().fill(Color.white)
-            Text("G")
-                .font(.system(size: size * 0.68, weight: .bold))
-                .foregroundStyle(Theme.primary)
-        }
-        .frame(width: size, height: size)
-        .overlay(Circle().stroke(Color(.systemGray4), lineWidth: size * 0.045))
     }
 }
 

@@ -8,7 +8,9 @@ protocol BackendServicing: AnyObject {
     var appVersion: String { get }
     func restoreSession() async throws -> AuthSession?
     func login(email: String, password: String) async throws -> LoginResponse
-    func loginWithGoogle(idToken: String, newsletterConsent: Bool?) async throws -> LoginResponse
+    func beginGoogleLogin(newsletterConsent: Bool?) async throws -> GoogleNativeBeginResponse
+    func completeGoogleLogin(attempt: GoogleNativeBeginResponse, authorization: GoogleAuthorizationResult) async throws -> LoginResponse
+    func continueGoogleLogin(token: String, deviceIdsToRemove: [Int]) async throws -> LoginResponse
     func loginWithApple(idToken: String, nonce: String, newsletterConsent: Bool?) async throws -> LoginResponse
     func verifyTwoFactor(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse
     func verifyRecoveryCode(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse
@@ -18,7 +20,6 @@ protocol BackendServicing: AnyObject {
     func confirmationStatus(userId: String) async throws -> ConfirmationStatusResponse
     func resendConfirmation(email: String) async throws
     func removePasswordDevice(email: String, password: String, deviceId: Int) async throws
-    func removeGoogleDevice(idToken: String, deviceId: Int) async throws
     func removeAppleDevice(idToken: String, nonce: String, deviceId: Int) async throws
     func adoptSession(from response: LoginResponse) throws -> AuthSession
     func clearLocalSession()
@@ -115,23 +116,34 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         return response
     }
 
-    func loginWithGoogle(idToken: String, newsletterConsent: Bool? = nil) async throws -> LoginResponse {
-        let keyPayload = try deviceKeyStore.publicKeyPayload()
-        let response: LoginResponse = try await send(
-            .post,
-            path: "/api/login/google",
-            body: GoogleLoginRequest(
-                idToken: idToken,
-                newsletterConsent: newsletterConsent,
-                deviceId: deviceId,
-                appVersion: appVersion,
-                devicePublicKey: keyPayload.devicePublicKey,
-                devicePublicKeyId: keyPayload.devicePublicKeyId,
-                devicePublicKeyAlgorithm: keyPayload.devicePublicKeyAlgorithm
-            ),
-            authorized: false
+    func beginGoogleLogin(newsletterConsent: Bool? = nil) async throws -> GoogleNativeBeginResponse {
+        let key = try deviceKeyStore.publicKeyPayload()
+        return try await send(
+            .post, path: "/api/login/google/native/begin",
+            body: GoogleNativeBeginRequest(
+                newsletterConsent: newsletterConsent, deviceId: deviceId, appVersion: appVersion,
+                devicePublicKey: key.devicePublicKey, devicePublicKeyId: key.devicePublicKeyId,
+                devicePublicKeyAlgorithm: key.devicePublicKeyAlgorithm
+            ), authorized: false, retryAfterRefresh: false
         )
-        return response
+    }
+
+    func completeGoogleLogin(attempt: GoogleNativeBeginResponse, authorization: GoogleAuthorizationResult) async throws -> LoginResponse {
+        return try await send(
+            .post, path: "/api/login/google/native/complete",
+            body: GoogleNativeCompleteRequest(
+                attemptId: attempt.attemptId, redemptionToken: attempt.redemptionToken,
+                code: authorization.code, state: authorization.state
+            ), authorized: false, retryAfterRefresh: false
+        )
+    }
+
+    func continueGoogleLogin(token: String, deviceIdsToRemove: [Int]) async throws -> LoginResponse {
+        return try await send(
+            .post, path: "/api/login/google/native/continue",
+            body: GoogleNativeContinueRequest(loginContinuationToken: token, deviceIdsToRemove: deviceIdsToRemove),
+            authorized: false, retryAfterRefresh: false
+        )
     }
 
     func loginWithApple(idToken: String, nonce: String, newsletterConsent: Bool? = nil) async throws -> LoginResponse {
@@ -233,15 +245,6 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
             .post,
             path: "/api/devices/pre-auth/remove",
             body: PasswordDeviceRemovalRequest(email: email, password: password, deviceIdToRemove: deviceId),
-            authorized: false
-        )
-    }
-
-    func removeGoogleDevice(idToken: String, deviceId: Int) async throws {
-        let _: DeviceRemovalResponse = try await send(
-            .post,
-            path: "/api/devices/pre-auth/oauth/remove",
-            body: OAuthDeviceRemovalRequest(idToken: idToken, provider: "Google", nonce: nil, deviceIdToRemove: deviceId),
             authorized: false
         )
     }
@@ -552,7 +555,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
 
     private static func transportDiagnostic(for error: Error) -> String {
         let nsError = error as NSError
-        return "\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"
+        return "\(nsError.domain)(\(nsError.code))"
     }
 
     private static func saveTransportDiagnostic(_ diagnostic: String) {

@@ -29,3 +29,16 @@ The complete upstream license and notices remain in `Vendor/TunnelKit`.
 
 See the resolved package metadata in `Vendor/TunnelKit/Package.resolved` for
 the exact dependency revisions used by the build.
+
+## AppAuth for iOS
+
+- Upstream: <https://github.com/openid/AppAuth-iOS>
+- Version: 3.0.0; revision a972daac82d449d58ab119e91c68153e29ddac33
+- License: Apache License 2.0; package license/notices remain upstream.
+
+## Google sign-in button
+
+- Official asset: <https://developers.google.com/static/identity/gsi/web/images/standard-button-white.png>
+- Guidelines: <https://developers.google.com/identity/branding-guidelines>
+- Unmodified pre-approved light button, used with its original aspect ratio.
+  Google brand use remains subject to those guidelines.

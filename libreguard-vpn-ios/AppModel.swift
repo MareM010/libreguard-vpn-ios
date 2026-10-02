@@ -98,6 +98,11 @@ final class AppModel: ObservableObject {
     private let api: BackendServicing
     private let appleStore: AppleSubscriptionStoreServing
     private let google: GoogleSigning
+    private var googleLoginID: UUID?
+    private var googleLoginExpiryTask: Task<Void, Never>?
+    private let openGoogleLinkingPage: () -> Void
+
+    var isGoogleSignInConfigured: Bool { google.isConfigured }
     private let appleSignIn: AppleSigning
     private let appleCredentialStateChecker: AppleCredentialStateChecking
     private let appleCredentialBindingStore: AppleCredentialBindingStoring
@@ -192,6 +197,7 @@ final class AppModel: ObservableObject {
         api: BackendServicing? = nil,
         appleStore: AppleSubscriptionStoreServing? = nil,
         google: GoogleSigning? = nil,
+        openGoogleLinkingPage: (() -> Void)? = nil,
         appleSignIn: AppleSigning? = nil,
         appleCredentialStateChecker: AppleCredentialStateChecking? = nil,
         appleCredentialBindingStore: AppleCredentialBindingStoring? = nil,
@@ -213,6 +219,9 @@ final class AppModel: ObservableObject {
         self.appleStore = appleStore ?? AppleSubscriptionStore()
         self.appleVerificationRetryDelays = appleVerificationRetryDelays.isEmpty ? [0] : appleVerificationRetryDelays
         self.google = google ?? GoogleSignInService()
+        self.openGoogleLinkingPage = openGoogleLinkingPage ?? {
+            UIApplication.shared.open(URL(string: "https://management.libreguard.net/Identity/Account/Manage/ExternalLogins")!)
+        }
         self.appleSignIn = appleSignIn ?? AppleSignInService()
         self.appleCredentialStateChecker = appleCredentialStateChecker ?? AppleCredentialStateService()
         self.appleCredentialBindingStore = appleCredentialBindingStore ?? AppleCredentialBindingStore()
@@ -518,17 +527,20 @@ final class AppModel: ObservableObject {
 
     func showLogin(prefill email: String? = nil) {
         guard sessionCleanupState == nil else { return }
+        cancelGoogleLogin()
         if let email { prefilledEmail = email }
         route = .login
     }
 
     func showRegister() {
         guard sessionCleanupState == nil else { return }
+        cancelGoogleLogin()
         route = .register
     }
 
     func showForgotPassword() {
         guard sessionCleanupState == nil else { return }
+        cancelGoogleLogin()
         route = .forgotPassword
     }
 
@@ -573,6 +585,8 @@ final class AppModel: ObservableObject {
     }
 
     func login(email: String, password: String) async {
+        guard !isAuthenticating, sessionCleanupState == nil else { return }
+        cancelGoogleLogin()
         let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedEmail.isEmpty, !password.isEmpty else {
             presentedError = APIError(message: "Enter your email and password.")
@@ -590,25 +604,67 @@ final class AppModel: ObservableObject {
     }
 
     func loginWithGoogle(newsletterConsent: Bool? = nil) async {
+        guard !isAuthenticating, sessionCleanupState == nil else { return }
+        guard google.isConfigured else {
+            presentedError = APIError(message: "Google sign-in is not configured for this build.")
+            return
+        }
+        cancelGoogleLogin()
+        let id = UUID()
+        googleLoginID = id
+        presentedError = nil
         isAuthenticating = true
-        defer { isAuthenticating = false }
+        defer { if googleLoginID == id { isAuthenticating = false } }
         do {
-            let idToken = try await google.signIn()
-            let attempt = LoginAttempt.google(idToken: idToken, newsletterConsent: newsletterConsent)
-            do {
-                let response = try await api.loginWithGoogle(idToken: idToken, newsletterConsent: newsletterConsent)
-                try await handleLogin(response, attempt: attempt, afterTwoFactor: false)
-            } catch {
-                handle(error, attempt: attempt, afterTwoFactor: false)
+            let begin = try await api.beginGoogleLogin(newsletterConsent: newsletterConsent)
+            guard googleLoginID == id else { return }
+            guard begin.expiresAt > Date(), begin.expiresAt.timeIntervalSinceNow <= 660 else {
+                throw APIError(message: "Google sign-in expired. Start again.", code: "GOOGLE_LOGIN_EXPIRED")
             }
-        } catch let error as APIError {
-            presentedError = error
+            scheduleGoogleExpiry(begin.expiresAt, id: id)
+            let authorization = try await google.signIn(attempt: begin)
+            guard googleLoginID == id, begin.expiresAt > Date() else { return }
+            let response = try await api.completeGoogleLogin(attempt: begin, authorization: authorization)
+            guard googleLoginID == id else { return }
+            try await handleLogin(response, attempt: .google, afterTwoFactor: false)
+        } catch is CancellationError {
+            if googleLoginID == id { cancelGoogleLogin() }
         } catch {
-            presentedError = APIError(message: error.localizedDescription)
+            guard googleLoginID == id else { return }
+            handle(error, attempt: .google, afterTwoFactor: false)
+        }
+    }
+
+    func cancelGoogleLogin() {
+        googleLoginID = nil
+        googleLoginExpiryTask?.cancel()
+        googleLoginExpiryTask = nil
+        google.signOut()
+        if case let .twoFactor(challenge) = route, case .google = challenge.attempt {
+            route = .login
+        }
+        if let context = deviceLimitContext, case .google = context.attempt {
+            deviceLimitContext = nil
+        }
+        isAuthenticating = false
+    }
+
+    private func scheduleGoogleExpiry(_ expiresAt: Date, id: UUID) {
+        googleLoginExpiryTask?.cancel()
+        googleLoginExpiryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(max(0, expiresAt.timeIntervalSinceNow) * 1_000_000_000))
+            } catch { return }
+            guard let self, self.googleLoginID == id else { return }
+            self.cancelGoogleLogin()
+            self.route = .login
+            self.presentedError = APIError(message: "Google sign-in expired. Start again.", code: "GOOGLE_LOGIN_EXPIRED")
         }
     }
 
     func prepareAppleSignIn(_ request: ASAuthorizationAppleIDRequest) {
+        guard !isAuthenticating, sessionCleanupState == nil else { return }
+        cancelGoogleLogin()
         presentedError = nil
         isAuthenticating = true
         appleSignIn.prepare(request)
@@ -701,26 +757,50 @@ final class AppModel: ObservableObject {
     }
 
     func verifyTwoFactor(_ challenge: TwoFactorChallenge, code: String, recovery: Bool) async {
+        guard !isAuthenticating, retryAfterSeconds == 0, sessionCleanupState == nil else { return }
+        if case .google = challenge.attempt {
+            guard googleLoginID != nil, case let .twoFactor(active) = route, active.id == challenge.id else { return }
+        }
+        let googleID = googleLoginID
         guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             presentedError = APIError(message: recovery ? "Enter a recovery code." : "Enter your authenticator code.")
             return
         }
         isAuthenticating = true
-        defer { isAuthenticating = false }
+        defer {
+            if case .google = challenge.attempt {
+                if googleLoginID == googleID { isAuthenticating = false }
+            } else { isAuthenticating = false }
+        }
         do {
             let response = recovery
                 ? try await api.verifyRecoveryCode(challenge, code: code)
                 : try await api.verifyTwoFactor(challenge, code: code)
+            if case .google = challenge.attempt, googleLoginID != googleID { return }
             try await handleLogin(response, attempt: challenge.attempt, afterTwoFactor: true)
         } catch {
+            if case .google = challenge.attempt {
+                guard googleLoginID == googleID else { return }
+                if let failure = error as? APIError,
+                   ["INVALID_TWO_FACTOR_CODE", "INVALID_RECOVERY_CODE", "RATE_LIMIT_EXCEEDED", "SECURITY_CONTROL_UNAVAILABLE"].contains(failure.code ?? "") {
+                    if let delay = failure.retryAfterSeconds, delay > 0 { beginRetryCountdown(delay) }
+                    presentedError = failure
+                    return
+                }
+            }
             handle(error, attempt: challenge.attempt, afterTwoFactor: true)
         }
     }
 
     func removeDeviceAndRetry(_ device: AccountDevice, context: DeviceLimitContext) async {
-        guard context.canRemoveInApp, retryAfterSeconds == 0 else { return }
+        guard context.canRemoveInApp, retryAfterSeconds == 0, !isAuthenticating else { return }
+        let googleID = googleLoginID
         isAuthenticating = true
-        defer { isAuthenticating = false }
+        defer {
+            if case .google = context.attempt {
+                if googleLoginID == googleID { isAuthenticating = false }
+            } else { isAuthenticating = false }
+        }
         do {
             switch context.attempt {
             case let .password(email, password):
@@ -728,14 +808,15 @@ final class AppModel: ObservableObject {
                 deviceLimitContext = nil
                 let response = try await api.login(email: email, password: password)
                 try await handleLogin(response, attempt: context.attempt, afterTwoFactor: false)
-            case let .google(idToken, newsletterConsent):
-                try await api.removeGoogleDevice(idToken: idToken, deviceId: device.id)
+            case .google:
+                guard let token = context.response.loginContinuationToken,
+                      googleID != nil, deviceLimitContext?.id == context.id else { return }
+                // The capability is single use. Drop it before the request; a lost
+                // response requires a fresh interactive login, never a retry.
                 deviceLimitContext = nil
-                let response = try await api.loginWithGoogle(
-                    idToken: idToken,
-                    newsletterConsent: newsletterConsent
-                )
-                try await handleLogin(response, attempt: context.attempt, afterTwoFactor: false)
+                let response = try await api.continueGoogleLogin(token: token, deviceIdsToRemove: [device.id])
+                guard googleLoginID == googleID else { return }
+                try await handleLogin(response, attempt: .google, afterTwoFactor: context.afterTwoFactor)
             case let .apple(idToken, nonce, newsletterConsent, _):
                 try await api.removeAppleDevice(idToken: idToken, nonce: nonce, deviceId: device.id)
                 deviceLimitContext = nil
@@ -747,7 +828,12 @@ final class AppModel: ObservableObject {
                 try await handleLogin(response, attempt: context.attempt, afterTwoFactor: false)
             }
         } catch {
-            present(error)
+            if case .google = context.attempt {
+                guard googleLoginID == googleID else { return }
+                handle(error, attempt: .google, afterTwoFactor: context.afterTwoFactor)
+            } else {
+                present(error)
+            }
         }
     }
 
@@ -1339,7 +1425,7 @@ final class AppModel: ObservableObject {
         // Remote logout is best effort. Never leave a locally active tunnel
         // up while waiting for it to finish.
         async let remoteLogout: Void = api.logout()
-        google.signOut()
+        cancelGoogleLogin()
         await beginSessionCleanup(intent: .manualSignOut)
         await remoteLogout
     }
@@ -1599,6 +1685,7 @@ final class AppModel: ObservableObject {
                 code: "SECURE_STORAGE_FAILED"
             )
         }
+        if case .google = attempt { cancelGoogleLogin() }
         session = adoptedSession
         logger.info(
             "Login adopted account=\(adoptedSession.userId, privacy: .private(mask: .hash)), responsePlanPresent=\(response.planTier != nil, privacy: .public), responsePlan=\((response.planTier?.rawValue ?? "none"), privacy: .public), generation=\(String(self.accountStateGeneration), privacy: .public)"
@@ -1618,7 +1705,35 @@ final class AppModel: ObservableObject {
 
     private func handle(_ error: Error, attempt: LoginAttempt, afterTwoFactor: Bool) {
         if let apiError = error as? APIError, let limit = apiError.deviceLimit {
+            if case .google = attempt {
+                guard let id = googleLoginID, let token = limit.loginContinuationToken, !token.isEmpty,
+                      let expiresAt = limit.loginContinuationExpiresAt, expiresAt > Date(),
+                      expiresAt.timeIntervalSinceNow <= 660 else {
+                    cancelGoogleLogin()
+                    route = .login
+                    presentedError = APIError(message: "Google sign-in must be restarted.", code: "GOOGLE_LOGIN_EXPIRED")
+                    return
+                }
+                scheduleGoogleExpiry(expiresAt, id: id)
+            }
             deviceLimitContext = DeviceLimitContext(response: limit, attempt: attempt, afterTwoFactor: afterTwoFactor)
+            return
+        }
+        if case .google = attempt {
+            cancelGoogleLogin()
+            route = .login
+            if let apiError = error as? APIError, apiError.code == "GOOGLE_LINK_REQUIRED" {
+                openGoogleLinkingPage()
+                presentedError = APIError(message: "Sign in to your existing LibreGuard account on the management website, link Google, then try Google sign-in again.", code: "GOOGLE_LINK_REQUIRED")
+                return
+            }
+            if error is CancellationError { return }
+            if let failure = error as? APIError {
+                if let delay = failure.retryAfterSeconds, delay > 0 { beginRetryCountdown(delay) }
+                presentedError = failure
+            } else {
+                presentedError = APIError(message: "Google sign-in failed. Start again.")
+            }
             return
         }
         if let apiError = error as? APIError, apiError.code == "EMAIL_NOT_VERIFIED" {
@@ -1656,9 +1771,10 @@ final class AppModel: ObservableObject {
     }
 
     private func clearSessionState(route nextRoute: AppRoute? = .login) {
+        cancelGoogleLogin()
         let previousAccountID = (session ?? api.storedSession)?.userId ?? "none"
         logger.info(
-            "Clearing local account state; account=\(previousAccountID, privacy: .private(mask: .hash)), nextRoute=\(String(describing: nextRoute), privacy: .public)"
+            "Clearing local account state; account=\(previousAccountID, privacy: .private(mask: .hash)), hasNextRoute=\(nextRoute != nil, privacy: .public)"
         )
         serverRefreshGeneration &+= 1
         serverRefreshTask?.cancel()
