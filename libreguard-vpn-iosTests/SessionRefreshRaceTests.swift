@@ -391,7 +391,8 @@ private final class SessionRaceTransport {
         let url = try #require(request.url)
         let response = try #require(HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: "HTTP/1.1", headerFields: nil))
         let data = try JSONSerialization.data(withJSONObject: json)
-        let continuation = try #require(pending.removeValue(forKey: index))
+        let pendingContinuation = pending.removeValue(forKey: index)
+        let continuation = try #require(pendingContinuation)
         continuation.resume(returning: (data, response))
     }
 }
