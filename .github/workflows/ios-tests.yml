@@ -1,0 +1,81 @@
+name: iOS tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode supporting the existing iOS 26.5 target
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, os, subprocess
+          def version(value):
+              return tuple(int(part) for part in value.split("."))
+          candidates = []
+          for app in glob.glob("/Applications/Xcode*.app"):
+              developer = app + "/Contents/Developer"
+              result = subprocess.run(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], env={**os.environ, "DEVELOPER_DIR": developer}, text=True, capture_output=True)
+              if result.returncode == 0 and version(result.stdout.strip()) >= (26, 5):
+                  candidates.append((version(result.stdout.strip()), developer))
+          if not candidates:
+              raise SystemExit("Runner needs Xcode with iOS Simulator SDK >= 26.5. Update the runner without lowering the app deployment target.")
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write("DEVELOPER_DIR=" + max(candidates)[1] + "\n")
+          PY
+      - name: Choose compatible iPhone Simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/devices.json"
+          python3 - <<'PY'
+          import json, os
+          with open(os.environ["RUNNER_TEMP"] + "/devices.json") as source:
+              devices = json.load(source)["devices"]
+          choices = []
+          for runtime, values in devices.items():
+              if ".iOS-" not in runtime:
+                  continue
+              version = tuple(int(value) for value in runtime.split(".iOS-")[1].split("-"))
+              if version < (26, 5):
+                  continue
+              choices.extend((version, device["udid"]) for device in values if device["isAvailable"] and device["name"].startswith("iPhone"))
+          if not choices:
+              raise SystemExit("Runner needs an iPhone Simulator runtime >= iOS 26.5.")
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write("SIMULATOR_ID=" + max(choices)[1] + "\n")
+          PY
+      - name: Resolve pinned packages
+        run: xcodebuild -resolvePackageDependencies -project libreguard-vpn-ios.xcodeproj -scheme libreguard-vpn-ios -onlyUsePackageVersionsFromResolvedFile
+      - name: Build and test
+        run: >-
+          xcodebuild test
+          -project libreguard-vpn-ios.xcodeproj
+          -scheme libreguard-vpn-ios
+          -destination "platform=iOS Simulator,id=$SIMULATOR_ID"
+          -only-testing:libreguard-vpn-iosTests
+          -disableAutomaticPackageResolution
+          -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult"
+          CODE_SIGNING_ALLOWED=NO
+      - name: Save test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-tests
+          path: ${{ runner.temp }}/ios-tests.xcresult
+          if-no-files-found: ignore

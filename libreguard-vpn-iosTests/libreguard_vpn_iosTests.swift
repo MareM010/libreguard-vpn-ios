@@ -6,6 +6,7 @@ import StoreKit
 import Testing
 @testable import libreguard_vpn_ios
 
+@Suite(SharedVPNFixtureScope())
 @MainActor
 struct libreguard_vpn_iosTests {
     @Test func themeModeDefaultsToSystemForMissingOrInvalidStorage() {
@@ -39,7 +40,7 @@ struct libreguard_vpn_iosTests {
     @Test func appModelLoadsAndPersistsFavoritesForTheActiveAccount() {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let store = UserDefaultsFavoriteServerStore(defaults: defaults)
-        let app = AppModel(favoriteServerStore: store, defaults: defaults)
+        let app = VPNTestFixtures.track(AppModel(favoriteServerStore: store, defaults: defaults))
         let firstAccount = AuthSession(
             accessToken: "access-a",
             refreshToken: "refresh-a",
@@ -271,22 +272,66 @@ struct libreguard_vpn_iosTests {
         }
     }
 
-    @Test func googleLoginOmitsConsentForLoginAndIncludesItForRegistration() async throws {
+    @Test func nativeGoogleBeginBindsPlatformDeviceAndOptionalConsent() async throws {
         try await withSerializedRequests {
-            var receivedValues: [Bool?] = []
+            var received: [[String: Any]] = []
             let client = makeClient { request in
-                #expect(request.url?.path == "/api/login/google")
-                let json = try #require(JSONSerialization.jsonObject(with: requestBody(from: request)) as? [String: Any])
-                receivedValues.append(json["newsletterConsent"] as? Bool)
+                #expect(request.url?.path == "/api/login/google/native/begin")
+                #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+                received.append(try #require(JSONSerialization.jsonObject(with: requestBody(from: request)) as? [String: Any]))
+                return try makeResponse(request, status: 200, json: googleBeginJSON)
+            }
+            _ = try await client.beginGoogleLogin()
+            _ = try await client.beginGoogleLogin(newsletterConsent: true)
+            #expect(received.count == 2)
+            #expect(received[0]["platform"] as? String == "ios")
+            #expect(received[0]["deviceId"] as? String == "test-device")
+            #expect(received[0]["appVersion"] as? String == "1.0-test")
+            #expect(received[0]["devicePublicKey"] as? String == "base64-spki")
+            #expect(received[0]["devicePublicKeyId"] as? String == "device-key-id")
+            #expect(received[0]["devicePublicKeyAlgorithm"] as? String == "RSA-OAEP-256")
+            #expect(received[0]["newsletterConsent"] == nil)
+            #expect(received[1]["newsletterConsent"] as? Bool == true)
+            #expect(received.allSatisfy { $0["idToken"] == nil && $0["codeVerifier"] == nil && $0["clientSecret"] == nil })
+        }
+    }
+
+    @Test func nativeGoogleCompleteAndContinueSendOnlyBackendCapabilities() async throws {
+        try await withSerializedRequests {
+            var paths: [String] = []
+            var bodies: [[String: Any]] = []
+            let client = makeClient { request in
+                paths.append(try #require(request.url?.path))
+                #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+                bodies.append(try #require(JSONSerialization.jsonObject(with: requestBody(from: request)) as? [String: Any]))
                 return try makeResponse(request, status: 200, json: [:])
             }
+            let begin = try googleBegin()
+            _ = try await client.completeGoogleLogin(attempt: begin, authorization: GoogleAuthorizationResult(code: "one-use-code", state: begin.state))
+            _ = try await client.continueGoogleLogin(token: "single-use-continuation", deviceIdsToRemove: [42])
+            #expect(paths == ["/api/login/google/native/complete", "/api/login/google/native/continue"])
+            #expect(Set(bodies[0].keys) == Set(["attemptId", "redemptionToken", "code", "state"]))
+            #expect(bodies[0]["redemptionToken"] as? String == begin.redemptionToken)
+            #expect(bodies[0]["code"] as? String == "one-use-code")
+            #expect(Set(bodies[1].keys) == Set(["loginContinuationToken", "deviceIdsToRemove"]))
+            #expect(bodies[1]["deviceIdsToRemove"] as? [Int] == [42])
+        }
+    }
 
-            _ = try await client.loginWithGoogle(idToken: "login-token")
-            _ = try await client.loginWithGoogle(idToken: "registration-token", newsletterConsent: true)
-
-            #expect(receivedValues.count == 2)
-            #expect(receivedValues[0] == nil)
-            #expect(receivedValues[1] == true)
+    @Test func nativeGoogleRedemptionDoesNotRetryFailedRequests() async throws {
+        try await withSerializedRequests {
+            var calls = 0
+            let client = makeClient { request in
+                calls += 1
+                return try makeResponse(request, status: 503, json: ["message": "Restart sign-in", "errorCode": "GOOGLE_AUTHORIZATION_FAILED"])
+            }
+            do {
+                _ = try await client.completeGoogleLogin(attempt: googleBegin(), authorization: GoogleAuthorizationResult(code: "one-use-code", state: String(repeating: "s", count: 43)))
+                Issue.record("Expected failure")
+            } catch let error as APIError {
+                #expect(error.code == "GOOGLE_AUTHORIZATION_FAILED")
+            }
+            #expect(calls == 1)
         }
     }
 
@@ -323,7 +368,7 @@ struct libreguard_vpn_iosTests {
         }
     }
 
-    @Test func oauthDeviceRemovalKeepsGoogleCompatibleAndAddsAppleNonce() async throws {
+    @Test func appleDeviceRemovalSendsProviderNonceAndDevice() async throws {
         try await withSerializedRequests {
             var receivedBodies: [[String: Any]] = []
             let client = makeClient { request in
@@ -339,18 +384,13 @@ struct libreguard_vpn_iosTests {
                 ])
             }
 
-            try await client.removeGoogleDevice(idToken: "google-token", deviceId: 41)
             try await client.removeAppleDevice(idToken: "apple-token", nonce: "apple-nonce", deviceId: 42)
 
-            #expect(receivedBodies.count == 2)
-            #expect(receivedBodies[0]["provider"] as? String == "Google")
-            #expect(receivedBodies[0]["idToken"] as? String == "google-token")
-            #expect(receivedBodies[0]["nonce"] == nil)
-            #expect(receivedBodies[0]["deviceIdToRemove"] as? Int == 41)
-            #expect(receivedBodies[1]["provider"] as? String == "Apple")
-            #expect(receivedBodies[1]["idToken"] as? String == "apple-token")
-            #expect(receivedBodies[1]["nonce"] as? String == "apple-nonce")
-            #expect(receivedBodies[1]["deviceIdToRemove"] as? Int == 42)
+            #expect(receivedBodies.count == 1)
+            #expect(receivedBodies[0]["provider"] as? String == "Apple")
+            #expect(receivedBodies[0]["idToken"] as? String == "apple-token")
+            #expect(receivedBodies[0]["nonce"] as? String == "apple-nonce")
+            #expect(receivedBodies[0]["deviceIdToRemove"] as? Int == 42)
         }
     }
 
@@ -715,7 +755,9 @@ struct libreguard_vpn_iosTests {
     }
 
     @Test func proQuotaDecodesNullableUnlimitedFields() throws {
-        let quota = try JSONDecoder().decode(UsageQuota.self, from: JSONSerialization.data(withJSONObject: [
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let quota = try decoder.decode(UsageQuota.self, from: JSONSerialization.data(withJSONObject: [
             "bytesUsed": 2_048,
             "bytesLimit": NSNull(),
             "bytesRemaining": NSNull(),
@@ -814,11 +856,11 @@ struct libreguard_vpn_iosTests {
                     "propagationSeconds": 15
                 ])
             }
-            let app = AppModel(
+            let app = VPNTestFixtures.track(AppModel(
                 api: client,
                 vpnManager: DNSSettingsTestVPNManager(),
                 defaults: UserDefaults(suiteName: UUID().uuidString)!
-            )
+            ))
 
             await app.refreshDNSPreference()
             #expect(app.dnsPreference?.requestedEnabled == true)
@@ -857,11 +899,11 @@ struct libreguard_vpn_iosTests {
                     "propagationSeconds": 15
                 ])
             }
-            let app = AppModel(
+            let app = VPNTestFixtures.track(AppModel(
                 api: client,
                 vpnManager: DNSSettingsTestVPNManager(),
                 defaults: UserDefaults(suiteName: UUID().uuidString)!
-            )
+            ))
 
             await app.refreshDNSPreference()
             await app.setAdBlockingEnabled(true)
@@ -911,11 +953,11 @@ struct libreguard_vpn_iosTests {
                     throw APIError(message: "Unexpected endpoint")
                 }
             }
-            let app = AppModel(
+            let app = VPNTestFixtures.track(AppModel(
                 api: client,
                 vpnManager: DNSSettingsTestVPNManager(),
                 defaults: UserDefaults(suiteName: UUID().uuidString)!
-            )
+            ))
 
             await app.refreshAccountData(showErrors: false)
 
@@ -949,11 +991,11 @@ struct libreguard_vpn_iosTests {
                     throw APIError(message: "Unexpected endpoint")
                 }
             }
-            let app = AppModel(
+            let app = VPNTestFixtures.track(AppModel(
                 api: client,
                 vpnManager: DNSSettingsTestVPNManager(),
                 defaults: UserDefaults(suiteName: UUID().uuidString)!
-            )
+            ))
 
             await app.refreshAccountData(showErrors: false)
 
@@ -995,11 +1037,11 @@ struct libreguard_vpn_iosTests {
                     throw APIError(message: "Unexpected endpoint")
                 }
             }
-            let app = AppModel(
+            let app = VPNTestFixtures.track(AppModel(
                 api: client,
                 vpnManager: DNSSettingsTestVPNManager(),
                 defaults: defaults
-            )
+            ))
 
             await app.refreshAccountData(showErrors: false)
 
@@ -1040,11 +1082,11 @@ struct libreguard_vpn_iosTests {
                     throw APIError(message: "Unexpected endpoint")
                 }
             }
-            let app = AppModel(
+            let app = VPNTestFixtures.track(AppModel(
                 api: client,
                 vpnManager: DNSSettingsTestVPNManager(),
                 defaults: defaults
-            )
+            ))
 
             await app.refreshAccountData(showErrors: false)
 
@@ -1819,12 +1861,12 @@ struct libreguard_vpn_iosTests {
         backend.serverResponse = [server]
         let probe = RecordingLatencyProbe(result: [server.id: 12])
         let vpn = StartupVPNManager(status: .connected)
-        let app = AppModel(
+        let app = VPNTestFixtures.track(AppModel(
             api: backend,
             latencyProbe: probe,
             vpnManager: vpn,
             defaults: UserDefaults(suiteName: UUID().uuidString)!
-        )
+        ))
         app.session = startupSession()
         app.serverLatencies = [server.id: 88]
 
@@ -1848,12 +1890,12 @@ struct libreguard_vpn_iosTests {
             let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
             backend.serverResponse = [server]
             let probe = RecordingLatencyProbe(result: [server.id: 12])
-            let app = AppModel(
+            let app = VPNTestFixtures.track(AppModel(
                 api: backend,
                 latencyProbe: probe,
                 vpnManager: StartupVPNManager(status: status),
                 defaults: UserDefaults(suiteName: UUID().uuidString)!
-            )
+            ))
             app.session = startupSession()
 
             app.refreshServers(trigger: .automatic)
@@ -1869,12 +1911,12 @@ struct libreguard_vpn_iosTests {
         let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
         backend.serverResponse = [first, second]
         let probe = RecordingLatencyProbe(result: [first.id: 24, second.id: 36])
-        let app = AppModel(
+        let app = VPNTestFixtures.track(AppModel(
             api: backend,
             latencyProbe: probe,
             vpnManager: StartupVPNManager(status: .disconnected),
             defaults: UserDefaults(suiteName: UUID().uuidString)!
-        )
+        ))
         app.session = startupSession()
 
         app.refreshServers(trigger: .sceneActivation)
@@ -1891,12 +1933,12 @@ struct libreguard_vpn_iosTests {
         let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
         backend.serverError = APIError(message: "Server catalog unavailable")
         let probe = RecordingLatencyProbe(result: [server.id: 12])
-        let app = AppModel(
+        let app = VPNTestFixtures.track(AppModel(
             api: backend,
             latencyProbe: probe,
             vpnManager: StartupVPNManager(status: .disconnected),
             defaults: UserDefaults(suiteName: UUID().uuidString)!
-        )
+        ))
         app.session = startupSession()
         app.servers = [server]
         app.serverLatencies = [server.id: 88]
@@ -1916,12 +1958,12 @@ struct libreguard_vpn_iosTests {
         let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
         let vpn = StartupVPNManager(status: .disconnected)
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
-        let app = AppModel(
+        let app = VPNTestFixtures.track(AppModel(
             api: backend,
             latencyProbe: RecordingLatencyProbe(result: [server.id: 12]),
             vpnManager: vpn,
             defaults: defaults
-        )
+        ))
         app.session = startupSession()
         app.subscription = try subscriptionStatus(plan: "Pro", isPro: true)
         app.servers = [server]
@@ -1939,12 +1981,12 @@ struct libreguard_vpn_iosTests {
         backend.serverResponse = [server]
         let probe = RecordingLatencyProbe(result: [server.id: 999], holdMeasurement: true)
         let vpn = StartupVPNManager(status: .disconnected)
-        let app = AppModel(
+        let app = VPNTestFixtures.track(AppModel(
             api: backend,
             latencyProbe: probe,
             vpnManager: vpn,
             defaults: UserDefaults(suiteName: UUID().uuidString)!
-        )
+        ))
         app.session = startupSession()
         app.serverLatencies = [server.id: 45]
 
@@ -1957,6 +1999,166 @@ struct libreguard_vpn_iosTests {
         await waitForServerRefresh(app)
 
         #expect(app.serverLatencies == [server.id: 45])
+    }
+
+    @Test func nativeGoogleCancellationIsDismissalAndDuplicateLoginIsIgnored() async throws {
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        backend.googleBeginResponse = try googleBegin()
+        let google = ControlledGoogleSigner()
+        google.holdAuthorization = true
+        let app = makeStartupApp(backend: backend, vpn: StartupVPNManager(status: .disconnected), defaults: UserDefaults(suiteName: UUID().uuidString)!, google: google)
+        let first = Task { await app.loginWithGoogle() }
+        for _ in 0..<100 where google.calls == 0 { await Task.yield() }
+        await app.loginWithGoogle()
+        #expect(backend.googleBeginCalls == 1)
+        #expect(google.calls == 1)
+        app.showLogin()
+        await first.value
+        #expect(backend.googleCompleteCalls == 0)
+        #expect(app.presentedError == nil)
+        #expect(!app.isAuthenticating)
+    }
+
+    @Test func nativeGoogleLateAuthorizationCannotCreateASession() async throws {
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        backend.googleBeginResponse = try googleBegin()
+        backend.googleCompleteResult = .success(try loginResponse(userId: "unexpected"))
+        let google = ControlledGoogleSigner()
+        google.holdAuthorization = true
+        google.ignoreCancellation = true
+        let app = makeStartupApp(backend: backend, vpn: StartupVPNManager(status: .disconnected), defaults: UserDefaults(suiteName: UUID().uuidString)!, google: google)
+        let task = Task { await app.loginWithGoogle() }
+        for _ in 0..<100 where google.calls == 0 { await Task.yield() }
+        app.showRegister()
+        google.complete()
+        await task.value
+        #expect(backend.googleCompleteCalls == 0)
+        #expect(app.session == nil)
+        #expect(!app.isAuthenticating)
+    }
+
+    @Test func nativeGoogleLinkRequiredOpensOnlyManagementLinking() async throws {
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        backend.googleBeginResponse = try googleBegin()
+        backend.googleCompleteResult = .failure(APIError(statusCode: 409, message: "Link required", code: "GOOGLE_LINK_REQUIRED"))
+        var opened = 0
+        let app = makeStartupApp(backend: backend, vpn: StartupVPNManager(status: .disconnected), defaults: UserDefaults(suiteName: UUID().uuidString)!, google: ControlledGoogleSigner(), openGoogleLinkingPage: { opened += 1 })
+        await app.loginWithGoogle()
+        #expect(opened == 1)
+        #expect(app.presentedError?.code == "GOOGLE_LINK_REQUIRED")
+        #expect(app.session == nil)
+        #expect(app.deviceLimitContext == nil)
+    }
+
+    @Test func nativeGoogleMFADeviceLimitUsesContinuationAndRotatesTicket() async throws {
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        backend.googleBeginResponse = try googleBegin()
+        backend.googleCompleteResult = .success(try JSONDecoder().decode(LoginResponse.self, from: Data("""
+            {"requiresTwoFactor":true,"pendingLoginToken":"pending-factor","email":"person@example.com"}
+            """.utf8)))
+        backend.factorResult = .failure(try googleLimitError(token: "first-ticket"))
+        backend.googleContinueResult = .failure(try googleLimitError(token: "rotated-ticket"))
+        let google = ControlledGoogleSigner()
+        let app = makeStartupApp(backend: backend, vpn: StartupVPNManager(status: .disconnected), defaults: UserDefaults(suiteName: UUID().uuidString)!, google: google)
+        await app.loginWithGoogle()
+        guard case let .twoFactor(challenge) = app.route else { Issue.record("Expected factor"); return }
+        await app.verifyTwoFactor(challenge, code: "123456", recovery: false)
+        let context = try #require(app.deviceLimitContext)
+        #expect(context.afterTwoFactor)
+        #expect(context.canRemoveInApp)
+        await app.removeDeviceAndRetry(try #require(context.response.devices.first), context: context)
+        #expect(backend.googleContinueTokens == ["first-ticket"])
+        #expect(backend.googleRemovedDevices == [[42]])
+        #expect(backend.googleCompleteCalls == 1)
+        #expect(google.calls == 1)
+        #expect(app.deviceLimitContext?.response.loginContinuationToken == "rotated-ticket")
+        #expect(app.deviceLimitContext?.afterTwoFactor == true)
+        app.cancelGoogleLogin()
+    }
+
+    @Test func nativeGoogleBadFactorPreservesChallengeAndAmbiguousContinuationRestarts() async throws {
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        backend.googleBeginResponse = try googleBegin()
+        backend.googleCompleteResult = .success(try JSONDecoder().decode(LoginResponse.self, from: Data("""
+            {"requiresTwoFactor":true,"pendingLoginToken":"pending-factor","email":"person@example.com"}
+            """.utf8)))
+        let app = makeStartupApp(backend: backend, vpn: StartupVPNManager(status: .disconnected), defaults: UserDefaults(suiteName: UUID().uuidString)!, google: ControlledGoogleSigner())
+        await app.loginWithGoogle()
+        guard case let .twoFactor(challenge) = app.route else { Issue.record("Expected factor"); return }
+        backend.factorResult = .failure(APIError(statusCode: 401, message: "Invalid code", code: "INVALID_TWO_FACTOR_CODE"))
+        await app.verifyTwoFactor(challenge, code: "000000", recovery: false)
+        guard case let .twoFactor(retained) = app.route else { Issue.record("Lost challenge"); return }
+        #expect(retained.id == challenge.id)
+        backend.factorResult = .failure(try googleLimitError(token: "ticket"))
+        await app.verifyTwoFactor(challenge, code: "recovery", recovery: true)
+        let context = try #require(app.deviceLimitContext)
+        backend.googleContinueResult = .failure(APIError(message: "Connection lost", code: "TRANSPORT_FAILURE"))
+        await app.removeDeviceAndRetry(try #require(context.response.devices.first), context: context)
+        #expect(app.deviceLimitContext == nil)
+        #expect(app.session == nil)
+        await app.removeDeviceAndRetry(try #require(context.response.devices.first), context: context)
+        #expect(backend.googleContinueTokens == ["ticket"])
+    }
+
+    @Test func cancelledGoogleFactorCannotStoreSessionOrClearANewerLogin() async throws {
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        backend.googleBeginResponse = try googleBegin()
+        backend.googleCompleteResult = .success(try JSONDecoder().decode(LoginResponse.self, from: Data("""
+            {"requiresTwoFactor":true,"pendingLoginToken":"pending-factor","email":"person@example.com"}
+            """.utf8)))
+        backend.holdFactorResponse = true
+        let google = ControlledGoogleSigner()
+        let app = makeStartupApp(backend: backend, vpn: StartupVPNManager(status: .disconnected), defaults: UserDefaults(suiteName: UUID().uuidString)!, google: google)
+        await app.loginWithGoogle()
+        guard case let .twoFactor(challenge) = app.route else { Issue.record("Expected factor"); return }
+        let oldFactor = Task { await app.verifyTwoFactor(challenge, code: "123456", recovery: false) }
+        for _ in 0..<100 where !backend.hasPendingFactorResponse { await Task.yield() }
+        #expect(backend.hasPendingFactorResponse)
+        app.showLogin()
+        google.holdAuthorization = true
+        let newerLogin = Task { await app.loginWithGoogle() }
+        for _ in 0..<100 where google.calls < 2 { await Task.yield() }
+        #expect(google.calls == 2)
+        backend.completeFactorResponse(with: .success(try loginResponse(userId: "must-not-store")))
+        await oldFactor.value
+        #expect(app.session == nil)
+        #expect(backend.storedSession == nil)
+        #expect(app.isAuthenticating)
+        app.showLogin()
+        await newerLogin.value
+        #expect(!app.isAuthenticating)
+    }
+
+    private var googleBeginJSON: [String: Any] {
+        [
+            "attemptId": "214e1228-4266-4b82-9cb7-41d1da0b7d41",
+            "redemptionToken": String(repeating: "r", count: 43),
+            "expiresAt": ISO8601DateFormatter().string(from: Date().addingTimeInterval(600)),
+            "clientId": "123-test.apps.googleusercontent.com",
+            "redirectUri": "com.googleusercontent.apps.123-test:/oauth2callback",
+            "state": String(repeating: "s", count: 43), "nonce": String(repeating: "n", count: 43),
+            "codeChallenge": String(repeating: "c", count: 43)
+        ]
+    }
+
+    private func googleBegin() throws -> GoogleNativeBeginResponse {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(GoogleNativeBeginResponse.self, from: JSONSerialization.data(withJSONObject: googleBeginJSON))
+    }
+
+    private func googleLimitError(token: String) throws -> APIError {
+        let json: [String: Any] = [
+            "message": "Device limit reached", "errorCode": "DEVICE_LIMIT_EXCEEDED",
+            "currentDevices": 1, "maxDevices": 1, "planType": "Free",
+            "devices": [["id":42,"deviceIdHash":"device-hash"]],
+            "loginContinuationToken": token,
+            "loginContinuationExpiresAt": ISO8601DateFormatter().string(from: Date().addingTimeInterval(300))
+        ]
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let limit = try decoder.decode(DeviceLimitResponse.self, from: JSONSerialization.data(withJSONObject: json))
+        return APIError(statusCode:409, message:limit.message, code:limit.errorCode, deviceLimit:limit)
     }
 
     private func waitForServerRefresh(_ app: AppModel) async {
@@ -2033,15 +2235,19 @@ struct libreguard_vpn_iosTests {
         vpn: StartupVPNManager,
         defaults: UserDefaults,
         appleStore: AppleSubscriptionStoreServing? = nil,
+        google: GoogleSigning? = nil,
+        openGoogleLinkingPage: (() -> Void)? = nil,
         appleVerificationRetryDelays: [UInt64] = [0, 1, 3],
         appleSignIn: AppleSigning? = nil,
         appleCredentialStateChecker: AppleCredentialStateChecking? = nil,
         appleCredentialBindingStore: AppleCredentialBindingStoring? = nil,
         notificationCenter: NotificationCenter = .default
     ) -> AppModel {
-        AppModel(
+        VPNTestFixtures.track(AppModel(
             api: backend,
             appleStore: appleStore ?? NoOpAppleSubscriptionStore(),
+            google: google,
+            openGoogleLinkingPage: openGoogleLinkingPage,
             appleSignIn: appleSignIn,
             appleCredentialStateChecker: appleCredentialStateChecker,
             appleCredentialBindingStore: appleCredentialBindingStore,
@@ -2050,7 +2256,7 @@ struct libreguard_vpn_iosTests {
             vpnManager: vpn,
             defaults: defaults,
             appleVerificationRetryDelays: appleVerificationRetryDelays
-        )
+        ))
     }
 
     func makeClient(
@@ -2259,13 +2465,29 @@ private final class DNSSettingsTestVPNManager: VPNManaging {
 }
 
 @MainActor
-private final class StartupBackendStub: BackendServicing, SessionInvalidationObserving {
+final class StartupBackendStub: BackendServicing, SessionInvalidationObserving {
     var storedSession: AuthSession?
     let deviceId = "startup-device"
     let appVersion = "1.0-test"
     var onSessionInvalidated: (() -> Void)?
     private(set) var sessionInvalidationCallbackCount = 0
     private var restoreResults: [Result<AuthSession?, Error>]
+    var googleBeginResponse: GoogleNativeBeginResponse?
+    var googleCompleteResult: Result<LoginResponse, Error>?
+    var googleContinueResult: Result<LoginResponse, Error>?
+    var googleBeginCalls = 0
+    var googleCompleteCalls = 0
+    var googleContinueTokens: [String] = []
+    var googleRemovedDevices: [[Int]] = []
+    var factorResult: Result<LoginResponse, Error>?
+    var holdFactorResponse = false
+    private var pendingFactorResponse: CheckedContinuation<LoginResponse, Error>?
+    var hasPendingFactorResponse: Bool { pendingFactorResponse != nil }
+    func completeFactorResponse(with result: Result<LoginResponse, Error>) {
+        let response = pendingFactorResponse
+        pendingFactorResponse = nil
+        response?.resume(with: result)
+    }
     var passwordLoginResponse: LoginResponse?
     var appleLoginResponse: LoginResponse?
     var subscriptionResults: [Result<libreguard_vpn_ios.SubscriptionStatus, Error>] = []
@@ -2318,7 +2540,22 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
         guard let passwordLoginResponse else { return try unsupported() }
         return passwordLoginResponse
     }
-    func loginWithGoogle(idToken: String, newsletterConsent: Bool?) async throws -> LoginResponse { try unsupported() }
+    func beginGoogleLogin(newsletterConsent: Bool?) async throws -> GoogleNativeBeginResponse {
+        googleBeginCalls += 1
+        guard let googleBeginResponse else { return try unsupported() }
+        return googleBeginResponse
+    }
+    func completeGoogleLogin(attempt: GoogleNativeBeginResponse, authorization: GoogleAuthorizationResult) async throws -> LoginResponse {
+        googleCompleteCalls += 1
+        guard let googleCompleteResult else { return try unsupported() }
+        return try googleCompleteResult.get()
+    }
+    func continueGoogleLogin(token: String, deviceIdsToRemove: [Int]) async throws -> LoginResponse {
+        googleContinueTokens.append(token)
+        googleRemovedDevices.append(deviceIdsToRemove)
+        guard let googleContinueResult else { return try unsupported() }
+        return try googleContinueResult.get()
+    }
     func loginWithApple(idToken: String, nonce: String, newsletterConsent: Bool?) async throws -> LoginResponse {
         appleLoginIdToken = idToken
         appleLoginNonce = nonce
@@ -2326,15 +2563,20 @@ private final class StartupBackendStub: BackendServicing, SessionInvalidationObs
         guard let appleLoginResponse else { return try unsupported() }
         return appleLoginResponse
     }
-    func verifyTwoFactor(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse { try unsupported() }
-    func verifyRecoveryCode(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse { try unsupported() }
+    func verifyTwoFactor(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse {
+        if holdFactorResponse {
+            return try await withCheckedThrowingContinuation { pendingFactorResponse = $0 }
+        }
+        guard let factorResult else { return try unsupported() }
+        return try factorResult.get()
+    }
+    func verifyRecoveryCode(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse { try await verifyTwoFactor(challenge, code: code) }
     func register(email: String, password: String, newsletterConsent: Bool) async throws -> RegistrationResponse { try unsupported() }
     func requestPasswordReset(email: String) async throws -> MessageResponse { try unsupported() }
     func resetPassword(email: String, token: String, newPassword: String) async throws -> MessageResponse { try unsupported() }
     func confirmationStatus(userId: String) async throws -> ConfirmationStatusResponse { try unsupported() }
     func resendConfirmation(email: String) async throws { throw APIError(message: "Not configured") }
     func removePasswordDevice(email: String, password: String, deviceId: Int) async throws { throw APIError(message: "Not configured") }
-    func removeGoogleDevice(idToken: String, deviceId: Int) async throws { throw APIError(message: "Not configured") }
     func removeAppleDevice(idToken: String, nonce: String, deviceId: Int) async throws {
         removedAppleToken = idToken
         removedAppleNonce = nonce
@@ -2677,4 +2919,35 @@ final class ConcurrentURLProtocolStub: URLProtocol, @unchecked Sendable {
     }
 
     override func stopLoading() {}
+}
+
+
+@MainActor
+private final class ControlledGoogleSigner: GoogleSigning {
+    var isConfigured = true
+    var calls = 0
+    var holdAuthorization = false
+    var ignoreCancellation = false
+    private var pending: CheckedContinuation<GoogleAuthorizationResult, Error>?
+    private var state = ""
+    func signIn(attempt: GoogleNativeBeginResponse) async throws -> GoogleAuthorizationResult {
+        calls += 1
+        state = attempt.state
+        if holdAuthorization {
+            return try await withCheckedThrowingContinuation { pending = $0 }
+        }
+        return GoogleAuthorizationResult(code: "authorization-code", state: attempt.state)
+    }
+    func complete() {
+        let callback = pending
+        pending = nil
+        callback?.resume(returning: GoogleAuthorizationResult(code: "late-code", state: state))
+    }
+    func signOut() {
+        guard !ignoreCancellation else { return }
+        let callback = pending
+        pending = nil
+        callback?.resume(throwing: CancellationError())
+    }
+    func handle(url: URL) -> Bool { false }
 }

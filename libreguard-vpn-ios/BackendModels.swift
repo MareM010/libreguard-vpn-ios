@@ -140,14 +140,37 @@ struct LoginRequest: Encodable {
     let devicePublicKeyAlgorithm: String
 }
 
-struct GoogleLoginRequest: Encodable {
-    let idToken: String
+struct GoogleNativeBeginRequest: Encodable {
+    let platform = "ios"
     let newsletterConsent: Bool?
     let deviceId: String
     let appVersion: String
     let devicePublicKey: String
     let devicePublicKeyId: String
     let devicePublicKeyAlgorithm: String
+}
+
+struct GoogleNativeBeginResponse: Decodable {
+    let attemptId: UUID
+    let redemptionToken: String
+    let expiresAt: Date
+    let clientId: String
+    let redirectUri: String
+    let state: String
+    let nonce: String
+    let codeChallenge: String
+}
+
+struct GoogleNativeCompleteRequest: Encodable {
+    let attemptId: UUID
+    let redemptionToken: String
+    let code: String
+    let state: String
+}
+
+struct GoogleNativeContinueRequest: Encodable {
+    let loginContinuationToken: String
+    let deviceIdsToRemove: [Int]
 }
 
 struct AppleLoginRequest: Encodable {
@@ -287,6 +310,8 @@ struct DeviceLimitResponse: Decodable {
     let maxDevices: Int
     let planType: String
     let devices: [AccountDevice]
+    let loginContinuationToken: String?
+    let loginContinuationExpiresAt: Date?
 }
 
 struct PasswordDeviceRemovalRequest: Encodable {
@@ -885,7 +910,7 @@ struct PendingRegistration: Codable, Equatable {
 
 enum LoginAttempt {
     case password(email: String, password: String)
-    case google(idToken: String, newsletterConsent: Bool?)
+    case google
     case apple(idToken: String, nonce: String, newsletterConsent: Bool?, userIdentifier: String)
 }
 
@@ -904,8 +929,10 @@ struct DeviceLimitContext: Identifiable {
 
     var canRemoveInApp: Bool {
         switch attempt {
-        case .google, .apple: true
-        case .password: !afterTwoFactor
+        case .google:
+            response.loginContinuationToken?.isEmpty == false
+                && (response.loginContinuationExpiresAt ?? .distantPast) > Date()
+        case .password, .apple: !afterTwoFactor
         }
     }
 }

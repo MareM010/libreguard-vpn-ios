@@ -3,6 +3,7 @@ import NetworkExtension
 import Testing
 @testable import libreguard_vpn_ios
 
+@Suite(SharedVPNFixtureScope())
 @MainActor
 struct OpenVPNTests {
     @Test func killSwitchPolicyUsesIncludeAllNetworksForTunnelProtocols() {
@@ -743,11 +744,11 @@ struct OpenVPNTests {
         let protocolStore = UserDefaultsVPNProtocolSelectionStore(defaults: UserDefaults(suiteName: UUID().uuidString)!)
         protocolStore.selectedProtocol = .openVPN
         let vpn = SpyVPNManager()
-        let app = AppModel(
+        let app = VPNTestFixtures.track(AppModel(
             vpnManager: vpn,
             protocolSelectionStore: protocolStore,
             defaults: UserDefaults(suiteName: UUID().uuidString)!
-        )
+        ))
 
         app.servers = [server]
         app.selectedServerID = server.id
@@ -782,7 +783,7 @@ struct OpenVPNTests {
 
     @Test func appModelUnlocksOpenVPNWhenQuotaIndicatesUnlimitedPlan() throws {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
-        let app = AppModel(vpnManager: SpyVPNManager(), defaults: defaults)
+        let app = VPNTestFixtures.track(AppModel(vpnManager: SpyVPNManager(), defaults: defaults))
         app.usageQuota = try JSONDecoder().decode(UsageQuota.self, from: JSONSerialization.data(withJSONObject: [
             "bytesUsed": 2_048,
             "bytesLimit": 0,

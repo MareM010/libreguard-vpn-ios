@@ -20,10 +20,10 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
-	<key>GIDClientID</key>
+	<key>LibreGuardGoogleClientID</key>
 	<string>$(GOOGLE_IOS_CLIENT_ID)</string>
-	<key>GIDServerClientID</key>
-	<string>$(GOOGLE_SERVER_CLIENT_ID)</string>
+	<key>LibreGuardGoogleCallbackScheme</key>
+	<string>$(GOOGLE_REVERSED_CLIENT_ID)</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
