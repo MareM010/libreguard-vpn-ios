@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import libreguard_vpn_ios
 
+@Suite(SharedVPNFixtureScope())
 @MainActor
 struct ConnectionTransitionTests {
     @Test func heroPresentationMatchesAndroidReferenceCopyAndActions() {
@@ -568,7 +569,7 @@ struct ConnectionTransitionTests {
         app.requestConnectionToSelectedServer()
         await settle()
         manager.emit(.connected)
-        await settle()
+        await sampler.waitForFirstSnapshot()
 
         await app.disconnectVPN()
 
@@ -594,7 +595,7 @@ struct ConnectionTransitionTests {
         app.requestConnectionToSelectedServer()
         await settle()
         manager.emit(.connected)
-        await settle()
+        await sampler.waitForFirstSnapshot()
 
         await app.signOut()
 
@@ -625,7 +626,7 @@ struct ConnectionTransitionTests {
         app.requestConnectionToSelectedServer()
         await settle()
         manager.emit(.connected)
-        await settle()
+        await sampler.waitForFirstSnapshot()
         await app.disconnectVPN()
         await settle()
 
@@ -672,14 +673,14 @@ struct ConnectionTransitionTests {
         let defaults = defaults ?? UserDefaults(suiteName: UUID().uuidString)!
         // Keep connection tests independent of the live quota endpoint.
         // The stub's immediate error exercises the documented fail-open path.
-        let app = AppModel(
+        let app = VPNTestFixtures.track(AppModel(
             api: StartupBackendStub(storedSession: nil, restoreResults: []),
             vpnManager: manager,
             statisticsRecorder: recorder,
             trafficSampler: sampler,
             eventNotifier: eventNotifier,
             defaults: defaults
-        )
+        ), beforeDisconnect: { (manager as? ControlledVPNManager)?.completeDisconnect() })
         app.servers = servers
         app.selectedServerID = servers.first?.id
         return app
@@ -946,15 +947,26 @@ private final class RecordingStatisticsRecorder: LocalStatisticsRecording {
 private final class ScriptedTrafficSampler: TunnelTrafficSampling {
     private var snapshots: [TunnelTrafficSnapshot]
     private var index = 0
+    private var firstSnapshotWaiter: CheckedContinuation<Void, Never>?
 
     init(_ snapshots: [TunnelTrafficSnapshot]) {
         self.snapshots = snapshots
+    }
+
+    func waitForFirstSnapshot() async {
+        guard index == 0, !snapshots.isEmpty else { return }
+        await withCheckedContinuation { firstSnapshotWaiter = $0 }
     }
 
     func currentSnapshot() -> TunnelTrafficSnapshot? {
         guard !snapshots.isEmpty else { return nil }
         let snapshot = snapshots[min(index, snapshots.count - 1)]
         index += 1
+        if index == 1 {
+            let waiter = firstSnapshotWaiter
+            firstSnapshotWaiter = nil
+            waiter?.resume()
+        }
         return snapshot
     }
 }

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import libreguard_vpn_ios
 
+@Suite(SharedVPNFixtureScope())
 @MainActor
 struct SessionRefreshRaceTests {
     @Test func lateRefreshSuccessCannotReplaceNewAccount() async throws {
@@ -294,7 +295,7 @@ struct SessionRefreshRaceTests {
     }
 
     private func makeApp(client: APIClient, vpn: SessionRaceVPNManager, defaults: UserDefaults) -> AppModel {
-        AppModel(
+        VPNTestFixtures.track(AppModel(
             api: client,
             appleStore: SessionRaceAppleStore(),
             appleCredentialBindingStore: SessionRaceAppleBindingStore(),
@@ -302,7 +303,7 @@ struct SessionRefreshRaceTests {
             latencyProbe: SessionRaceLatencyProbe(),
             vpnManager: vpn,
             defaults: defaults
-        )
+        ))
     }
 
     private func session(credentials: String, userId: String = "original-user") -> AuthSession {

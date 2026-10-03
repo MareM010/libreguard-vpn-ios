@@ -6,6 +6,7 @@ import StoreKit
 import Testing
 @testable import libreguard_vpn_ios
 
+@Suite(SharedVPNFixtureScope())
 @MainActor
 struct libreguard_vpn_iosTests {
     @Test func themeModeDefaultsToSystemForMissingOrInvalidStorage() {
@@ -39,7 +40,7 @@ struct libreguard_vpn_iosTests {
     @Test func appModelLoadsAndPersistsFavoritesForTheActiveAccount() {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let store = UserDefaultsFavoriteServerStore(defaults: defaults)
-        let app = AppModel(favoriteServerStore: store, defaults: defaults)
+        let app = VPNTestFixtures.track(AppModel(favoriteServerStore: store, defaults: defaults))
         let firstAccount = AuthSession(
             accessToken: "access-a",
             refreshToken: "refresh-a",
@@ -855,11 +856,11 @@ struct libreguard_vpn_iosTests {
                     "propagationSeconds": 15
                 ])
             }
-            let app = AppModel(
+            let app = VPNTestFixtures.track(AppModel(
                 api: client,
                 vpnManager: DNSSettingsTestVPNManager(),
                 defaults: UserDefaults(suiteName: UUID().uuidString)!
-            )
+            ))
 
             await app.refreshDNSPreference()
             #expect(app.dnsPreference?.requestedEnabled == true)
@@ -898,11 +899,11 @@ struct libreguard_vpn_iosTests {
                     "propagationSeconds": 15
                 ])
             }
-            let app = AppModel(
+            let app = VPNTestFixtures.track(AppModel(
                 api: client,
                 vpnManager: DNSSettingsTestVPNManager(),
                 defaults: UserDefaults(suiteName: UUID().uuidString)!
-            )
+            ))
 
             await app.refreshDNSPreference()
             await app.setAdBlockingEnabled(true)
@@ -952,11 +953,11 @@ struct libreguard_vpn_iosTests {
                     throw APIError(message: "Unexpected endpoint")
                 }
             }
-            let app = AppModel(
+            let app = VPNTestFixtures.track(AppModel(
                 api: client,
                 vpnManager: DNSSettingsTestVPNManager(),
                 defaults: UserDefaults(suiteName: UUID().uuidString)!
-            )
+            ))
 
             await app.refreshAccountData(showErrors: false)
 
@@ -990,11 +991,11 @@ struct libreguard_vpn_iosTests {
                     throw APIError(message: "Unexpected endpoint")
                 }
             }
-            let app = AppModel(
+            let app = VPNTestFixtures.track(AppModel(
                 api: client,
                 vpnManager: DNSSettingsTestVPNManager(),
                 defaults: UserDefaults(suiteName: UUID().uuidString)!
-            )
+            ))
 
             await app.refreshAccountData(showErrors: false)
 
@@ -1036,11 +1037,11 @@ struct libreguard_vpn_iosTests {
                     throw APIError(message: "Unexpected endpoint")
                 }
             }
-            let app = AppModel(
+            let app = VPNTestFixtures.track(AppModel(
                 api: client,
                 vpnManager: DNSSettingsTestVPNManager(),
                 defaults: defaults
-            )
+            ))
 
             await app.refreshAccountData(showErrors: false)
 
@@ -1081,11 +1082,11 @@ struct libreguard_vpn_iosTests {
                     throw APIError(message: "Unexpected endpoint")
                 }
             }
-            let app = AppModel(
+            let app = VPNTestFixtures.track(AppModel(
                 api: client,
                 vpnManager: DNSSettingsTestVPNManager(),
                 defaults: defaults
-            )
+            ))
 
             await app.refreshAccountData(showErrors: false)
 
@@ -1860,12 +1861,12 @@ struct libreguard_vpn_iosTests {
         backend.serverResponse = [server]
         let probe = RecordingLatencyProbe(result: [server.id: 12])
         let vpn = StartupVPNManager(status: .connected)
-        let app = AppModel(
+        let app = VPNTestFixtures.track(AppModel(
             api: backend,
             latencyProbe: probe,
             vpnManager: vpn,
             defaults: UserDefaults(suiteName: UUID().uuidString)!
-        )
+        ))
         app.session = startupSession()
         app.serverLatencies = [server.id: 88]
 
@@ -1889,12 +1890,12 @@ struct libreguard_vpn_iosTests {
             let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
             backend.serverResponse = [server]
             let probe = RecordingLatencyProbe(result: [server.id: 12])
-            let app = AppModel(
+            let app = VPNTestFixtures.track(AppModel(
                 api: backend,
                 latencyProbe: probe,
                 vpnManager: StartupVPNManager(status: status),
                 defaults: UserDefaults(suiteName: UUID().uuidString)!
-            )
+            ))
             app.session = startupSession()
 
             app.refreshServers(trigger: .automatic)
@@ -1910,12 +1911,12 @@ struct libreguard_vpn_iosTests {
         let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
         backend.serverResponse = [first, second]
         let probe = RecordingLatencyProbe(result: [first.id: 24, second.id: 36])
-        let app = AppModel(
+        let app = VPNTestFixtures.track(AppModel(
             api: backend,
             latencyProbe: probe,
             vpnManager: StartupVPNManager(status: .disconnected),
             defaults: UserDefaults(suiteName: UUID().uuidString)!
-        )
+        ))
         app.session = startupSession()
 
         app.refreshServers(trigger: .sceneActivation)
@@ -1932,12 +1933,12 @@ struct libreguard_vpn_iosTests {
         let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
         backend.serverError = APIError(message: "Server catalog unavailable")
         let probe = RecordingLatencyProbe(result: [server.id: 12])
-        let app = AppModel(
+        let app = VPNTestFixtures.track(AppModel(
             api: backend,
             latencyProbe: probe,
             vpnManager: StartupVPNManager(status: .disconnected),
             defaults: UserDefaults(suiteName: UUID().uuidString)!
-        )
+        ))
         app.session = startupSession()
         app.servers = [server]
         app.serverLatencies = [server.id: 88]
@@ -1957,12 +1958,12 @@ struct libreguard_vpn_iosTests {
         let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
         let vpn = StartupVPNManager(status: .disconnected)
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
-        let app = AppModel(
+        let app = VPNTestFixtures.track(AppModel(
             api: backend,
             latencyProbe: RecordingLatencyProbe(result: [server.id: 12]),
             vpnManager: vpn,
             defaults: defaults
-        )
+        ))
         app.session = startupSession()
         app.subscription = try subscriptionStatus(plan: "Pro", isPro: true)
         app.servers = [server]
@@ -1980,12 +1981,12 @@ struct libreguard_vpn_iosTests {
         backend.serverResponse = [server]
         let probe = RecordingLatencyProbe(result: [server.id: 999], holdMeasurement: true)
         let vpn = StartupVPNManager(status: .disconnected)
-        let app = AppModel(
+        let app = VPNTestFixtures.track(AppModel(
             api: backend,
             latencyProbe: probe,
             vpnManager: vpn,
             defaults: UserDefaults(suiteName: UUID().uuidString)!
-        )
+        ))
         app.session = startupSession()
         app.serverLatencies = [server.id: 45]
 
@@ -2242,7 +2243,7 @@ struct libreguard_vpn_iosTests {
         appleCredentialBindingStore: AppleCredentialBindingStoring? = nil,
         notificationCenter: NotificationCenter = .default
     ) -> AppModel {
-        AppModel(
+        VPNTestFixtures.track(AppModel(
             api: backend,
             appleStore: appleStore ?? NoOpAppleSubscriptionStore(),
             google: google,
@@ -2255,7 +2256,7 @@ struct libreguard_vpn_iosTests {
             vpnManager: vpn,
             defaults: defaults,
             appleVerificationRetryDelays: appleVerificationRetryDelays
-        )
+        ))
     }
 
     func makeClient(
