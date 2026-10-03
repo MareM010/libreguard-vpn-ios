@@ -10,7 +10,7 @@ struct SharedVPNFixtureScope: SuiteTrait, TestTrait, TestScoping {
     func provideScope(
         for test: Test,
         testCase: Test.Case?,
-        performing function: @Sendable () async throws -> Void
+        performing function: @concurrent @Sendable () async throws -> Void
     ) async throws {
         try await VPNFixtureIsolation.shared.withExclusiveAccess {
             let owner = await VPNFixtureOwner()
@@ -69,7 +69,7 @@ private actor VPNFixtureIsolation {
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     func withExclusiveAccess(
-        _ function: @Sendable () async throws -> Void
+        _ function: @concurrent @Sendable () async throws -> Void
     ) async rethrows {
         await acquire()
         defer { release() }
