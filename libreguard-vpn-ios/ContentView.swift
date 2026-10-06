@@ -455,6 +455,7 @@ private struct LoginView: View {
                         }
                         .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
                         .frame(height: 48 * scale)
+                        .frame(maxWidth: .infinity)
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         .disabled(app.isAuthenticating)
                         .accessibilityIdentifier("apple-sign-in-button")
@@ -576,6 +577,7 @@ private struct RegisterView: View {
                     }
                     .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
                     .frame(height: 50)
+                    .frame(maxWidth: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .disabled(app.isAuthenticating)
                     .accessibilityIdentifier("apple-register-button")
