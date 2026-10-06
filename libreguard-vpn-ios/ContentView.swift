@@ -378,6 +378,47 @@ private struct MainAppView: View {
     }
 }
 
+private struct GoogleSignInButtonLabel: View {
+    let height: CGFloat
+
+    private var artworkWidth: CGFloat { height * 354 / 80 }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let contentWidth = min(geometry.size.width, artworkWidth)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(.white)
+
+                Image("GoogleSignInButton")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: contentWidth, height: height)
+
+                VStack(spacing: 0) {
+                    Rectangle().fill(.white).frame(height: 2)
+                    Spacer(minLength: 0)
+                    Rectangle().fill(.white).frame(height: 2)
+                }
+                .frame(width: contentWidth, height: height)
+
+                HStack(spacing: 0) {
+                    Rectangle().fill(.white).frame(width: 2)
+                    Spacer(minLength: 0)
+                    Rectangle().fill(.white).frame(width: 2)
+                }
+                .frame(width: contentWidth, height: height)
+
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .frame(height: height)
+    }
+}
+
 private struct LoginView: View {
     @EnvironmentObject private var app: AppModel
     @Environment(\.colorScheme) private var colorScheme
@@ -470,10 +511,7 @@ private struct LoginView: View {
                         Button {
                             Task { await app.loginWithGoogle() }
                         } label: {
-                            Image("GoogleSignInButton")
-                                .resizable()
-                                .scaledToFit()
-                                .frame(height: 48 * scale)
+                            GoogleSignInButtonLabel(height: 48 * scale)
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.plain)
@@ -592,10 +630,7 @@ private struct RegisterView: View {
                     Button {
                         Task { await app.loginWithGoogle(newsletterConsent: newsletterConsent) }
                     } label: {
-                        Image("GoogleSignInButton")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(height: 48)
+                        GoogleSignInButtonLabel(height: 48)
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.plain)
