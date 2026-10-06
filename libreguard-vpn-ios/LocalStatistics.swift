@@ -152,23 +152,37 @@ struct SystemTunnelTrafficSampler: TunnelTrafficSampling {
         }
         defer { freeifaddrs(interfaces) }
 
+        return Self.snapshot(from: first)
+    }
+
+    static func snapshot(from first: UnsafeMutablePointer<ifaddrs>?) -> TunnelTrafficSnapshot? {
         var downloadedBytes: Int64 = 0
         var uploadedBytes: Int64 = 0
+        var sampledInterfaces: Set<String> = []
         var cursor: UnsafeMutablePointer<ifaddrs>? = first
 
         while let interface = cursor?.pointee {
             defer { cursor = interface.ifa_next }
 
             let name = String(cString: interface.ifa_name)
-            guard name.hasPrefix("utun"),
+            // Native IKEv2 uses ipsec interfaces; packet tunnels use utun.
+            // Only AF_LINK entries contain if_data. Address entries for IPv4
+            // and IPv6 must not be interpreted as counters or counted again.
+            guard name.hasPrefix("ipsec") || name.hasPrefix("utun"),
+                  interface.ifa_addr?.pointee.sa_family == UInt8(AF_LINK),
+                  !sampledInterfaces.contains(name),
                   let data = interface.ifa_data?.assumingMemoryBound(to: if_data.self) else {
                 continue
             }
 
+            sampledInterfaces.insert(name)
             downloadedBytes += Int64(data.pointee.ifi_ibytes)
             uploadedBytes += Int64(data.pointee.ifi_obytes)
         }
 
+        // A missing interface is not a zero counter. Let callers retain their
+        // last sample while iOS creates or replaces the tunnel interface.
+        guard !sampledInterfaces.isEmpty else { return nil }
         return TunnelTrafficSnapshot(
             downloadedBytes: downloadedBytes,
             uploadedBytes: uploadedBytes
