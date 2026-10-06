@@ -1,4 +1,5 @@
 import Foundation
+import UserNotifications
 import Testing
 @testable import libreguard_vpn_ios
 
@@ -94,6 +95,50 @@ struct ConnectionTransitionTests {
         #expect(manager.connectCalls.map(\.serverID) == [1, 2])
         #expect(manager.disconnectCalls == 1)
         #expect(app.vpnStatus == .connecting)
+    }
+
+    @Test func delayedQuotaApprovalCannotStartACancelledRequest() async throws {
+        let manager = ControlledVPNManager()
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        var completion: CheckedContinuation<CanConnectResponse, Error>?
+        backend.connectionEligibilityHandler = {
+            try await withCheckedThrowingContinuation { completion = $0 }
+        }
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)], backend: backend)
+        app.session = makeSession(userId: "quota-user")
+        app.requestConnectionToSelectedServer()
+        await settle()
+        #expect(completion != nil)
+        app.requestVPNDisconnect()
+        completion?.resume(throwing: StubConnectionError.failed)
+        await settle()
+        #expect(manager.connectCalls.isEmpty)
+        #expect(!app.isCheckingConnectionQuota)
+    }
+
+    @Test func latestRequestWinsWhenOldQuotaApprovalArrivesLate() async throws {
+        let manager = ControlledVPNManager()
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        var completions: [CheckedContinuation<CanConnectResponse, Error>] = []
+        backend.connectionEligibilityHandler = {
+            try await withCheckedThrowingContinuation { completions.append($0) }
+        }
+        let first = try makeServer(id: 1)
+        let second = try makeServer(id: 2)
+        let app = makeApp(manager: manager, servers: [first, second], backend: backend)
+        app.session = makeSession(userId: "quota-user")
+        app.requestConnectionToSelectedServer()
+        await settle()
+        app.selectServer(second)
+        app.requestConnectionToSelectedServer()
+        await settle()
+        #expect(completions.count == 2)
+        completions[1].resume(throwing: StubConnectionError.failed)
+        await settle()
+        completions[0].resume(throwing: StubConnectionError.failed)
+        await settle()
+        #expect(manager.connectCalls.map(\.serverID) == [2])
+        #expect(!app.isCheckingConnectionQuota)
     }
 
     @Test func latestConnectRequestWinsWhileDisconnecting() async throws {
@@ -662,22 +707,281 @@ struct ConnectionTransitionTests {
         #expect(notifier.events.contains(.killSwitch))
     }
 
+    @Test func handoffReleasesIKEv2BeforeStartingOpenVPN() async throws {
+        let ike = ControlledVPNManager(status: .connected)
+        let open = ControlledVPNManager()
+        let coordinator = VPNManagerCoordinator(ikev2Manager: ike, openVPNManager: open)
+        try await coordinator.connect(to: makeServer(id: 1), protocol: .openVPN, policy: .disabled)
+        #expect(ike.disconnectCalls == 1)
+        #expect(ike.stoppedProfileRecoveryProtocols.contains(.ikev2))
+        #expect(open.connectCalls.count == 1)
+        _ = await coordinator.stopAndWait(releaseProtection: true)
+    }
+
+    @Test func unsafeStoppedProfileBlocksOpenVPNStart() async throws {
+        let ike = ControlledVPNManager()
+        ike.stoppedProfileRecoveryResult = VPNStoppedProfileRecoveryResult(isApplicable: true,
+            routingReleased: false, onDemandDisabled: false, profileDisabled: false, diagnostic: "save failed")
+        let open = ControlledVPNManager()
+        let coordinator = VPNManagerCoordinator(ikev2Manager: ike, openVPNManager: open)
+        do {
+            try await coordinator.connect(to: makeServer(id: 1), protocol: .openVPN, policy: .disabled)
+            Issue.record("An unsafe profile must block startup")
+        } catch { #expect((error as? VPNConnectionFailure)?.kind == .stopFailed) }
+        #expect(open.connectCalls.isEmpty)
+    }
+
+    @Test func pendingStartIsStoppedEvenWhenNativeStatusIsDisconnected() async throws {
+        let ike = ControlledVPNManager()
+        let open = ControlledVPNManager()
+        open.returnDisconnectedAfterStart = true
+        let coordinator = VPNManagerCoordinator(ikev2Manager: ike, openVPNManager: open)
+        try await coordinator.connect(to: makeServer(id: 1), protocol: .openVPN, policy: .disabled)
+        let stopped = await coordinator.stopAndWait(releaseProtection: true)
+        #expect(stopped.isSafe)
+        #expect(open.disconnectCalls == 1)
+    }
+
+    @Test func latestCoordinatorRequestCancelsAndDrainsPreparation() async throws {
+        let ike = ControlledVPNManager()
+        let open = ControlledVPNManager()
+        open.holdConnect = true
+        let coordinator = VPNManagerCoordinator(ikev2Manager: ike, openVPNManager: open)
+        let firstServer = try makeServer(id: 1)
+        let lastServer = try makeServer(id: 2)
+        let first = Task { try await coordinator.connect(to: firstServer, protocol: .openVPN, policy: .disabled) }
+        await settle()
+        let last = Task { try await coordinator.connect(to: lastServer, protocol: .ikev2, policy: .disabled) }
+        await settle()
+        #expect(ike.connectCalls.isEmpty)
+        open.completeConnect()
+        do { try await first.value; Issue.record("Superseded preparation must cancel") }
+        catch { #expect(error is CancellationError) }
+        try await last.value
+        #expect(open.disconnectCalls == 1)
+        #expect(ike.connectCalls.map(\.serverID) == [2])
+        _ = await coordinator.stopAndWait(releaseProtection: true)
+    }
+
+    @Test func killSwitchRejectsCrossProtocolRequestBeforeDisconnect() async throws {
+        let manager = ControlledVPNManager(status: .connected)
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)])
+        app.subscription = try makeSubscription(isPro: true)
+        await app.setKillSwitchEnabled(true)
+        app.selectVPNProtocol(.openVPN)
+        app.requestConnectionToSelectedServer()
+        await settle()
+        #expect(manager.disconnectCalls == 0)
+        #expect(manager.connectCalls.isEmpty)
+        #expect(app.vpnStatus == .connected)
+        #expect(app.presentedError?.message == VPNConnectionFailure(kind: .protectedSwitch).localizedDescription)
+    }
+
+    @Test func deniedVPNSetupOffersExplicitRetry() async throws {
+        let manager = ControlledVPNManager()
+        manager.connectError = VPNConnectionFailure(kind: .permissionDenied)
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)])
+        app.requestConnectionToSelectedServer()
+        await settle()
+        let errorID = try #require(app.presentedError?.id)
+        #expect(app.vpnRecoveryActionTitle == "Retry VPN Setup")
+        #expect(manager.connectCalls.count == 1)
+        manager.connectError = nil
+        app.retryVPNSetup(errorID: errorID)
+        await settle()
+        #expect(manager.connectCalls.count == 2)
+        #expect(app.vpnStatus == .connecting)
+    }
+
+    @Test func changingProtocolInvalidatesPermissionRetry() async throws {
+        let manager = ControlledVPNManager()
+        manager.connectError = VPNConnectionFailure(kind: .permissionDenied)
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)])
+        app.subscription = try makeSubscription(isPro: true)
+        app.requestConnectionToSelectedServer()
+        await settle()
+        let errorID = try #require(app.presentedError?.id)
+        app.selectVPNProtocol(.openVPN)
+        app.retryVPNSetup(errorID: errorID)
+        await settle()
+        #expect(manager.connectCalls.count == 1)
+    }
+
+    @Test func staleAttemptErrorDoesNotReplaceNewConnection() async throws {
+        let manager = ControlledVPNManager()
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1), try makeServer(id: 2)])
+        app.requestConnectionToSelectedServer()
+        await settle()
+        let oldID = manager.attemptID
+        app.selectedServerID = 2
+        app.requestConnectionToSelectedServer()
+        await settle()
+        manager.onAttemptEvent?(VPNAttemptEvent(attemptID: oldID, protocolName: .ikev2,
+            phase: .starting, failure: VPNConnectionFailure(kind: .connectionFailed)))
+        #expect(app.presentedError == nil)
+        #expect(app.vpnStatus == .connecting)
+        #expect(manager.connectCalls.last?.serverID == 2)
+    }
+
+    @Test func terminalStartupCallbackFinishesConnecting() async throws {
+        let manager = ControlledVPNManager()
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)])
+        app.requestConnectionToSelectedServer()
+        await settle()
+        manager.onAttemptEvent?(VPNAttemptEvent(attemptID: manager.attemptID, protocolName: .ikev2,
+            phase: .starting, nativeStartupObserved: true))
+        manager.emit(.disconnected)
+        await settle()
+        #expect(app.vpnStatus == .disconnected)
+        #expect(app.presentedError != nil)
+    }
+
+    @Test func invalidStartupStatusCancelsTheStartupDeadline() async throws {
+        let clock = ManualVPNClock()
+        let ike = ControlledVPNManager()
+        let coordinator = VPNManagerCoordinator(ikev2Manager: ike, openVPNManager: ControlledVPNManager(),
+            timing: VPNConnectionTiming(sleep: clock.sleep))
+        var failures: [VPNConnectionFailure.Kind] = []
+        coordinator.onAttemptEvent = { event in
+            if let failure = event.failure { failures.append(failure.kind) }
+        }
+        try await coordinator.connect(to: makeServer(id: 1), protocol: .ikev2, policy: .disabled)
+        ike.onAttemptEvent?(VPNAttemptEvent(attemptID: ike.attemptID, protocolName: .ikev2,
+            phase: .starting, nativeStartupObserved: true))
+        ike.emit(.invalid)
+        clock.advance(.seconds(30))
+        await settle()
+        #expect(failures == [.connectionFailed])
+        _ = await coordinator.stopAndWait(releaseProtection: true)
+    }
+
+    @Test func startupTimeoutFinishesTheSpinnerAndCancelsPendingStart() async throws {
+        let clock = ManualVPNClock()
+        let ike = ControlledVPNManager()
+        let coordinator = VPNManagerCoordinator(ikev2Manager: ike, openVPNManager: ControlledVPNManager(),
+            timing: VPNConnectionTiming(sleep: clock.sleep))
+        let app = makeApp(manager: coordinator, servers: [try makeServer(id: 1)])
+        app.requestConnectionToSelectedServer()
+        await settle()
+        clock.advance(.seconds(30))
+        await settle()
+        #expect(app.vpnStatus == .disconnected)
+        #expect(app.presentedError?.message == VPNConnectionFailure(kind: .startupTimeout).localizedDescription)
+        #expect(ike.disconnectCalls == 1)
+        #expect(app.vpnRecoveryActionTitle == "Retry Connection")
+    }
+
+    @Test func approvalWaitingDoesNotConsumeStartupDeadline() async throws {
+        let clock = ManualVPNClock()
+        let ike = ControlledVPNManager()
+        ike.holdConnect = true
+        let coordinator = VPNManagerCoordinator(ikev2Manager: ike, openVPNManager: ControlledVPNManager(),
+            timing: VPNConnectionTiming(sleep: clock.sleep))
+        let app = makeApp(manager: coordinator, servers: [try makeServer(id: 1)])
+        app.requestConnectionToSelectedServer()
+        await settle()
+        clock.advance(.seconds(30))
+        await settle()
+        #expect(app.presentedError == nil)
+        #expect(ike.disconnectCalls == 0)
+        ike.completeConnect()
+        await settle()
+        clock.advance(.seconds(30))
+        await settle()
+        #expect(app.presentedError?.message == VPNConnectionFailure(kind: .startupTimeout).localizedDescription)
+    }
+
+    @Test func stopDeadlineRetainsCleanupLockAndBlocksNewStartUntilNativeCompletion() async throws {
+        let clock = ManualVPNClock()
+        let ike = ControlledVPNManager(status: .connected)
+        ike.holdDisconnect = true
+        let open = ControlledVPNManager()
+        let coordinator = VPNManagerCoordinator(ikev2Manager: ike, openVPNManager: open,
+            timing: VPNConnectionTiming(sleep: clock.sleep))
+        let stop = Task { await coordinator.stopAndWait(releaseProtection: true) }
+        await settle()
+        clock.advance(.seconds(10))
+        #expect(await stop.value.isSafe == false)
+        do {
+            try await coordinator.connect(to: makeServer(id: 1), protocol: .openVPN, policy: .disabled)
+            Issue.record("An unfinished cleanup must block another start")
+        } catch { #expect((error as? VPNConnectionFailure)?.kind == .stopFailed) }
+        #expect(open.connectCalls.isEmpty)
+        ike.completeDisconnect()
+        await settle()
+        try await coordinator.connect(to: makeServer(id: 1), protocol: .openVPN, policy: .disabled)
+        #expect(open.connectCalls.count == 1)
+        _ = await coordinator.stopAndWait(releaseProtection: true)
+    }
+
+    @Test func failedStopBlocksQueuedStartAndRetryKeepsLatestServer() async throws {
+        let ike = ControlledVPNManager()
+        let coordinator = VPNManagerCoordinator(ikev2Manager: ike, openVPNManager: ControlledVPNManager())
+        let app = makeApp(manager: coordinator, servers: [try makeServer(id: 1), try makeServer(id: 2)])
+        app.requestConnectionToSelectedServer()
+        await settle()
+        ike.stopResultOverride = VPNStopResult(tunnelStopped: false, profileReleased: false)
+        app.selectedServerID = 2
+        app.requestConnectionToSelectedServer()
+        await settle()
+        #expect(ike.connectCalls.map(\.serverID) == [1])
+        #expect(app.connectionRecoveryRequired)
+        #expect(app.vpnRecoveryActionTitle == "Retry Cleanup")
+        ike.stopResultOverride = nil
+        app.retryVPNRecovery()
+        await settle()
+        #expect(ike.connectCalls.map(\.serverID) == [1, 2])
+    }
+
+    @Test func restoredConnectionCanRetryCleanupWithoutAConnectRequest() async throws {
+        let manager = ControlledVPNManager(status: .connected)
+        manager.stopResultOverride = VPNStopResult(tunnelStopped: false, profileReleased: false)
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)])
+        app.requestVPNDisconnect()
+        await settle()
+        #expect(app.connectionRecoveryRequired)
+        #expect(app.vpnRecoveryActionTitle == "Retry Cleanup")
+        manager.stopResultOverride = nil
+        app.retryVPNRecovery()
+        await settle()
+        #expect(manager.disconnectCalls == 1)
+        #expect(manager.connectCalls.isEmpty)
+        #expect(app.vpnStatus == .disconnected)
+        #expect(!app.connectionRecoveryRequired)
+    }
+
+    @Test func notificationDenialDoesNotPreventVPNAndSettingsRefreshClearsNotice() async throws {
+        let notifications = DeniedNotificationAuthorizer()
+        let manager = ControlledVPNManager()
+        let app = makeApp(manager: manager, servers: [try makeServer(id: 1)], notifications: notifications)
+        app.requestConnectionToSelectedServer()
+        await settle()
+        #expect(manager.connectCalls.count == 1)
+        #expect(app.notificationPermissionNotice?.contains("Notifications are off") == true)
+        notifications.authorizationStatus = .authorized
+        await app.refreshNotificationAuthorizationStatus()
+        #expect(app.notificationPermissionNotice == nil)
+    }
+
     private func makeApp(
         manager: VPNManaging,
         servers: [VPNServer],
         recorder: LocalStatisticsRecording? = nil,
         sampler: TunnelTrafficSampling = ScriptedTrafficSampler([]),
         eventNotifier: VPNEventNotifying? = nil,
-        defaults: UserDefaults? = nil
+        defaults: UserDefaults? = nil,
+        notifications: VPNNotificationAuthorizing? = nil,
+        backend: StartupBackendStub? = nil
     ) -> AppModel {
         let defaults = defaults ?? UserDefaults(suiteName: UUID().uuidString)!
         // Keep connection tests independent of the live quota endpoint.
         // The stub's immediate error exercises the documented fail-open path.
         let app = VPNTestFixtures.track(AppModel(
-            api: StartupBackendStub(storedSession: nil, restoreResults: []),
+            api: backend ?? StartupBackendStub(storedSession: nil, restoreResults: []),
             vpnManager: manager,
             statisticsRecorder: recorder,
             trafficSampler: sampler,
+            notificationService: notifications,
             eventNotifier: eventNotifier,
             defaults: defaults
         ), beforeDisconnect: { (manager as? ControlledVPNManager)?.completeDisconnect() })
@@ -724,7 +1028,7 @@ struct ConnectionTransitionTests {
     }
 
     private func settle() async {
-        for _ in 0..<8 {
+        for _ in 0..<40 {
             await Task.yield()
         }
     }
@@ -755,6 +1059,25 @@ private final class ControlledVPNManager: VPNManaging {
     var holdDisconnect = false
     var connectError: Error?
     var returnDisconnectedAfterStart = false
+    var holdConnect = false
+    var stopResultOverride: VPNStopResult?
+    func stopAndWait(releaseProtection: Bool) async -> VPNStopResult {
+        if let stopResultOverride { return stopResultOverride }
+        await disconnect()
+        return .stopped
+    }
+    var attemptID = UUID()
+    var onAttemptEvent: ((VPNAttemptEvent) -> Void)?
+    var connectedProtocol: VPNConfigurationProtocol? { status.isConnected || status.isBusy ? (connectCalls.last?.protocolName ?? .ikev2) : nil }
+    private var connectContinuation: CheckedContinuation<Void, Never>?
+
+    func setAttemptContext(_ id: UUID, protocol protocolName: VPNConfigurationProtocol) { attemptID = id }
+    func completeConnect() {
+        holdConnect = false
+        connectContinuation?.resume()
+        connectContinuation = nil
+    }
+
     var trafficSnapshot: TunnelTrafficSnapshot?
     private(set) var connectCalls: [ConnectCall] = []
     private(set) var disconnectCalls = 0
@@ -783,6 +1106,10 @@ private final class ControlledVPNManager: VPNManaging {
         connectCalls.append(ConnectCall(serverID: server.id, protocolName: protocolName, policy: policy))
         status = .connecting
         onStatusChange?(status)
+        if holdConnect {
+            await withCheckedContinuation { connectContinuation = $0 }
+            try Task.checkCancellation()
+        }
         if let connectError {
             status = .disconnected
             onStatusChange?(status)
@@ -891,6 +1218,14 @@ private final class CleanupTrackingVPNManager: VPNManaging {
         onStatusChange?(status)
         return .noProfile
     }
+}
+
+@MainActor
+private final class DeniedNotificationAuthorizer: VPNNotificationAuthorizing {
+    var authorizationStatus: UNAuthorizationStatus = .denied
+    func refreshAuthorizationStatus() async {}
+    func requestAuthorizationIfNeeded() async -> VPNNotificationAuthorizationOutcome { .denied }
+    func openSystemSettings() {}
 }
 
 private enum StubConnectionError: LocalizedError {

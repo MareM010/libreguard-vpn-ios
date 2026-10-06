@@ -119,11 +119,18 @@ struct ContentView: View {
                 .presentationDetents([.medium, .large])
         }
         .alert(item: $app.presentedError) { error in
-            Alert(
+            if let action = app.vpnRecoveryActionTitle {
+                Alert(
+                    title: Text("LibreGuard"),
+                    message: Text(error.message),
+                    primaryButton: .default(Text(action)) { app.retryVPNSetup(errorID: error.id) },
+                    secondaryButton: .cancel()
+                )
+            } else { Alert(
                 title: Text(error.code == "APP_VERSION_BLOCKED" ? "Update Required" : "LibreGuard"),
                 message: Text(([error.message] + error.fieldErrors).joined(separator: "\n")),
                 dismissButton: .default(Text("OK"))
-            )
+            ) }
         }
         .confirmationDialog(
             "Disable Kill Switch and disconnect?",
@@ -961,6 +968,14 @@ private struct DashboardView: View {
                 }
 
                 statusControl(compact: compact)
+                if let notice = app.notificationPermissionNotice {
+                    VStack(spacing: 6) {
+                        Text(notice).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                        Button("Open Notification Settings") { app.openNotificationSettings() }
+                            .font(.caption.weight(.semibold))
+                    }
+                    .accessibilityIdentifier("notificationPermissionNotice")
+                }
                 connectedStats(compact: compact)
 
                 Spacer(minLength: compact ? 2 : 8)
@@ -1002,8 +1017,12 @@ private struct DashboardView: View {
             HStack {
                 HStack(spacing: 12) {
                     LibreGuardLogo(size: compact ? 34 : 40)
-                    Text("LibreGuard")
-                        .font(.system(size: compact ? 21 : 24, weight: .semibold, design: .rounded))
+                    Image("LibreGuardVPNWordmark")
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: compact ? 140 : 168, height: compact ? 24 : 28)
+                        .clipped()
+                        .accessibilityLabel("LibreGuard VPN")
                 }
                 Spacer()
                 Text("\(app.currentPlanDisplayName) Plan")
@@ -1016,8 +1035,20 @@ private struct DashboardView: View {
         }
     }
 
+    @ViewBuilder
     private func statusControl(compact: Bool) -> some View {
-        ConnectionHeroView(
+        if app.connectionRecoveryRequired {
+            VStack(spacing: 12) {
+                Image(systemName: "exclamationmark.circle").font(.largeTitle)
+                Text("VPN needs attention").font(.headline)
+                Text("The previous connection needs to finish stopping before you connect again.")
+                    .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                Button("Retry Cleanup") { app.retryVPNRecovery() }
+                    .buttonStyle(.borderedProminent)
+            }
+            .padding(.vertical, 24)
+            .accessibilityIdentifier("vpnRecoveryRequired")
+        } else { ConnectionHeroView(
             status: status,
             hasQueuedReconnect: app.hasQueuedVPNReconnect,
             preparationMessage: app.certificatePreparationMessage,
@@ -1026,6 +1057,7 @@ private struct DashboardView: View {
         )
         .animation(.easeInOut(duration: 0.25), value: app.hasQueuedVPNReconnect)
         .padding(.top, compact ? 0 : 8)
+        }
     }
 
     @ViewBuilder

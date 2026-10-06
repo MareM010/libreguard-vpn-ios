@@ -16,6 +16,14 @@ final class OpenVPNManager: VPNManaging {
     )
     private let providerBundleIdentifierOverride: String?
     private var statusObserver: NSObjectProtocol?
+    private let preferencesAccess: VPNPreferencesAccess
+    private let timing: VPNConnectionTiming
+    private var attemptID = UUID()
+    private var phase: VPNAttemptPhase = .preparing
+    private var lifecycleGeneration: UInt = 0
+    private var expectedStop = false
+    private var isPreparing = false
+
 
     var status: VPNConnectionState = .disconnected {
         didSet {
@@ -30,6 +38,23 @@ final class OpenVPNManager: VPNManaging {
 
     var onStatusChange: ((VPNConnectionState) -> Void)?
     var onDisconnectError: ((Error) -> Void)?
+    var onAttemptEvent: ((VPNAttemptEvent) -> Void)?
+    var connectedProtocol: VPNConfigurationProtocol? { status.isConnected || status.isBusy ? .openVPN : nil }
+    var protectionIsInstalled: Bool {
+        manager.isEnabled && manager.protocolConfiguration?.includeAllNetworks == true
+    }
+
+    func setAttemptContext(_ id: UUID, protocol protocolName: VPNConfigurationProtocol) {
+        attemptID = id
+        lifecycleGeneration &+= 1
+        expectedStop = false
+    }
+
+    private func publish(_ phase: VPNAttemptPhase) {
+        self.phase = phase
+        onAttemptEvent?(VPNAttemptEvent(attemptID: attemptID, protocolName: .openVPN, phase: phase))
+    }
+
 
     init(
         api: BackendServicing,
@@ -37,13 +62,17 @@ final class OpenVPNManager: VPNManaging {
         deviceKeyStore: VPNDeviceKeyProviding = VPNDeviceKeyStore(),
         protocolBuilder: OpenVPNTunnelProtocolBuilding = TunnelKitOpenVPNProtocolBuilder(),
         manager: NETunnelProviderManager = NETunnelProviderManager(),
-        providerBundleIdentifier: String? = nil
+        providerBundleIdentifier: String? = nil,
+        preferencesAccess: VPNPreferencesAccess? = nil,
+        timing: VPNConnectionTiming = VPNConnectionTiming()
     ) {
         self.api = api
         self.configurationResolver = resolver ?? VPNConfigurationResolver(api: api)
         self.deviceKeyStore = deviceKeyStore
         self.protocolBuilder = protocolBuilder
         self.manager = manager
+        self.preferencesAccess = preferencesAccess ?? VPNPreferencesAccess()
+        self.timing = timing
         self.providerBundleIdentifierOverride = providerBundleIdentifier
         observeStatusChanges()
     }
@@ -67,7 +96,7 @@ final class OpenVPNManager: VPNManaging {
 
         do {
             logger.debug("Loading OpenVPN preferences for status refresh")
-            try await loadPreferences()
+            try await preferencesAccess.withExclusiveAccess { try await self.loadPreferences() }
             logger.debug("OpenVPN status refresh completed with status \(self.manager.connection.status.rawValue, privacy: .public)")
             updateStatus(from: manager.connection.status)
         } catch {
@@ -90,6 +119,10 @@ final class OpenVPNManager: VPNManaging {
         }
 
         status = .connecting
+        expectedStop = false
+        isPreparing = true
+        publish(.preparing)
+        defer { isPreparing = false }
 
         do {
             logger.debug("Resolving OpenVPN configuration from backend")
@@ -128,26 +161,33 @@ final class OpenVPNManager: VPNManaging {
             )
 
             let providerBundleIdentifier = try resolvedProviderBundleIdentifier()
-            try await loadPreferences()
-            try Task.checkCancellation()
-            try await removeStaleProviderConfiguration(ifProviderIdentifierDiffersFrom: providerBundleIdentifier)
-            tunnelProtocol.providerBundleIdentifier = providerBundleIdentifier
-            policy.apply(to: tunnelProtocol)
+            try await preferencesAccess.withExclusiveAccess {
+                try await self.loadPreferences()
+                try Task.checkCancellation()
+                try await self.removeStaleProviderConfiguration(ifProviderIdentifierDiffersFrom: providerBundleIdentifier)
+                tunnelProtocol.providerBundleIdentifier = providerBundleIdentifier
+                policy.apply(to: tunnelProtocol)
 
-            manager.localizedDescription = "LibreGuard OpenVPN"
-            manager.protocolConfiguration = tunnelProtocol
-            manager.isEnabled = true
-            applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
+                self.manager.localizedDescription = "LibreGuard OpenVPN"
+                self.manager.protocolConfiguration = tunnelProtocol
+                self.manager.isEnabled = true
+                self.applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
 
-            logger.debug("Saving OpenVPN preferences")
-            try await savePreferences()
-            try Task.checkCancellation()
-            logger.debug("Reloading OpenVPN preferences before tunnel start")
-            try await loadPreferences()
-            try Task.checkCancellation()
-            try verifySavedProviderConfiguration(expectedIdentifier: providerBundleIdentifier)
-            logger.debug("Starting OpenVPN tunnel")
-            try manager.connection.startVPNTunnel()
+                self.logger.debug("Saving OpenVPN preferences")
+                self.publish(.awaitingApproval)
+                try await self.savePreferences()
+                try Task.checkCancellation()
+                self.publish(.starting)
+                try await IKEv2TunnelStarter.start(
+                    reload: {
+                        try await self.loadPreferences()
+                        try self.verifySavedProviderConfiguration(expectedIdentifier: providerBundleIdentifier)
+                    },
+                    startTunnel: {
+                        try self.manager.connection.startVPNTunnel(options: ["LibreGuardAttemptID": self.attemptID.uuidString as NSString])
+                    }
+                )
+            }
             try Task.checkCancellation()
             logger.info("OpenVPN startVPNTunnel() returned without throwing")
             updateStatus(from: manager.connection.status)
@@ -161,38 +201,63 @@ final class OpenVPNManager: VPNManaging {
             logger.error("OpenVPN connect failed: \(Self.describe(error))")
             OpenVPNConnectionMetadataStore.clear()
             status = .disconnected
-            throw error
+            if phase == .preparing { throw error }
+            throw VPNConnectionFailure.classify(error, phase: phase)
         }
     }
 
     @discardableResult
     func apply(policy: VPNConnectionPolicy) async throws -> Bool {
         guard !isRunningInSimulator else { return false }
-        try await loadPreferences()
-        guard let tunnelProtocol = manager.protocolConfiguration else { return false }
-        policy.apply(to: tunnelProtocol)
-        applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
-        try await savePreferences()
-        try await loadPreferences()
-        return manager.protocolConfiguration?.includeAllNetworks == policy.killSwitchEnabled
+        return try await preferencesAccess.withExclusiveAccess {
+            try await self.loadPreferences()
+            guard let tunnelProtocol = self.manager.protocolConfiguration else { return false }
+            policy.apply(to: tunnelProtocol)
+            self.applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
+            try await self.savePreferences()
+            try await self.loadPreferences()
+            return self.manager.protocolConfiguration?.includeAllNetworks == policy.killSwitchEnabled
+                && self.manager.isOnDemandEnabled == policy.onDemandEnabled
+        }
     }
 
     func disconnect() async {
-        logger.info("OpenVPN disconnect requested")
+        _ = await stopAndWait(releaseProtection: false)
+    }
+
+    func stopAndWait(releaseProtection: Bool) async -> VPNStopResult {
+        expectedStop = true
+        lifecycleGeneration &+= 1
+        publish(.stopping)
+        guard !isRunningInSimulator else { status = .disconnected; return .stopped }
         status = .disconnecting
         manager.connection.stopVPNTunnel()
-        await refreshStatus()
+        let released = releaseProtection ? await disableOnDemandAndProfile() : true
+        // Disable persisted pending starts before accepting a later request.
+        manager.connection.stopVPNTunnel()
+        let stopped = await waitForTunnelToStop()
+        return VPNStopResult(tunnelStopped: stopped, profileReleased: released)
     }
 
     @discardableResult
     func disableOnDemandAndProfile() async -> Bool {
         guard !isRunningInSimulator else { return true }
-        guard manager.connection.status != .invalid else { return true }
+        do {
+            return try await preferencesAccess.withExclusiveAccess {
+                await self.disableOnDemandAndProfileWithExclusiveAccess()
+            }
+        } catch { return false }
+    }
+
+    private func disableOnDemandAndProfileWithExclusiveAccess() async -> Bool {
 
         do {
             try await loadPreferences()
             guard manager.protocolConfiguration != nil else { return true }
 
+            if let profile = manager.protocolConfiguration {
+                VPNConnectionPolicy.disabled.apply(to: profile)
+            }
             manager.onDemandRules = nil
             manager.isOnDemandEnabled = false
             manager.isEnabled = false
@@ -201,13 +266,15 @@ final class OpenVPNManager: VPNManaging {
 
             let hasNoOnDemandRules = manager.onDemandRules?.isEmpty ?? true
             let disabled = !manager.isOnDemandEnabled && !manager.isEnabled && hasNoOnDemandRules
+                && manager.protocolConfiguration?.includeAllNetworks != true
+                && manager.protocolConfiguration?.enforceRoutes != true
             if !disabled {
                 logger.error("OpenVPN profile remained enabled after disabling on-demand")
             }
             return disabled
         } catch {
             logger.error("Failed to disable OpenVPN on-demand profile: \(Self.describe(error))")
-            return manager.connection.status == .invalid
+            return false
         }
     }
 
@@ -234,7 +301,11 @@ final class OpenVPNManager: VPNManaging {
         }
 
         do {
-            try await removePreferences()
+            try await preferencesAccess.withExclusiveAccess {
+                try await self.loadPreferences()
+                try await self.removePreferences()
+                try await self.loadPreferences()
+            }
             OpenVPNConnectionMetadataStore.clear()
             status = VPNConnectionState(networkExtensionStatus: manager.connection.status)
             let result = VPNProfileCleanupResult(
@@ -295,74 +366,29 @@ final class OpenVPNManager: VPNManaging {
                 guard let self else { return }
                 let previous = self.status
                 self.updateStatus(from: self.manager.connection.status)
-                if previous != .disconnected, self.status == .disconnected {
-                    let packetTunnelError = VPNSharedSessionStore.loadTunnelError()
+                if self.status == .connected { self.publish(.connected) }
+                if previous != .disconnected, self.status == .disconnected, !self.expectedStop {
+                    let generation = self.lifecycleGeneration
+                    let id = self.attemptID
+                    let packetError = VPNSharedSessionStore.loadTunnelError()
                     VPNSharedSessionStore.clearTunnelError()
                     let tunnelKitError = Self.loadTunnelKitLastError()
-                    let tunnelKitLog = Self.loadTunnelKitDebugLogTail()
-                    let lifecycleLog = OpenVPNExtensionLifecycleJournal.tail()
-                    self.manager.connection.fetchLastDisconnectError(completionHandler: { error in
-                        if let packetTunnelError {
-                            var description = packetTunnelError
-                            if let tunnelKitError, !description.contains("TunnelKitLastError=") {
-                                description += " | TunnelKitLastError=\(tunnelKitError)"
+                    self.manager.connection.fetchLastDisconnectError { error in
+                        Task { @MainActor [weak self] in
+                            guard let self, generation == self.lifecycleGeneration,
+                                  id == self.attemptID, !self.expectedStop,
+                                  self.status == .disconnected else { return }
+                            if let description = packetError ?? tunnelKitError {
+                                let providerError = NSError(domain: "OpenVPNPacketTunnel", code: 1,
+                                    userInfo: [NSLocalizedDescriptionKey: description])
+                                self.onDisconnectError?(VPNConnectionFailure.classify(providerError, phase: self.phase))
+                            } else if let error {
+                                self.onDisconnectError?(VPNConnectionFailure.classify(error, phase: self.phase))
+                            } else {
+                                self.logger.info("OpenVPN tunnel stopped without a NetworkExtension error")
                             }
-                            var userInfo: [String: Any] = [NSLocalizedDescriptionKey: description]
-                            if let error {
-                                userInfo[NSUnderlyingErrorKey] = error
-                            }
-                            let detailedError = NSError(
-                                domain: "OpenVPNPacketTunnel",
-                                code: 1,
-                                userInfo: userInfo
-                            )
-                            self.logger.error("OpenVPN packet tunnel failure: \(description, privacy: .public)")
-                            if let tunnelKitLog {
-                                self.logger.error("TunnelKit debug log tail:\n\(tunnelKitLog, privacy: .public)")
-                            }
-                            if let lifecycleLog {
-                                self.logger.error("OpenVPN extension lifecycle tail:\n\(lifecycleLog, privacy: .public)")
-                            }
-                            Task { @MainActor in
-                                self.onDisconnectError?(detailedError)
-                            }
-                            return
                         }
-                        if let tunnelKitError {
-                            self.logger.error("TunnelKitLastError=\(tunnelKitError, privacy: .public)")
-                        }
-                        if let tunnelKitLog {
-                            self.logger.error("TunnelKit debug log tail:\n\(tunnelKitLog, privacy: .public)")
-                        }
-                        if let lifecycleLog {
-                            self.logger.error("OpenVPN extension lifecycle tail:\n\(lifecycleLog, privacy: .public)")
-                        }
-                        if let tunnelKitError {
-                            var userInfo: [String: Any] = [
-                                NSLocalizedDescriptionKey: "OpenVPN provider failed: TunnelKitLastError=\(tunnelKitError)"
-                            ]
-                            if let error {
-                                userInfo[NSUnderlyingErrorKey] = error
-                            }
-                            let detailedError = NSError(
-                                domain: "OpenVPNPacketTunnel",
-                                code: 1,
-                                userInfo: userInfo
-                            )
-                            Task { @MainActor in
-                                self.onDisconnectError?(detailedError)
-                            }
-                            return
-                        }
-                        guard let error else {
-                            self.logger.error("OpenVPN tunnel disconnected without a NetworkExtension error")
-                            return
-                        }
-                        self.logger.error("OpenVPN tunnel disconnect error: \(Self.describe(error), privacy: .public)")
-                        Task { @MainActor in
-                            self.onDisconnectError?(error)
-                        }
-                    })
+                    }
                 }
             }
         }
@@ -373,7 +399,9 @@ final class OpenVPNManager: VPNManaging {
         manager.isOnDemandEnabled = enabled
     }
 
-    private func waitForTunnelToStop(maximumAttempts: Int = 25) async -> Bool {
+    private func waitForTunnelToStop(maximumAttempts: Int? = nil) async -> Bool {
+        let seconds = Double(timing.stop.components.seconds) + Double(timing.stop.components.attoseconds) / 1e18
+        let maximumAttempts = maximumAttempts ?? max(0, Int(ceil(seconds / 0.2)))
         for attempt in 0...maximumAttempts {
             let observedStatus = VPNConnectionState(networkExtensionStatus: manager.connection.status)
             if observedStatus == .disconnected || observedStatus == .invalid {
@@ -385,7 +413,7 @@ final class OpenVPNManager: VPNManaging {
                 status = observedStatus
                 return false
             }
-            try? await Task.sleep(for: .milliseconds(200))
+            try? await timing.sleep(.milliseconds(200))
         }
         return false
     }
@@ -444,23 +472,21 @@ final class OpenVPNManager: VPNManaging {
         _ requestData: Data,
         through providerSession: NETunnelProviderSession
     ) async throws -> Data {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
-            do {
-                try providerSession.sendProviderMessage(requestData) { data in
-                    guard let data else {
-                        continuation.resume(throwing: OpenVPNProviderMessageError.invalidMessage)
-                        return
-                    }
-                    continuation.resume(returning: data)
-                }
-            } catch {
-                continuation.resume(throwing: error)
+        try await VPNCallbackDeadline.run(timeout: timing.providerMessage, sleep: timing.sleep) { complete in
+            try providerSession.sendProviderMessage(requestData) { data in
+                if let data { complete(.success(data)) }
+                else { complete(.failure(OpenVPNProviderMessageError.invalidMessage)) }
             }
         }
     }
 
     private func updateStatus(from neStatus: NEVPNStatus) {
+        if neStatus == .connecting || neStatus == .reasserting {
+            onAttemptEvent?(VPNAttemptEvent(attemptID: attemptID, protocolName: .openVPN,
+                phase: .starting, nativeStartupObserved: true))
+        }
         let mappedStatus = VPNConnectionState(networkExtensionStatus: neStatus)
+        if isPreparing, mappedStatus == .disconnected || mappedStatus == .invalid { return }
         if mappedStatus.isConnected, !hasIPv6BlockingConfiguration {
             logger.error("Refusing to report OpenVPN connected without IPv6 blocking configuration")
             manager.connection.stopVPNTunnel()

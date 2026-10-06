@@ -94,6 +94,26 @@ final class AppModel: ObservableObject {
     @Published var isKillSwitchDisconnectConfirmationPresented = false
     @Published private(set) var sessionMetrics: VPNSessionMetrics?
     @Published private(set) var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
+    @Published private(set) var notificationPermissionNotice: String?
+    @Published private(set) var connectionRecoveryRequired = false
+    @Published private(set) var connectionAttemptPhase: VPNAttemptPhase?
+    private var lastVPNRequest: VPNConnectRequest?
+    private var hasObservedNativeStartup = false
+    private var vpnRetryContext: VPNRetryContext?
+
+    private struct VPNRetryContext {
+        let errorID: UUID
+        let request: VPNConnectRequest?
+        let generation: UInt
+        let userID: String?
+        let failure: VPNConnectionFailure
+    }
+
+    var vpnRecoveryActionTitle: String? {
+        guard let context = vpnRetryContext, presentedError?.id == context.errorID else { return nil }
+        return context.failure.retryTitle
+    }
+
     @Published private(set) var sessionCleanupState: SessionCleanupState?
     @Published var retryAfterSeconds = 0
 
@@ -116,7 +136,7 @@ final class AppModel: ObservableObject {
     private let favoriteServerStore: FavoriteServerStoring
     private let statisticsRecorder: LocalStatisticsRecording?
     private let trafficSampler: TunnelTrafficSampling
-    private let notificationService: VPNNotificationService
+    private let notificationService: VPNNotificationAuthorizing
     private let eventNotifier: VPNEventNotifying
     private let liveActivityController: VPNLiveActivityControlling
     private let logger = Logger(
@@ -159,6 +179,8 @@ final class AppModel: ObservableObject {
     private var trafficMonitorTask: Task<Void, Never>?
     private var liveActivityUpdateCounter = 0
     private var vpnTransitionGeneration: UInt = 0
+    private var connectionPreflightGeneration: UInt = 0
+    private var connectionPreflightTask: Task<Void, Never>?
     private var activeVPNTransition: VPNTransitionRequest?
     private var pendingStatisticsRequest: VPNConnectRequest?
     private var activeStatisticsSession: ActiveStatisticsSession?
@@ -211,7 +233,7 @@ final class AppModel: ObservableObject {
         favoriteServerStore: FavoriteServerStoring? = nil,
         statisticsRecorder: LocalStatisticsRecording? = nil,
         trafficSampler: TunnelTrafficSampling = SystemTunnelTrafficSampler(),
-        notificationService: VPNNotificationService? = nil,
+        notificationService: VPNNotificationAuthorizing? = nil,
         eventNotifier: VPNEventNotifying? = nil,
         liveActivityController: VPNLiveActivityControlling? = nil,
         defaults: UserDefaults = .standard,
@@ -275,7 +297,16 @@ final class AppModel: ObservableObject {
             self?.handleVPNStatusChange(status)
         }
         self.vpn.onDisconnectError = { [weak self] error in
-            self?.present(error)
+            guard let self else { return }
+            self.finishVPNFailure(error)
+        }
+        self.vpn.onAttemptEvent = { [weak self] event in
+            guard let self, event.attemptID == self.lastVPNRequest?.sessionID else { return }
+            if let failure = event.failure { self.finishVPNFailure(failure) }
+            else {
+                self.connectionAttemptPhase = event.phase
+                self.hasObservedNativeStartup = self.hasObservedNativeStartup || event.nativeStartupObserved
+            }
         }
         self.vpn.setCertificatePreparationHandler { [weak self] message in
             Task { @MainActor [weak self] in
@@ -1520,6 +1551,7 @@ final class AppModel: ObservableObject {
             }
             return
         }
+        vpnRetryContext = nil
         selectedVPNProtocol = protocolName
         protocolSelectionStore.selectedProtocol = protocolName
     }
@@ -1595,6 +1627,7 @@ final class AppModel: ObservableObject {
             isKillSwitchDisconnectConfirmationPresented = true
             return
         }
+        cancelConnectionPreflight()
         queuedVPNConnectRequest = nil
 
         switch vpnStatus {
@@ -1795,6 +1828,55 @@ final class AppModel: ObservableObject {
             return
         }
         present(error)
+    }
+
+    private func finishVPNFailure(_ error: Error) {
+        if error is CancellationError { return }
+        if let failure = error as? VPNConnectionFailure {
+            let retryRequest = queuedVPNConnectRequest ?? lastVPNRequest
+            if failure.kind != .protectedSwitch {
+                activeVPNTransition = nil
+                queuedVPNConnectRequest = nil
+                pendingStatisticsRequest = nil
+                connectionAttemptPhase = nil
+                connectionRecoveryRequired = failure.kind == .stopFailed || vpn.status.isBusy
+                handleVPNStatusChange(vpn.status)
+                // A terminal status alone cannot clear an unverified cleanup failure.
+                if failure.kind == .stopFailed { connectionRecoveryRequired = true }
+            }
+            let shown = APIError(message: failure.localizedDescription, code: "VPN_" + failure.kind.rawValue.uppercased())
+            presentedError = shown
+            if failure.retryTitle != nil, retryRequest != nil || failure.kind == .stopFailed {
+                vpnRetryContext = VPNRetryContext(errorID: shown.id, request: retryRequest,
+                    generation: vpnTransitionGeneration, userID: session?.userId, failure: failure)
+            } else { vpnRetryContext = nil }
+        } else {
+            activeVPNTransition = nil
+            pendingStatisticsRequest = nil
+            handleVPNStatusChange(vpn.status)
+            present(error)
+        }
+    }
+
+    func retryVPNSetup(errorID: UUID) {
+        guard let context = vpnRetryContext, context.errorID == errorID,
+              context.generation == vpnTransitionGeneration,
+              context.userID == session?.userId, sessionCleanupState == nil else { return }
+        vpnRetryContext = nil
+        presentedError = nil
+        guard let failedRequest = context.request else {
+            beginDisconnect(preservingQueuedConnection: false)
+            return
+        }
+        let request = VPNConnectRequest(server: failedRequest.server, protocolName: failedRequest.protocolName,
+            onDemandEnabled: currentConnectionPolicy().onDemandEnabled,
+            killSwitchEnabled: isKillSwitchEnabled, origin: .manual)
+        startConnection(request)
+    }
+
+    func retryVPNRecovery() {
+        guard let context = vpnRetryContext else { return }
+        retryVPNSetup(errorID: context.errorID)
     }
 
     private func present(_ error: Error) {
@@ -2177,13 +2259,17 @@ final class AppModel: ObservableObject {
     }
 
     private func startConnection(_ request: VPNConnectRequest) {
-        guard !isCheckingConnectionQuota else { return }
+        vpnRetryContext = nil
+        cancelConnectionPreflight()
+        let generation = connectionPreflightGeneration
         guard shouldPreflightConnection else {
             requestConnection(request)
             return
         }
-        Task { @MainActor [weak self] in
-            guard let self, await authorizeConnection() else { return }
+        connectionPreflightTask = Task { @MainActor [weak self] in
+            guard let self, await authorizeConnection(generation: generation),
+                  generation == connectionPreflightGeneration, !Task.isCancelled else { return }
+            connectionPreflightTask = nil
             requestConnection(request)
         }
     }
@@ -2192,25 +2278,59 @@ final class AppModel: ObservableObject {
         !isProUser && (session != nil || api.storedSession != nil)
     }
 
-    private func authorizeConnection() async -> Bool {
+    private func authorizeConnection(generation requestedGeneration: UInt? = nil) async -> Bool {
         guard shouldPreflightConnection else { return true }
+        let generation = requestedGeneration ?? connectionPreflightGeneration
+        let userID = (session ?? api.storedSession)?.userId
+        func isCurrent() -> Bool {
+            generation == connectionPreflightGeneration && !Task.isCancelled
+                && userID == (session ?? api.storedSession)?.userId
+        }
+        guard isCurrent() else { return false }
 
         isCheckingConnectionQuota = true
-        defer { isCheckingConnectionQuota = false }
+        defer {
+            if generation == connectionPreflightGeneration { isCheckingConnectionQuota = false }
+        }
 
         do {
             let eligibility = try await api.fetchConnectionEligibility()
-            usageQuota = try? await api.fetchUsage()
+            guard isCurrent() else { return false }
+            let usage = try? await api.fetchUsage()
+            guard isCurrent() else { return false }
+            usageQuota = usage
             guard !eligibility.allowed else { return true }
             upgradePromptRequested = true
             return false
         } catch {
             // The backend documents this preflight as fail-open for availability.
-            return true
+            return isCurrent()
         }
     }
 
+    private func cancelConnectionPreflight() {
+        connectionPreflightGeneration &+= 1
+        connectionPreflightTask?.cancel()
+        connectionPreflightTask = nil
+        isCheckingConnectionQuota = false
+    }
+
     private func requestConnection(_ request: VPNConnectRequest) {
+        let previousProtocol = vpn.connectedProtocol ?? activeStatisticsSession?.protocolName
+            ?? pendingStatisticsRequest?.protocolName
+            ?? lastVPNRequest?.protocolName
+            ?? VPNSharedSessionStore.loadDescriptor().flatMap { VPNConfigurationProtocol.fromSessionName($0.protocolName) }
+        if isKillSwitchEnabled, vpn.protectionIsInstalled,
+           let previousProtocol, previousProtocol.transportProtocol != request.protocolName.transportProtocol {
+            finishVPNFailure(VPNConnectionFailure(kind: .protectedSwitch))
+            return
+        }
+        vpnRetryContext = nil
+        if connectionRecoveryRequired {
+            queuedVPNConnectRequest = request
+            beginDisconnect(preservingQueuedConnection: true)
+            return
+        }
         selectedServerID = request.server.id
 
         switch vpnStatus {
@@ -2237,6 +2357,11 @@ final class AppModel: ObservableObject {
         vpnTransitionGeneration &+= 1
         let generation = vpnTransitionGeneration
         activeVPNTransition = .connect(request)
+        lastVPNRequest = request
+        vpnRetryContext = nil
+        connectionRecoveryRequired = false
+        connectionAttemptPhase = .preparing
+        hasObservedNativeStartup = false
         pendingStatisticsRequest = request
         isExplicitDisconnectInProgress = false
         shouldRecoverStoppedProfileAfterExplicitDisconnect = false
@@ -2263,14 +2388,8 @@ final class AppModel: ObservableObject {
                         traffic: nil
                     ))
                 }
-                try await vpn.connect(
-                    to: request.server,
-                    protocol: request.protocolName,
-                    policy: VPNConnectionPolicy(
-                        killSwitchEnabled: request.killSwitchEnabled,
-                        onDemandEnabled: request.onDemandEnabled
-                    )
-                )
+                try Task.checkCancellation()
+                try await vpn.connect(request: request)
                 guard generation == vpnTransitionGeneration, !Task.isCancelled else { return }
                 if request.killSwitchEnabled {
                     persistKillSwitch(enabled: true, activation: .active)
@@ -2285,9 +2404,7 @@ final class AppModel: ObservableObject {
                 return
             } catch {
                 guard generation == vpnTransitionGeneration, !Task.isCancelled else { return }
-                activeVPNTransition = nil
-                handleVPNStatusChange(vpn.status)
-                present(error)
+                finishVPNFailure(error)
             }
         }
     }
@@ -2318,8 +2435,16 @@ final class AppModel: ObservableObject {
                     )
                 )
             }
-            await refreshTrafficMetricsOnce(updateLiveActivity: true)
-            await vpn.disconnect()
+            // The provider read is bounded; a Live Activity update must not
+            // hold up native teardown. Final activity state is sent separately.
+            await refreshTrafficMetricsOnce(updateLiveActivity: false)
+            let stopped = await vpn.stopAndWait(releaseProtection: !isKillSwitchEnabled)
+            guard generation == vpnTransitionGeneration, !Task.isCancelled else { return }
+            guard stopped.isSafe else {
+                finishVPNFailure(VPNConnectionFailure(kind: .stopFailed))
+                return
+            }
+            connectionRecoveryRequired = false
             await recoverStoppedIKEv2ProfileIfNeeded(trigger: .explicitDisconnect)
             guard generation == vpnTransitionGeneration, !Task.isCancelled else { return }
             activeVPNTransition = nil
@@ -2334,7 +2459,13 @@ final class AppModel: ObservableObject {
 
         if case .connect = activeVPNTransition,
            status == .disconnected || status == .invalid {
-            vpnStatus = .connecting
+            // Native start can initially return the previous terminal snapshot.
+            // Attempt failures and the bounded startup deadline finish this wait.
+            if !hasObservedNativeStartup {
+                vpnStatus = .connecting
+                return
+            }
+            finishVPNFailure(VPNConnectionFailure(kind: .connectionFailed))
             return
         }
 
@@ -2352,6 +2483,8 @@ final class AppModel: ObservableObject {
 
         switch status {
         case .invalid, .disconnected:
+            connectionRecoveryRequired = false
+            connectionAttemptPhase = nil
             let shouldRecoverUnexpectedProfile = canStartStoppedIKEv2ProfileRecovery(
                 trigger: .unexpectedDisconnect
             )
@@ -2385,6 +2518,8 @@ final class AppModel: ObservableObject {
                 stoppedProfileRecoveryTrigger = .unexpectedDisconnect
             }
         case .connected:
+            connectionRecoveryRequired = false
+            connectionAttemptPhase = .connected
             shouldRecoverStoppedProfileAfterExplicitDisconnect = false
             activeVPNTransition = nil
             if previousStatus == .reasserting, let metrics = sessionMetrics {
@@ -2544,12 +2679,17 @@ final class AppModel: ObservableObject {
     }
 
     private func cancelActiveVPNTransition() {
+        cancelConnectionPreflight()
         cancelStoppedProfileRecovery()
         vpnTransitionGeneration &+= 1
         vpnTransitionTask?.cancel()
         vpnTransitionTask = nil
         activeVPNTransition = nil
         queuedVPNConnectRequest = nil
+        vpnRetryContext = nil
+        lastVPNRequest = nil
+        connectionAttemptPhase = nil
+        connectionRecoveryRequired = false
         shouldRecoverStoppedProfileAfterExplicitDisconnect = false
         pendingStatisticsRequest = nil
         trafficMonitorTask?.cancel()
@@ -2964,14 +3104,26 @@ extension AppModel {
     func refreshNotificationAuthorizationStatus() async {
         await notificationService.refreshAuthorizationStatus()
         notificationAuthorizationStatus = notificationService.authorizationStatus
+        updateNotificationPermissionNotice()
+    }
+
+    private func updateNotificationPermissionNotice() {
+        if notificationAuthorizationStatus == .denied {
+            notificationPermissionNotice = "Notifications are off. Your VPN still works, but connection and safety alerts won’t appear."
+        } else if notificationAuthorizationStatus != .notDetermined {
+            notificationPermissionNotice = nil
+        }
     }
 
     func requestNotificationAuthorizationIfNeeded() async {
-        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
-            return
-        }
-        await notificationService.requestAuthorizationIfNeeded()
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil,
+           notificationService is VPNNotificationService { return }
+        let result = await notificationService.requestAuthorizationIfNeeded()
         notificationAuthorizationStatus = notificationService.authorizationStatus
+        updateNotificationPermissionNotice()
+        if result == .failed {
+            notificationPermissionNotice = "Couldn’t request notification permission. Try again from Notifications in the app’s Settings."
+        }
     }
 
     func openNotificationSettings() {

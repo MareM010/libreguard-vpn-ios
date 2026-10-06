@@ -8,6 +8,13 @@ protocol VPNManaging: AnyObject {
     var connectedDate: Date? { get }
     var onStatusChange: ((VPNConnectionState) -> Void)? { get set }
     var onDisconnectError: ((Error) -> Void)? { get set }
+    var onAttemptEvent: ((VPNAttemptEvent) -> Void)? { get set }
+    var protectionIsInstalled: Bool { get }
+    var connectedProtocol: VPNConfigurationProtocol? { get }
+
+    func setAttemptContext(_ id: UUID, protocol protocolName: VPNConfigurationProtocol)
+    func connect(request: VPNConnectRequest) async throws
+    func stopAndWait(releaseProtection: Bool) async -> VPNStopResult
 
     func setCertificatePreparationHandler(_ handler: ((String?) -> Void)?)
 
@@ -15,9 +22,9 @@ protocol VPNManaging: AnyObject {
     func connect(to server: VPNServer, protocol protocolName: VPNConfigurationProtocol, policy: VPNConnectionPolicy) async throws
     @discardableResult func apply(policy: VPNConnectionPolicy) async throws -> Bool
     func disconnect() async
-    /// Releases routing owned by a confirmed-stopped profile without removing
-    /// its saved credentials or preferences. Only IKEv2 profiles participate
-    /// in this recovery path.
+    /// Releases routing owned by a confirmed-stopped IKEv2 profile. Usable
+    /// certificate identity is preserved; an invalid stopped profile may be
+    /// removed only while Kill Switch is off.
     @discardableResult func recoverStoppedProfile(
         for protocolName: VPNConfigurationProtocol
     ) async -> VPNStoppedProfileRecoveryResult
@@ -30,6 +37,23 @@ protocol VPNManaging: AnyObject {
 }
 
 extension VPNManaging {
+    var onAttemptEvent: ((VPNAttemptEvent) -> Void)? { get { nil } set {} }
+    var protectionIsInstalled: Bool { status.isConnected || status.isBusy }
+    var connectedProtocol: VPNConfigurationProtocol? { nil }
+    func setAttemptContext(_ id: UUID, protocol protocolName: VPNConfigurationProtocol) {}
+    func connect(request: VPNConnectRequest) async throws {
+        setAttemptContext(request.sessionID, protocol: request.protocolName)
+        try await connect(to: request.server, protocol: request.protocolName, policy: VPNConnectionPolicy(
+            killSwitchEnabled: request.killSwitchEnabled, onDemandEnabled: request.onDemandEnabled
+        ))
+    }
+    func stopAndWait(releaseProtection: Bool) async -> VPNStopResult {
+        if releaseProtection, !(await disableOnDemandAndProfile()) {
+            return VPNStopResult(tunnelStopped: false, profileReleased: false)
+        }
+        await disconnect()
+        return VPNStopResult(tunnelStopped: status == .disconnected || status == .invalid, profileReleased: true)
+    }
     var connectedDate: Date? { nil }
     func currentTrafficSnapshot() async -> TunnelTrafficSnapshot? { nil }
     func setCertificatePreparationHandler(_ handler: ((String?) -> Void)?) {}
@@ -74,9 +98,8 @@ struct VPNProfileCleanupResult: Equatable, Sendable {
 }
 
 /// The outcome of restoring ordinary network routing after Network Extension
-/// has already confirmed that an IKEv2 tunnel stopped. This intentionally does
-/// not represent profile removal: a recovered profile retains its credentials
-/// and can be configured again by the next connection attempt.
+/// confirms that IKEv2 stopped. A valid profile is retained; a stale invalid
+/// profile may be removed and recreated through normal approval on next use.
 struct VPNStoppedProfileRecoveryResult: Equatable, Sendable {
     let isApplicable: Bool
     let routingReleased: Bool
@@ -151,8 +174,15 @@ final class PersonalVPNManager: VPNManaging {
     )
     private var statusObserver: NSObjectProtocol?
     private let trafficSampler = SystemTunnelTrafficSampler()
-    private let preferencesAccess = VPNPreferencesAccess()
+    private let preferencesAccess: VPNPreferencesAccess
+    private let timing: VPNConnectionTiming
     private var connectionsBeingPrepared: Set<UUID> = []
+    private var attemptID = UUID()
+    private var phase: VPNAttemptPhase = .preparing
+    private var lifecycleGeneration: UInt = 0
+    private var expectedStop = false
+    private var killSwitchEnabled = false
+    private var approvedIdentity: IKEv2ApprovedIdentity?
 
     var status: VPNConnectionState = .disconnected {
         didSet {
@@ -167,17 +197,37 @@ final class PersonalVPNManager: VPNManaging {
 
     var onStatusChange: ((VPNConnectionState) -> Void)?
     var onDisconnectError: ((Error) -> Void)?
+    var onAttemptEvent: ((VPNAttemptEvent) -> Void)?
+    var connectedProtocol: VPNConfigurationProtocol? { status.isConnected || status.isBusy ? .ikev2 : nil }
+    var protectionIsInstalled: Bool {
+        manager.isEnabled && manager.protocolConfiguration?.includeAllNetworks == true
+    }
+
+    func setAttemptContext(_ id: UUID, protocol protocolName: VPNConfigurationProtocol) {
+        attemptID = id
+        lifecycleGeneration &+= 1
+        expectedStop = false
+    }
+
+    private func publish(_ phase: VPNAttemptPhase) {
+        self.phase = phase
+        onAttemptEvent?(VPNAttemptEvent(attemptID: attemptID, protocolName: .ikev2, phase: phase))
+    }
 
     init(
         api: BackendServicing,
         resolver: VPNConfigurationResolving? = nil,
         translator: VPNConfigurationTranslator? = nil,
-        manager: NEVPNManager = .shared()
+        manager: NEVPNManager = .shared(),
+        preferencesAccess: VPNPreferencesAccess? = nil,
+        timing: VPNConnectionTiming = VPNConnectionTiming()
     ) {
         self.api = api
         self.configurationResolver = resolver ?? VPNConfigurationResolver(api: api)
         self.translator = translator ?? VPNConfigurationTranslator()
         self.manager = manager
+        self.preferencesAccess = preferencesAccess ?? VPNPreferencesAccess()
+        self.timing = timing
         observeStatusChanges()
     }
 
@@ -223,6 +273,9 @@ final class PersonalVPNManager: VPNManaging {
         }
 
         status = .connecting
+        expectedStop = false
+        killSwitchEnabled = policy.killSwitchEnabled
+        publish(.preparing)
         let preparationID = UUID()
         connectionsBeingPrepared.insert(preparationID)
         defer { connectionsBeingPrepared.remove(preparationID) }
@@ -250,8 +303,11 @@ final class PersonalVPNManager: VPNManaging {
                 self.manager.isEnabled = true
                 self.applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
                 self.logger.debug("Saving VPN preferences")
+                self.publish(.awaitingApproval)
                 try await self.savePreferences()
+                self.approvedIdentity = IKEv2ApprovedIdentity(profile: vpnProtocol)
                 try Task.checkCancellation()
+                self.publish(.starting)
                 try await IKEv2TunnelStarter.start(
                     reload: {
                         self.logger.debug("Reloading VPN preferences before tunnel start")
@@ -279,7 +335,8 @@ final class PersonalVPNManager: VPNManaging {
         } catch {
             logger.error("VPN connect failed: \(Self.describe(error))")
             status = .disconnected
-            throw error
+            if phase == .preparing { throw error }
+            throw VPNConnectionFailure.classify(error, phase: phase)
         }
     }
 
@@ -292,8 +349,10 @@ final class PersonalVPNManager: VPNManaging {
     }
 
     private func applyToPreferences(policy: VPNConnectionPolicy) async throws -> Bool {
+        killSwitchEnabled = policy.killSwitchEnabled
         try await loadPreferences()
         guard let vpnProtocol = manager.protocolConfiguration as? NEVPNProtocolIKEv2 else { return false }
+        approvedIdentity?.hydrate(vpnProtocol)
 
         let nativeStatus = manager.connection.status
         let shouldKeepFullTunnel = policy.killSwitchEnabled || !Self.isTerminalStatus(nativeStatus)
@@ -301,17 +360,14 @@ final class PersonalVPNManager: VPNManaging {
             policy.apply(to: vpnProtocol)
             applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
         } else {
-            // A terminal non-kill-switch profile must not reintroduce the
-            // stale full-tunnel state merely because a preference changed.
-            VPNConnectionPolicy.disabled.apply(to: vpnProtocol as NEVPNProtocol)
-            applyOnDemandConfiguration(enabled: false)
-            manager.isEnabled = false
+            return await recoverStoppedProfileWithExclusiveAccess().isSafe
         }
         try await savePreferences()
         try await loadPreferences()
         guard let savedProtocol = manager.protocolConfiguration else { return false }
         if shouldKeepFullTunnel {
             return savedProtocol.includeAllNetworks && !savedProtocol.enforceRoutes
+                && manager.isOnDemandEnabled == policy.onDemandEnabled
         }
         return !savedProtocol.includeAllNetworks
             && !savedProtocol.enforceRoutes
@@ -320,10 +376,29 @@ final class PersonalVPNManager: VPNManaging {
     }
 
     func disconnect() async {
-        logger.info("VPN disconnect requested")
+        _ = await stopAndWait(releaseProtection: false)
+    }
+
+    func stopAndWait(releaseProtection: Bool) async -> VPNStopResult {
+        expectedStop = true
+        lifecycleGeneration &+= 1
+        publish(.stopping)
+        guard !isRunningInSimulator else { status = .disconnected; return .stopped }
         status = .disconnecting
+        // A queued start may still expose .disconnected. Always send the stop.
         manager.connection.stopVPNTunnel()
-        await refreshStatus()
+        if releaseProtection {
+            // Disable a valid profile before waiting so on-demand cannot race
+            // the stop. Missing identity is handled after confirmed teardown.
+            _ = await disableOnDemandAndProfile()
+            manager.connection.stopVPNTunnel()
+        }
+        let stopped = await waitForTunnelToStop()
+        guard stopped else { return VPNStopResult(tunnelStopped: false, profileReleased: false) }
+        guard releaseProtection else { return .stopped }
+        killSwitchEnabled = false
+        let recovery = await recoverStoppedProfile(for: .ikev2)
+        return VPNStopResult(tunnelStopped: true, profileReleased: recovery.isSafe)
     }
 
     func recoverStoppedProfile(
@@ -338,86 +413,43 @@ final class PersonalVPNManager: VPNManaging {
                 await self.recoverStoppedProfileWithExclusiveAccess()
             }
         } catch {
-            return .notApplicable
+            return VPNStoppedProfileRecoveryResult(isApplicable: true, routingReleased: false,
+                onDemandDisabled: false, profileDisabled: false, diagnostic: "Profile recovery was cancelled.")
         }
     }
 
     private func recoverStoppedProfileWithExclusiveAccess() async -> VPNStoppedProfileRecoveryResult {
-        guard connectionsBeingPrepared.isEmpty else { return .notApplicable }
-
-        let initialStatus = manager.connection.status
-        guard Self.isTerminalStatus(initialStatus) else {
-            logger.info("Skipped IKEv2 stopped-profile recovery because status=\(initialStatus.rawValue, privacy: .public)")
-            return .notApplicable
+        guard connectionsBeingPrepared.isEmpty else {
+            return VPNStoppedProfileRecoveryResult(isApplicable: true, routingReleased: false,
+                onDemandDisabled: false, profileDisabled: false, diagnostic: "IKEv2 setup is still in progress.")
         }
-
-        do {
-            logger.info("Recovering stopped IKEv2 profile status=\(initialStatus.rawValue, privacy: .public)")
-            try await loadPreferences()
-            try Task.checkCancellation()
-
-            let refreshedStatus = manager.connection.status
-            guard Self.isTerminalStatus(refreshedStatus) else {
-                logger.info("Skipped IKEv2 stopped-profile recovery after refresh because status=\(refreshedStatus.rawValue, privacy: .public)")
-                return .notApplicable
+        return await IKEv2StoppedProfileRecovery.recover(
+            killSwitchEnabled: killSwitchEnabled,
+            load: { try await self.loadPreferences() },
+            profile: {
+                guard let profile = self.manager.protocolConfiguration as? NEVPNProtocolIKEv2 else { return nil }
+                self.approvedIdentity?.hydrate(profile)
+                return profile
+            },
+            isStopped: { Self.isTerminalStatus(self.manager.connection.status) },
+            disable: { profile in
+                VPNConnectionPolicy.disabled.apply(to: profile as NEVPNProtocol)
+                self.manager.onDemandRules = nil
+                self.manager.isOnDemandEnabled = false
+                self.manager.isEnabled = false
+            },
+            save: { try await self.savePreferences() },
+            remove: {
+                try await self.removePreferences()
+                self.approvedIdentity = nil
+            },
+            verifyReleased: {
+                guard let profile = self.manager.protocolConfiguration else { return true }
+                return !profile.includeAllNetworks && !profile.enforceRoutes
+                    && !self.manager.isOnDemandEnabled && (self.manager.onDemandRules?.isEmpty ?? true)
+                    && !self.manager.isEnabled
             }
-            guard let vpnProtocol = manager.protocolConfiguration as? NEVPNProtocolIKEv2 else {
-                return .notApplicable
-            }
-
-            // Deliberately apply the base policy rather than the IKEv2
-            // full-tunnel override. The tunnel is already terminal, and this
-            // profile must relinquish any routing it can still own.
-            VPNConnectionPolicy.disabled.apply(to: vpnProtocol as NEVPNProtocol)
-            manager.onDemandRules = nil
-            manager.isOnDemandEnabled = false
-            manager.isEnabled = false
-            try Task.checkCancellation()
-            try await savePreferences()
-            try Task.checkCancellation()
-            try await loadPreferences()
-
-            guard let savedProtocol = manager.protocolConfiguration else {
-                return VPNStoppedProfileRecoveryResult(
-                    isApplicable: true,
-                    routingReleased: false,
-                    onDemandDisabled: false,
-                    profileDisabled: false,
-                    diagnostic: "IKEv2 profile could not be reloaded after stopped-profile recovery."
-                )
-            }
-
-            let routingReleased = !savedProtocol.includeAllNetworks && !savedProtocol.enforceRoutes
-            let onDemandDisabled = !manager.isOnDemandEnabled && (manager.onDemandRules?.isEmpty ?? true)
-            let profileDisabled = !manager.isEnabled
-            let diagnostic: String? = routingReleased && onDemandDisabled && profileDisabled
-                ? nil
-                : "IKEv2 stopped-profile recovery could not verify released routing."
-            let result = VPNStoppedProfileRecoveryResult(
-                isApplicable: true,
-                routingReleased: routingReleased,
-                onDemandDisabled: onDemandDisabled,
-                profileDisabled: profileDisabled,
-                diagnostic: diagnostic
-            )
-            logger.info(
-                "IKEv2 stopped-profile recovery routeReleased=\(result.routingReleased, privacy: .public) onDemandDisabled=\(result.onDemandDisabled, privacy: .public) profileDisabled=\(result.profileDisabled, privacy: .public)"
-            )
-            return result
-        } catch is CancellationError {
-            logger.info("IKEv2 stopped-profile recovery cancelled")
-            return .notApplicable
-        } catch {
-            let diagnostic = "IKEv2 stopped-profile recovery failed: \(Self.describe(error))"
-            logger.error("\(diagnostic, privacy: .public)")
-            return VPNStoppedProfileRecoveryResult(
-                isApplicable: true,
-                routingReleased: false,
-                onDemandDisabled: false,
-                profileDisabled: false,
-                diagnostic: diagnostic
-            )
-        }
+        )
     }
 
     @discardableResult
@@ -434,13 +466,12 @@ final class PersonalVPNManager: VPNManaging {
     }
 
     private func disableOnDemandAndProfileWithExclusiveAccess() async -> Bool {
-        // An invalid manager has no installed profile to disable. Treat it as
-        // safe rather than turning a first launch into a permanent blocker.
-        guard manager.connection.status != .invalid else { return true }
-
         do {
             try await loadPreferences()
             guard manager.protocolConfiguration != nil else { return true }
+            if let profile = manager.protocolConfiguration as? NEVPNProtocolIKEv2 {
+                approvedIdentity?.hydrate(profile)
+            }
 
             manager.onDemandRules = nil
             manager.isOnDemandEnabled = false
@@ -456,7 +487,7 @@ final class PersonalVPNManager: VPNManaging {
             return disabled
         } catch {
             logger.error("Failed to disable VPN on-demand profile: \(Self.describe(error))")
-            return manager.connection.status == .invalid
+            return false
         }
     }
 
@@ -484,7 +515,13 @@ final class PersonalVPNManager: VPNManaging {
 
         do {
             try await preferencesAccess.withExclusiveAccess {
+                try await self.loadPreferences()
                 try await self.removePreferences()
+                self.approvedIdentity = nil
+                try await self.loadPreferences()
+                guard self.manager.protocolConfiguration == nil else {
+                    throw VPNConnectionFailure(kind: .stopFailed)
+                }
             }
             status = VPNConnectionState(networkExtensionStatus: manager.connection.status)
             let result = VPNProfileCleanupResult(
@@ -524,17 +561,22 @@ final class PersonalVPNManager: VPNManaging {
                 guard let self else { return }
                 let previous = self.status
                 self.updateStatus(from: self.manager.connection.status)
-                if previous != .disconnected, self.status == .disconnected {
-                    self.manager.connection.fetchLastDisconnectError(completionHandler: { error in
-                        guard let error else {
-                            self.logger.error("IKEv2 tunnel disconnected without a NetworkExtension error")
-                            return
+                if self.status == .connected { self.publish(.connected) }
+                if previous != .disconnected, self.status == .disconnected, !self.expectedStop {
+                    let generation = self.lifecycleGeneration
+                    let id = self.attemptID
+                    self.manager.connection.fetchLastDisconnectError { error in
+                        Task { @MainActor [weak self] in
+                            guard let self, generation == self.lifecycleGeneration,
+                                  id == self.attemptID, !self.expectedStop,
+                                  self.status == .disconnected else { return }
+                            guard let error else {
+                                self.logger.info("IKEv2 tunnel stopped without a NetworkExtension error")
+                                return
+                            }
+                            self.onDisconnectError?(VPNConnectionFailure.classify(error, phase: self.phase))
                         }
-                        self.logger.error("IKEv2 tunnel disconnect error: \(Self.describe(error), privacy: .public)")
-                        Task { @MainActor in
-                            self.onDisconnectError?(error)
-                        }
-                    })
+                    }
                 }
             }
         }
@@ -545,7 +587,9 @@ final class PersonalVPNManager: VPNManaging {
         manager.isOnDemandEnabled = enabled
     }
 
-    private func waitForTunnelToStop(maximumAttempts: Int = 25) async -> Bool {
+    private func waitForTunnelToStop(maximumAttempts: Int? = nil) async -> Bool {
+        let seconds = Double(timing.stop.components.seconds) + Double(timing.stop.components.attoseconds) / 1e18
+        let maximumAttempts = maximumAttempts ?? max(0, Int(ceil(seconds / 0.2)))
         for attempt in 0...maximumAttempts {
             let observedStatus = VPNConnectionState(networkExtensionStatus: manager.connection.status)
             if observedStatus == .disconnected || observedStatus == .invalid {
@@ -557,12 +601,16 @@ final class PersonalVPNManager: VPNManaging {
                 status = observedStatus
                 return false
             }
-            try? await Task.sleep(for: .milliseconds(200))
+            try? await timing.sleep(.milliseconds(200))
         }
         return false
     }
 
     private func updateStatus(from neStatus: NEVPNStatus) {
+        if neStatus == .connecting || neStatus == .reasserting {
+            onAttemptEvent?(VPNAttemptEvent(attemptID: attemptID, protocolName: .ikev2,
+                phase: .starting, nativeStartupObserved: true))
+        }
         // Profile installation/reloads can report terminal states before the
         // first start. Keep the user's request pending throughout approval and
         // retry, without reporting an old disconnect error as a new failure.

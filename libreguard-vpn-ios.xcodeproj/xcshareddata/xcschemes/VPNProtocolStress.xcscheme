@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Scheme LastUpgradeVersion="2650" version="1.7">
+  <BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES">
+    <BuildActionEntries>
+      <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES">
+        <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="E678589B2FE6EBD7000CF95E" BuildableName="libreguard-vpn-ios.app" BlueprintName="libreguard-vpn-ios" ReferencedContainer="container:libreguard-vpn-ios.xcodeproj"/>
+      </BuildActionEntry>
+    </BuildActionEntries>
+  </BuildAction>
+  <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="NO">
+    <Testables>
+      <TestableReference skipped="NO" parallelizable="NO">
+        <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="E67858B22FE6EBD9000CF95E" BuildableName="libreguard-vpn-iosUITests.xctest" BlueprintName="libreguard-vpn-iosUITests" ReferencedContainer="container:libreguard-vpn-ios.xcodeproj"/>
+        <SelectedTests>
+          <Test Identifier="VPNProtocolStressTests/testFiftyProtocolSwitches"/>
+          <Test Identifier="VPNProtocolStressTests/testRapidCancellationAndReplacement"/>
+        </SelectedTests>
+      </TestableReference>
+    </Testables>
+    <EnvironmentVariables>
+      <EnvironmentVariable key="LIBREGUARD_VPN_STRESS_NETWORK" value="wifi" isEnabled="NO"/>
+    </EnvironmentVariables>
+  </TestAction>
+  <LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugServiceExtension="internal" allowLocationSimulation="YES">
+    <BuildableProductRunnable runnableDebuggingMode="0">
+      <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="E678589B2FE6EBD7000CF95E" BuildableName="libreguard-vpn-ios.app" BlueprintName="libreguard-vpn-ios" ReferencedContainer="container:libreguard-vpn-ios.xcodeproj"/>
+    </BuildableProductRunnable>
+  </LaunchAction>
+</Scheme>

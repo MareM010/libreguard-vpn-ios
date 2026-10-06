@@ -53,6 +53,8 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
 
     override func startTunnel(options: [String: NSObject]? = nil, completionHandler: @escaping (Error?) -> Void) {
         blocksIPv6 = false
+        let attempt = (options?["LibreGuardAttemptID"] as? String).flatMap(UUID.init(uuidString:))
+        OpenVPNExtensionLifecycleJournal.append("attempt=\(attempt?.uuidString ?? "system-on-demand") start-requested")
 
         guard let providerConfiguration = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration,
               OpenVPNIPv6Protection.isEnabled(in: providerConfiguration) else {

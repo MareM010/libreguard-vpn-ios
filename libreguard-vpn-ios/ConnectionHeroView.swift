@@ -158,6 +158,7 @@ struct ConnectionHeroView: View {
         .animation(.easeInOut(duration: 0.22), value: isProgressVisible)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(presentation.title). \(presentation.description)")
+        .accessibilityIdentifier("vpn-connection-control")
         .accessibilityValue(presentation.progressLabel)
         .accessibilityAddTraits(.isButton)
         .accessibilityAction(named: Text(presentation.actionTitle), action)

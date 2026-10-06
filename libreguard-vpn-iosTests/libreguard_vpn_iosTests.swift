@@ -2513,6 +2513,7 @@ final class StartupBackendStub: BackendServicing, SessionInvalidationObserving {
     var serverResponse: [VPNServer] = []
     var serverError: Error?
     private(set) var fetchServersCallCount = 0
+    var connectionEligibilityHandler: (() async throws -> CanConnectResponse)?
 
     init(storedSession: AuthSession?, restoreResults: [Result<AuthSession?, Error>]) {
         self.storedSession = storedSession
@@ -2612,7 +2613,10 @@ final class StartupBackendStub: BackendServicing, SessionInvalidationObserving {
     func fetchCertificateGenerationStatus(serverId: Int, protocol protocolName: VPNConfigurationProtocol) async throws -> CertificateGenerationStatusResponse { try unsupported() }
     func fetchCertificateJob(jobId: Int) async throws -> CertificateJobStatusResponse { try unsupported() }
     func fetchUsage() async throws -> UsageQuota { try unsupported() }
-    func fetchConnectionEligibility() async throws -> CanConnectResponse { try unsupported() }
+    func fetchConnectionEligibility() async throws -> CanConnectResponse {
+        if let connectionEligibilityHandler { return try await connectionEligibilityHandler() }
+        return try unsupported()
+    }
     func fetchSubscription() async throws -> libreguard_vpn_ios.SubscriptionStatus {
         subscriptionRequestCount += 1
         guard !subscriptionResults.isEmpty else { return try unsupported() }
