@@ -16,12 +16,12 @@
 		B10000012FEA000000000001 /* VPNStatusWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B10000022FEA000000000002 /* VPNStatusWidget.appex */; };
 		C10000012FEB000000000001 /* X509 in Frameworks */ = {isa = PBXBuildFile; productRef = C10000032FEB000000000003 /* X509 */; };
 		C10000042FEB000000000004 /* SwiftASN1 in Frameworks */ = {isa = PBXBuildFile; productRef = C10000062FEB000000000006 /* SwiftASN1 */; };
+		D10000012FE7000000000001 /* AppAuth in Frameworks */ = {isa = PBXBuildFile; productRef = D10000032FE7000000000003 /* AppAuth */; };
+		D20000012FE7000000000001 /* AppAuthCore in Frameworks */ = {isa = PBXBuildFile; productRef = D20000032FE7000000000003 /* AppAuthCore */; };
+		D20000012FE7000000000002 /* AppAuthCore in Frameworks */ = {isa = PBXBuildFile; productRef = D20000032FE7000000000004 /* AppAuthCore */; };
 		E686F16A2FE9A7770072FD83 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000005 /* NetworkExtension.framework */; };
 		E686F16B2FE9A7770072FD83 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000032FE7000000000007 /* Security.framework */; };
 		F10000012FE7000000000001 /* openssl.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = F10000022FE7000000000001 /* openssl.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
-        D10000012FE7000000000001 /* AppAuth in Test Frameworks */ = {isa = PBXBuildFile; productRef = D10000032FE7000000000003 /* AppAuth */; };
-        D20000012FE7000000000001 /* AppAuthCore in Frameworks */ = {isa = PBXBuildFile; productRef = D20000032FE7000000000003 /* AppAuthCore */; };
-        D20000012FE7000000000002 /* AppAuthCore in Test Frameworks */ = {isa = PBXBuildFile; productRef = D20000032FE7000000000004 /* AppAuthCore */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -144,7 +144,7 @@
 			files = (
 				A30000012FE7000000000001 /* TunnelKitOpenVPN in Frameworks */,
 				A10000012FE7000000000001 /* AppAuth in Frameworks */,
-                D20000012FE7000000000001 /* AppAuthCore in Frameworks */,
+				D20000012FE7000000000001 /* AppAuthCore in Frameworks */,
 				C10000012FEB000000000001 /* X509 in Frameworks */,
 				C10000042FEB000000000004 /* SwiftASN1 in Frameworks */,
 				E686F16A2FE9A7770072FD83 /* NetworkExtension.framework in Frameworks */,
@@ -156,8 +156,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-                D10000012FE7000000000001 /* AppAuth in Test Frameworks */,
-                D20000012FE7000000000002 /* AppAuthCore in Test Frameworks */,
+				D10000012FE7000000000001 /* AppAuth in Frameworks */,
+				D20000012FE7000000000002 /* AppAuthCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -267,7 +267,7 @@
 			name = "libreguard-vpn-ios";
 			packageProductDependencies = (
 				A10000032FE7000000000003 /* AppAuth */,
-                D20000032FE7000000000003 /* AppAuthCore */,
+				D20000032FE7000000000003 /* AppAuthCore */,
 				A30000032FE7000000000001 /* TunnelKitOpenVPN */,
 				C10000032FEB000000000003 /* X509 */,
 				C10000062FEB000000000006 /* SwiftASN1 */,
@@ -294,8 +294,8 @@
 			);
 			name = "libreguard-vpn-iosTests";
 			packageProductDependencies = (
-                D10000032FE7000000000003 /* AppAuth */,
-                D20000032FE7000000000004 /* AppAuthCore */,
+				D10000032FE7000000000003 /* AppAuth */,
+				D20000032FE7000000000004 /* AppAuthCore */,
 			);
 			productName = "libreguard-vpn-iosTests";
 			productReference = E67858A92FE6EBD9000CF95E /* libreguard-vpn-iosTests.xctest */;
@@ -688,8 +688,8 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
-				GOOGLE_IOS_CLIENT_ID = IOS_CLIENT_ID_HERE;
-				GOOGLE_REVERSED_CLIENT_ID = IOS_REVERSED_CLIENT_ID_HERE;
+				GOOGLE_IOS_CLIENT_ID = "1054984406670-r9si4npd3e062m4v0tsds6t3dqu6j6nj.apps.googleusercontent.com";
+				GOOGLE_REVERSED_CLIENT_ID = "com.googleusercontent.apps.1054984406670-r9si4npd3e062m4v0tsds6t3dqu6j6nj";
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "LibreGuard VPN";
 				INFOPLIST_KEY_CFBundleName = "LibreGuard VPN";
@@ -725,8 +725,8 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
-				GOOGLE_IOS_CLIENT_ID = IOS_CLIENT_ID_HERE;
-				GOOGLE_REVERSED_CLIENT_ID = IOS_REVERSED_CLIENT_ID_HERE;
+				GOOGLE_IOS_CLIENT_ID = "1054984406670-r9si4npd3e062m4v0tsds6t3dqu6j6nj.apps.googleusercontent.com";
+				GOOGLE_REVERSED_CLIENT_ID = "com.googleusercontent.apps.1054984406670-r9si4npd3e062m4v0tsds6t3dqu6j6nj";
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "LibreGuard VPN";
 				INFOPLIST_KEY_CFBundleName = "LibreGuard VPN";
@@ -1011,21 +1011,21 @@
 			package = C10000052FEB000000000005 /* XCRemoteSwiftPackageReference "swift-asn1" */;
 			productName = SwiftASN1;
 		};
-        D10000032FE7000000000003 /* AppAuth */ = {
-            isa = XCSwiftPackageProductDependency;
-            package = A10000022FE7000000000002 /* XCRemoteSwiftPackageReference "AppAuth-iOS" */;
-            productName = AppAuth;
-        };
-        D20000032FE7000000000003 /* AppAuthCore */ = {
-            isa = XCSwiftPackageProductDependency;
-            package = A10000022FE7000000000002 /* XCRemoteSwiftPackageReference "AppAuth-iOS" */;
-            productName = AppAuthCore;
-        };
-        D20000032FE7000000000004 /* AppAuthCore */ = {
-            isa = XCSwiftPackageProductDependency;
-            package = A10000022FE7000000000002 /* XCRemoteSwiftPackageReference "AppAuth-iOS" */;
-            productName = AppAuthCore;
-        };
+		D10000032FE7000000000003 /* AppAuth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000022FE7000000000002 /* XCRemoteSwiftPackageReference "AppAuth-iOS" */;
+			productName = AppAuth;
+		};
+		D20000032FE7000000000003 /* AppAuthCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000022FE7000000000002 /* XCRemoteSwiftPackageReference "AppAuth-iOS" */;
+			productName = AppAuthCore;
+		};
+		D20000032FE7000000000004 /* AppAuthCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000022FE7000000000002 /* XCRemoteSwiftPackageReference "AppAuth-iOS" */;
+			productName = AppAuthCore;
+		};
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = E67858942FE6EBD7000CF95E /* Project object */;

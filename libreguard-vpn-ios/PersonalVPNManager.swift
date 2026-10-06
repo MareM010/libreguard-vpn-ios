@@ -151,6 +151,8 @@ final class PersonalVPNManager: VPNManaging {
     )
     private var statusObserver: NSObjectProtocol?
     private let trafficSampler = SystemTunnelTrafficSampler()
+    private let preferencesAccess = VPNPreferencesAccess()
+    private var connectionsBeingPrepared: Set<UUID> = []
 
     var status: VPNConnectionState = .disconnected {
         didSet {
@@ -198,8 +200,12 @@ final class PersonalVPNManager: VPNManaging {
 
         do {
             logger.debug("Loading VPN preferences for status refresh")
-            try await loadPreferences()
+            try await preferencesAccess.withExclusiveAccess {
+                try await self.loadPreferences()
+            }
             logger.debug("VPN status refresh completed with status \(self.manager.connection.status.rawValue, privacy: .public)")
+            updateStatus(from: manager.connection.status)
+        } catch is CancellationError {
             updateStatus(from: manager.connection.status)
         } catch {
             logger.error("VPN status refresh failed: \(Self.describe(error))")
@@ -217,6 +223,9 @@ final class PersonalVPNManager: VPNManaging {
         }
 
         status = .connecting
+        let preparationID = UUID()
+        connectionsBeingPrepared.insert(preparationID)
+        defer { connectionsBeingPrepared.remove(preparationID) }
 
         do {
             logger.debug("Resolving VPN configuration from backend")
@@ -232,26 +241,37 @@ final class PersonalVPNManager: VPNManaging {
                 "Translated VPN config serverAddress=\(serverAddress, privacy: .public) remoteIdentifier=\(remoteIdentifier, privacy: .public) localIdentifier=\(localIdentifier, privacy: .private(mask: .hash)) includeAllNetworks=\(vpnProtocol.includeAllNetworks, privacy: .public)"
             )
 
-            try await loadPreferences()
-            try Task.checkCancellation()
-            logger.debug("Loaded existing VPN preferences")
-            manager.localizedDescription = "LibreGuard"
-            manager.protocolConfiguration = vpnProtocol
-            manager.isEnabled = true
-            applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
-            logger.debug("Saving VPN preferences")
-            try await savePreferences()
-            try Task.checkCancellation()
-            logger.debug("Reloading VPN preferences before tunnel start")
-            try await loadPreferences()
-            try Task.checkCancellation()
-            logger.debug("Starting VPN tunnel")
-            try manager.connection.startVPNTunnel()
+            try await preferencesAccess.withExclusiveAccess {
+                try await self.loadPreferences()
+                try Task.checkCancellation()
+                self.logger.debug("Loaded existing VPN preferences")
+                self.manager.localizedDescription = "LibreGuard"
+                self.manager.protocolConfiguration = vpnProtocol
+                self.manager.isEnabled = true
+                self.applyOnDemandConfiguration(enabled: policy.onDemandEnabled)
+                self.logger.debug("Saving VPN preferences")
+                try await self.savePreferences()
+                try Task.checkCancellation()
+                try await IKEv2TunnelStarter.start(
+                    reload: {
+                        self.logger.debug("Reloading VPN preferences before tunnel start")
+                        try await self.loadPreferences()
+                    },
+                    startTunnel: {
+                        self.logger.debug("Starting VPN tunnel")
+                        try self.manager.connection.startVPNTunnel()
+                    },
+                    onRetry: { error, retry in
+                        self.logger.notice("Reloading approved IKEv2 profile for start retry \(retry, privacy: .public): \(Self.describe(error), privacy: .public)")
+                    }
+                )
+            }
             try Task.checkCancellation()
             logger.info("startVPNTunnel() returned without throwing")
             updateStatus(from: manager.connection.status)
         } catch is CancellationError {
             logger.info("VPN connect request cancelled")
+            connectionsBeingPrepared.remove(preparationID)
             status = .disconnecting
             manager.connection.stopVPNTunnel()
             await refreshStatus()
@@ -266,6 +286,12 @@ final class PersonalVPNManager: VPNManaging {
     @discardableResult
     func apply(policy: VPNConnectionPolicy) async throws -> Bool {
         guard !isRunningInSimulator else { return false }
+        return try await preferencesAccess.withExclusiveAccess {
+            try await self.applyToPreferences(policy: policy)
+        }
+    }
+
+    private func applyToPreferences(policy: VPNConnectionPolicy) async throws -> Bool {
         try await loadPreferences()
         guard let vpnProtocol = manager.protocolConfiguration as? NEVPNProtocolIKEv2 else { return false }
 
@@ -306,6 +332,18 @@ final class PersonalVPNManager: VPNManaging {
         guard protocolName == .ikev2, !isRunningInSimulator else {
             return .notApplicable
         }
+
+        do {
+            return try await preferencesAccess.withExclusiveAccess {
+                await self.recoverStoppedProfileWithExclusiveAccess()
+            }
+        } catch {
+            return .notApplicable
+        }
+    }
+
+    private func recoverStoppedProfileWithExclusiveAccess() async -> VPNStoppedProfileRecoveryResult {
+        guard connectionsBeingPrepared.isEmpty else { return .notApplicable }
 
         let initialStatus = manager.connection.status
         guard Self.isTerminalStatus(initialStatus) else {
@@ -386,6 +424,16 @@ final class PersonalVPNManager: VPNManaging {
     func disableOnDemandAndProfile() async -> Bool {
         guard !isRunningInSimulator else { return true }
 
+        do {
+            return try await preferencesAccess.withExclusiveAccess {
+                await self.disableOnDemandAndProfileWithExclusiveAccess()
+            }
+        } catch {
+            return false
+        }
+    }
+
+    private func disableOnDemandAndProfileWithExclusiveAccess() async -> Bool {
         // An invalid manager has no installed profile to disable. Treat it as
         // safe rather than turning a first launch into a permanent blocker.
         guard manager.connection.status != .invalid else { return true }
@@ -435,7 +483,9 @@ final class PersonalVPNManager: VPNManaging {
         }
 
         do {
-            try await removePreferences()
+            try await preferencesAccess.withExclusiveAccess {
+                try await self.removePreferences()
+            }
             status = VPNConnectionState(networkExtensionStatus: manager.connection.status)
             let result = VPNProfileCleanupResult(
                 tunnelStopped: true,
@@ -513,6 +563,10 @@ final class PersonalVPNManager: VPNManaging {
     }
 
     private func updateStatus(from neStatus: NEVPNStatus) {
+        // Profile installation/reloads can report terminal states before the
+        // first start. Keep the user's request pending throughout approval and
+        // retry, without reporting an old disconnect error as a new failure.
+        guard connectionsBeingPrepared.isEmpty || !Self.isTerminalStatus(neStatus) else { return }
         status = VPNConnectionState(networkExtensionStatus: neStatus)
     }
 
