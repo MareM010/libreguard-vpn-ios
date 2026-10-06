@@ -504,6 +504,20 @@ private struct LoginView: View {
                         .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
                         .frame(height: 48 * scale)
                         .frame(maxWidth: .infinity)
+                        .overlay {
+                            HStack(spacing: 8 * scale) {
+                                Image(systemName: "apple.logo")
+                                    .font(.system(size: 22 * scale))
+                                    .offset(x: -9 * scale)
+                                Text("Sign in with Apple")
+                                    .font(.system(size: 17 * scale, weight: .medium))
+                            }
+                            .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(colorScheme == .dark ? Color.white : Color.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .allowsHitTesting(false)
+                        }
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         .disabled(app.isAuthenticating)
                         .accessibilityIdentifier("apple-sign-in-button")
@@ -623,6 +637,19 @@ private struct RegisterView: View {
                     .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
                     .frame(height: 50)
                     .frame(maxWidth: .infinity)
+                    .overlay {
+                        HStack(spacing: 8) {
+                            Image(systemName: "apple.logo")
+                                .font(.system(size: 22))
+                            Text("Continue with Apple")
+                                .font(.system(size: 17, weight: .medium))
+                        }
+                        .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(colorScheme == .dark ? Color.white : Color.black)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .allowsHitTesting(false)
+                    }
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .disabled(app.isAuthenticating)
                     .accessibilityIdentifier("apple-register-button")
