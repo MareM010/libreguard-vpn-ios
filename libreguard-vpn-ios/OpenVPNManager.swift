@@ -302,9 +302,11 @@ final class OpenVPNManager: VPNManaging {
 
         do {
             try await preferencesAccess.withExclusiveAccess {
-                try await self.loadPreferences()
-                try await self.removePreferences()
-                try await self.loadPreferences()
+                try await VPNProfileRemoval.removeIfPresent(
+                    load: { try await self.loadPreferences() },
+                    hasProfile: { self.manager.protocolConfiguration != nil },
+                    remove: { try await self.removePreferences() }
+                )
             }
             OpenVPNConnectionMetadataStore.clear()
             status = VPNConnectionState(networkExtensionStatus: manager.connection.status)

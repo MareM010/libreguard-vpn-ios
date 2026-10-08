@@ -100,6 +100,30 @@ struct VPNConnectionTiming {
     var sleep: @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
 }
 
+/// Logout and retries can encounter an already-removed profile. Confirm its
+/// absence from preferences instead of trying to remove it again. A failed
+/// removal is safe only if a fresh load proves the profile is now absent.
+@MainActor
+enum VPNProfileRemoval {
+    static func removeIfPresent(
+        load: () async throws -> Void,
+        hasProfile: () -> Bool,
+        remove: () async throws -> Void
+    ) async throws {
+        try await load()
+        guard hasProfile() else { return }
+        do {
+            try await remove()
+        } catch {
+            try await load()
+            guard !hasProfile() else { throw error }
+            return
+        }
+        try await load()
+        guard !hasProfile() else { throw VPNConnectionFailure(kind: .stopFailed) }
+    }
+}
+
 /// A callback can arrive after timeout or cancellation. Resume exactly once,
 /// without waiting for an unresponsive provider to finish a structured child task.
 @MainActor

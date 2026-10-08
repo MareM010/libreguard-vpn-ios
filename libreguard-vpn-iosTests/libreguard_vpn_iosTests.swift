@@ -168,6 +168,27 @@ struct libreguard_vpn_iosTests {
         #expect(backend.sessionInvalidationCallbackCount == 1)
     }
 
+    @Test func logoutWithMixedProfileCleanupOutcomesReturnsToLogin() async {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [.success(startupSession())])
+        let removed = VPNProfileCleanupResult(tunnelStopped: true, onDemandDisabled: false,
+            profileRemoved: true, diagnostic: nil)
+        let disabled = VPNProfileCleanupResult(tunnelStopped: true, onDemandDisabled: true,
+            profileRemoved: false, diagnostic: nil)
+        let vpn = StartupVPNManager(status: .connected,
+            cleanupResults: [VPNProfileCleanupResult.combined([removed, disabled])])
+        let app = makeStartupApp(backend: backend, vpn: vpn, defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        VPNSharedSessionStore.clear()
+        defer { VPNSharedSessionStore.clear() }
+        await app.start()
+
+        await app.signOut()
+
+        if case .login = app.route {} else { Issue.record("Safe cleanup must return logout to sign-in.") }
+        #expect(app.sessionCleanupState == nil)
+        #expect(app.session == nil)
+        #expect(vpn.cleanupCalls == 1)
+    }
+
     @Test func incompleteVPNCleanupBlocksLoginUntilRetrySucceeds() async {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let unsafeCleanup = VPNProfileCleanupResult(

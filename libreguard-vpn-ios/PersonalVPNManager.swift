@@ -90,7 +90,9 @@ struct VPNProfileCleanupResult: Equatable, Sendable {
         let diagnostics = results.compactMap(\.diagnostic).joined(separator: " | ")
         return VPNProfileCleanupResult(
             tunnelStopped: results.allSatisfy(\.tunnelStopped),
-            onDemandDisabled: results.allSatisfy(\.onDemandDisabled),
+            // A removed profile cannot reconnect on demand. Each profile may
+            // be safe by a different route (removed versus disabled).
+            onDemandDisabled: results.allSatisfy { $0.onDemandDisabled || $0.profileRemoved },
             profileRemoved: results.allSatisfy(\.profileRemoved),
             diagnostic: diagnostics.isEmpty ? nil : diagnostics
         )
@@ -515,13 +517,12 @@ final class PersonalVPNManager: VPNManaging {
 
         do {
             try await preferencesAccess.withExclusiveAccess {
-                try await self.loadPreferences()
-                try await self.removePreferences()
+                try await VPNProfileRemoval.removeIfPresent(
+                    load: { try await self.loadPreferences() },
+                    hasProfile: { self.manager.protocolConfiguration != nil },
+                    remove: { try await self.removePreferences() }
+                )
                 self.approvedIdentity = nil
-                try await self.loadPreferences()
-                guard self.manager.protocolConfiguration == nil else {
-                    throw VPNConnectionFailure(kind: .stopFailed)
-                }
             }
             status = VPNConnectionState(networkExtensionStatus: manager.connection.status)
             let result = VPNProfileCleanupResult(

@@ -6,6 +6,88 @@ import UserNotifications
 
 @MainActor
 struct VPNRecoveryTests {
+    @Test func combinedLogoutCleanupAcceptsDifferentSafeOutcomesPerProfile() {
+        let removed = VPNProfileCleanupResult(tunnelStopped: true, onDemandDisabled: false,
+            profileRemoved: true, diagnostic: nil)
+        let disabled = VPNProfileCleanupResult(tunnelStopped: true, onDemandDisabled: true,
+            profileRemoved: false, diagnostic: "Removal failed, but on-demand is disabled.")
+
+        let combined = VPNProfileCleanupResult.combined([removed, disabled])
+
+        #expect(combined.isSafeForUnauthenticatedLogin)
+        #expect(!combined.profileRemoved)
+    }
+
+    @Test func combinedLogoutCleanupRejectsEveryUnsafeProfileCombination() {
+        let outcomes = [false, true].flatMap { stopped in
+            [false, true].flatMap { disabled in
+                [false, true].map { removed in
+                    VPNProfileCleanupResult(tunnelStopped: stopped, onDemandDisabled: disabled,
+                        profileRemoved: removed, diagnostic: nil)
+                }
+            }
+        }
+        for first in outcomes {
+            for second in outcomes {
+                #expect(VPNProfileCleanupResult.combined([first, second]).isSafeForUnauthenticatedLogin
+                    == (first.isSafeForUnauthenticatedLogin && second.isSafeForUnauthenticatedLogin))
+            }
+        }
+    }
+
+    @Test func logoutRemovalSkipsAbsentProfileAndIsSafeToRepeat() async throws {
+        var hasProfile = true
+        var loads = 0
+        var removals = 0
+        for _ in 0..<2 {
+            try await VPNProfileRemoval.removeIfPresent(
+                load: { loads += 1 }, hasProfile: { hasProfile },
+                remove: { removals += 1; hasProfile = false })
+        }
+        #expect(loads == 3)
+        #expect(removals == 1)
+    }
+
+    @Test func logoutRemovalAcceptsAnAlreadyRemovedProfileOnlyAfterReload() async throws {
+        var hasProfile = true
+        var loads = 0
+        try await VPNProfileRemoval.removeIfPresent(
+            load: { loads += 1; if loads == 2 { hasProfile = false } },
+            hasProfile: { hasProfile },
+            remove: { throw NSError(domain: NEVPNErrorDomain, code: NEVPNError.configurationInvalid.rawValue) })
+        #expect(loads == 2)
+        #expect(!hasProfile)
+    }
+
+    @Test func logoutRemovalRejectsFailedOrUnverifiedRemoval() async {
+        for failed in [false, true] {
+            do {
+                try await VPNProfileRemoval.removeIfPresent(
+                    load: {}, hasProfile: { true },
+                    remove: { if failed { throw NSError(domain: NEVPNErrorDomain, code: 5) } })
+                Issue.record("An installed profile must not be reported as removed.")
+            } catch {
+                if failed { #expect((error as NSError).code == 5) }
+                else { #expect((error as? VPNConnectionFailure)?.kind == .stopFailed) }
+            }
+        }
+    }
+
+    @Test func logoutRemovalRequiresSuccessfulPreferenceReads() async {
+        for failingLoad in [1, 2] {
+            var loads = 0
+            var hasProfile = true
+            do {
+                try await VPNProfileRemoval.removeIfPresent(
+                    load: {
+                        loads += 1
+                        if loads == failingLoad { throw NSError(domain: NEVPNErrorDomain, code: 5) }
+                    }, hasProfile: { hasProfile }, remove: { hasProfile = false })
+                Issue.record("Unreadable preferences must not confirm profile removal.")
+            } catch { #expect((error as NSError).code == 5) }
+        }
+    }
+
     @Test func missingProfileNeedsNoSaveOrRemoval() async {
         let harness = RecoveryHarness()
         harness.profile = nil
