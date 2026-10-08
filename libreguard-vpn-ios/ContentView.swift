@@ -452,8 +452,15 @@ private struct LoginView: View {
                             }
                             .frame(width: logoSize, height: logoSize)
 
-                            Text("Welcome Back")
-                                .font(.system(size: 29 * scale, weight: .semibold))
+                            Image("LibreGuardVPNWordmark")
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 220 * scale, height: 36 * scale)
+                                .clipped()
+                                .accessibilityLabel("LibreGuard VPN")
+
+//                            Text("Welcome Back")
+//                                .font(.system(size: 29 * scale, weight: .semibold))
                             Text("Sign in to your LibreGuard account")
                                 .foregroundStyle(.secondary)
                         }
@@ -581,6 +588,12 @@ private struct RegisterView: View {
             VStack(spacing: 22) {
                 VStack(spacing: 14) {
                     LibreGuardLogo(size: 88)
+                    Image("LibreGuardVPNWordmark")
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 220, height: 36)
+                        .clipped()
+                        .accessibilityLabel("LibreGuard VPN")
                     Text("Create Account")
                         .font(.system(size: 30, weight: .semibold))
                     Text("Join LibreGuard for secure browsing")
