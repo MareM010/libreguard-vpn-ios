@@ -2725,11 +2725,9 @@ private struct ProtectionIndicators: View {
     var body: some View {
         HStack(spacing: 10) {
             ProtectionBadge(text: app.dnsPreference?.effectiveEnabled == true ? "Ad Blocking" : "Private DNS")
-            ProtectionBadge(
-                text: app.ipv6ProtectionStatus.label,
-                systemImage: app.ipv6ProtectionStatus == .bestEffort ? "exclamationmark.shield" : "checkmark.shield",
-                color: app.ipv6ProtectionStatus == .bestEffort ? Theme.statusConnecting : Theme.statusConnected
-            )
+            if app.ipv6ProtectionStatus == .blocked {
+                ProtectionBadge(text: app.ipv6ProtectionStatus.label)
+            }
             ProtectionBadge(text: "WebRTC Safe")
         }
         .frame(maxWidth: .infinity, alignment: .center)
