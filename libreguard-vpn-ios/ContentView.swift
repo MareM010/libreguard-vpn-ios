@@ -2017,6 +2017,7 @@ private struct TwoFactorManagementView: View {
     @State private var confirmDisable = false
     @State private var confirmRegenerate = false
     @State private var isWorking = false
+    @State private var copiedValue: String?
 
     var body: some View {
         NavigationStack {
@@ -2126,10 +2127,22 @@ private struct TwoFactorManagementView: View {
                     Text("Or enter this key manually")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(setup.sharedKey)
-                        .font(.system(.footnote, design: .monospaced, weight: .semibold))
-                        .textSelection(.enabled)
-                        .multilineTextAlignment(.center)
+                    Button {
+                        copyToClipboard(setup.sharedKey)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(setup.sharedKey)
+                                .font(.system(.footnote, design: .monospaced, weight: .semibold))
+                                .multilineTextAlignment(.center)
+                            Image(systemName: copiedValue == setup.sharedKey ? "checkmark" : "doc.on.doc")
+                                .font(.caption)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.primary)
+                    .accessibilityLabel(copiedValue == setup.sharedKey ? "Authenticator key copied" : "Copy authenticator key")
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -2167,12 +2180,24 @@ private struct TwoFactorManagementView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 ForEach(codes, id: \.self) { code in
-                    Text(code)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
+                    Button {
+                        copyToClipboard(code)
+                    } label: {
+                        HStack {
+                            Text(code)
+                                .font(.system(.body, design: .monospaced))
+                            Spacer()
+                            Image(systemName: copiedValue == code ? "checkmark" : "doc.on.doc")
+                                .font(.caption)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.primary)
+                    .accessibilityLabel(copiedValue == code ? "Recovery code copied" : "Copy recovery code \(code)")
                 }
                 HStack {
-                    Button("Copy All") { UIPasteboard.general.string = codes.joined(separator: "\n") }
+                    Button("Copy All") { copyToClipboard(codes.joined(separator: "\n")) }
                         .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     Spacer()
                     ShareLink(item: codes.joined(separator: "\n")) {
@@ -2184,6 +2209,11 @@ private struct TwoFactorManagementView: View {
                 .foregroundStyle(Theme.primary)
             }
         }
+    }
+
+    private func copyToClipboard(_ value: String) {
+        UIPasteboard.general.string = value
+        copiedValue = value
     }
 }
 
