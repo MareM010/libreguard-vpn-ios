@@ -336,8 +336,10 @@ struct NewsletterConsentTests {
 
 @MainActor
 final class NewsletterAppleSigningStub: AppleSigning {
+    private(set) var credentialCalls = 0
     func prepare(_ request: ASAuthorizationAppleIDRequest) {}
     func credential(from result: Result<ASAuthorization, Error>) throws -> AppleSignInCredential {
-        AppleSignInCredential(idToken: "apple-token", nonce: "nonce", userIdentifier: "apple-user")
+        credentialCalls += 1
+        return AppleSignInCredential(idToken: "apple-token", nonce: "nonce", userIdentifier: "apple-user")
     }
 }

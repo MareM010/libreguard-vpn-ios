@@ -761,14 +761,18 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func prepareAppleSignIn(_ request: ASAuthorizationAppleIDRequest) {
-        guard !isAuthenticating, sessionCleanupState == nil else { return }
+    @discardableResult
+    func prepareAppleSignIn(_ request: ASAuthorizationAppleIDRequest) -> UUID? {
+        guard !isAuthenticating, sessionCleanupState == nil else { return nil }
         cancelGoogleLogin()
-        appleLoginID = UUID()
+        let id = UUID()
+        appleLoginID = id
         appleLoginGeneration = sessionStateGeneration
+        request.state = id.uuidString
         presentedError = nil
         isAuthenticating = true
         appleSignIn.prepare(request)
+        return id
     }
 
     private func cancelAppleLogin() {
@@ -778,10 +782,13 @@ final class AppModel: ObservableObject {
         appleCompletionInProgress = false
     }
 
-    func completeAppleSignIn(_ result: Result<ASAuthorization, Error>) async {
-        guard let id = appleLoginID, let generation = appleLoginGeneration,
+    func completeAppleSignIn(_ result: Result<ASAuthorization, Error>, operationID: UUID) async {
+        guard let id = appleLoginID, id == operationID, let generation = appleLoginGeneration,
               !appleCompletionInProgress, generation == sessionStateGeneration,
               sessionCleanupState == nil else { return }
+        if case let .success(authorization) = result,
+           let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
+           credential.state != id.uuidString { return }
         appleCompletionInProgress = true
         let actionGeneration = authenticationActionGeneration
         defer {

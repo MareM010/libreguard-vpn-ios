@@ -458,25 +458,48 @@ struct libreguard_vpn_iosTests {
             appleSignIn: service
         )
 
-        app.prepareAppleSignIn(ASAuthorizationAppleIDProvider().createRequest())
+        let firstOperation = app.prepareAppleSignIn(ASAuthorizationAppleIDProvider().createRequest())!
         #expect(app.isAuthenticating)
         let cancellation = NSError(
             domain: ASAuthorizationError.errorDomain,
             code: ASAuthorizationError.canceled.rawValue
         )
-        await app.completeAppleSignIn(.failure(cancellation))
+        await app.completeAppleSignIn(.failure(cancellation), operationID: firstOperation)
         #expect(app.presentedError == nil)
         #expect(!app.isAuthenticating)
         #expect(!service.hasPendingRequest)
 
-        app.prepareAppleSignIn(ASAuthorizationAppleIDProvider().createRequest())
+        let secondOperation = app.prepareAppleSignIn(ASAuthorizationAppleIDProvider().createRequest())!
         await app.completeAppleSignIn(.failure(NSError(
             domain: ASAuthorizationError.errorDomain,
             code: ASAuthorizationError.failed.rawValue,
             userInfo: [NSLocalizedDescriptionKey: "Authorization failed"]
-        )))
+        )), operationID: secondOperation)
         #expect(app.presentedError?.message == "Authorization failed")
         #expect(!service.hasPendingRequest)
+    }
+
+    @Test func supersededAppleCallbackCannotConsumeNewPreparation() async throws {
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        let service = NewsletterAppleSigningStub()
+        let app = makeStartupApp(
+            backend: backend, vpn: StartupVPNManager(status: .disconnected),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!, appleSignIn: service
+        )
+        let firstRequest = ASAuthorizationAppleIDProvider().createRequest()
+        let first = try #require(app.prepareAppleSignIn(firstRequest))
+        app.cancelGoogleLogin()
+        let secondRequest = ASAuthorizationAppleIDProvider().createRequest()
+        let second = try #require(app.prepareAppleSignIn(secondRequest))
+        #expect(first != second)
+        #expect(secondRequest.state == second.uuidString)
+        await app.completeAppleSignIn(.failure(APIError(message: "Delayed callback")), operationID: first)
+        #expect(service.credentialCalls == 0)
+        #expect(backend.appleLoginIdToken == nil)
+        #expect(app.isAuthenticating)
+        #expect(app.presentedError == nil)
+        #expect(app.session == nil)
+        app.cancelGoogleLogin()
     }
 
     @Test func lateAppleResponseCannotReplaceNewAccountOrPresentConsent() async throws {
@@ -492,9 +515,9 @@ struct libreguard_vpn_iosTests {
             appleSignIn: NewsletterAppleSigningStub(),
             appleCredentialBindingStore: bindings
         )
-        app.prepareAppleSignIn(ASAuthorizationAppleIDProvider().createRequest())
+        let operation = try #require(app.prepareAppleSignIn(ASAuthorizationAppleIDProvider().createRequest()))
         let pending = Task {
-            await app.completeAppleSignIn(.failure(APIError(message: "Synthetic Apple completion")))
+            await app.completeAppleSignIn(.failure(APIError(message: "Synthetic Apple completion")), operationID: operation)
         }
         for _ in 0..<1_000 { if waiter != nil { break }; await Task.yield() }
         let completion = try #require(waiter)

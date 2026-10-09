@@ -509,12 +509,10 @@ private struct LoginView: View {
 
                         DividerWithText(text: "Or continue with")
 
-                        SignInWithAppleButton(.signIn) { request in
-                            app.prepareAppleSignIn(request)
-                        } onCompletion: { result in
-                            Task { await app.completeAppleSignIn(result) }
-                        }
-                        .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
+                        CorrelatedAppleSignInButton(
+                            type: .signIn, style: colorScheme == .dark ? .white : .black, app: app
+                        )
+                        .id(colorScheme)
                         .frame(height: 48 * scale)
                         .frame(maxWidth: .infinity)
                         .overlay {
@@ -633,16 +631,10 @@ private struct RegisterView: View {
 
                     DividerWithText(text: "Or continue with")
 
-                    SignInWithAppleButton(.continue) { request in
-                        app.prepareAppleSignIn(request)
-                    } onCompletion: { result in
-                        Task {
-                            await app.completeAppleSignIn(
-                                result
-                            )
-                        }
-                    }
-                    .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
+                    CorrelatedAppleSignInButton(
+                        type: .continue, style: colorScheme == .dark ? .white : .black, app: app
+                    )
+                    .id(colorScheme)
                     .frame(height: 50)
                     .frame(maxWidth: .infinity)
                     .overlay {
