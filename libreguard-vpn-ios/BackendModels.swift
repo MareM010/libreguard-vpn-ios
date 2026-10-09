@@ -142,7 +142,7 @@ struct LoginRequest: Encodable {
 
 struct GoogleNativeBeginRequest: Encodable {
     let platform = "ios"
-    let newsletterConsent: Bool?
+    let newsletterConsentFlow = "postAuth"
     let deviceId: String
     let appVersion: String
     let devicePublicKey: String
@@ -176,7 +176,7 @@ struct GoogleNativeContinueRequest: Encodable {
 struct AppleLoginRequest: Encodable {
     let idToken: String
     let nonce: String
-    let newsletterConsent: Bool?
+    let newsletterConsentFlow = "postAuth"
     let deviceId: String
     let appVersion: String
     let devicePublicKey: String
@@ -194,6 +194,8 @@ struct RefreshTokenRequest: Encodable {
 }
 
 struct LoginResponse: Decodable {
+    let isNewAccount: Bool?
+    let newsletterConsentPromptPending: Bool?
     let requiresTwoFactor: Bool?
     let pendingLoginToken: String?
     let token: String?
@@ -911,7 +913,7 @@ struct PendingRegistration: Codable, Equatable {
 enum LoginAttempt {
     case password(email: String, password: String)
     case google
-    case apple(idToken: String, nonce: String, newsletterConsent: Bool?, userIdentifier: String)
+    case apple(idToken: String, nonce: String, userIdentifier: String)
 }
 
 struct TwoFactorChallenge: Identifiable {

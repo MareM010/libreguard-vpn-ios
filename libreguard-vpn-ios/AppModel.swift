@@ -31,7 +31,11 @@ final class AppModel: ObservableObject {
     @Published var prefilledEmail = ""
     @Published var session: AuthSession? {
         didSet {
-            if oldValue != session { sessionStateGeneration &+= 1 }
+            newsletterConsent.updateAccount(session?.userId)
+            if oldValue != session {
+                sessionStateGeneration &+= 1
+                cancelAppleLogin()
+            }
             if session != nil {
                 hasCompletedUnauthenticatedCleanup = false
             }
@@ -117,9 +121,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var sessionCleanupState: SessionCleanupState?
     @Published var retryAfterSeconds = 0
 
+    let newsletterConsent: NewsletterConsentModel
     private let api: BackendServicing
     private let appleStore: AppleSubscriptionStoreServing
     private let google: GoogleSigning
+    private var appleLoginID: UUID?
+    private var appleLoginGeneration: UInt?
+    private var appleCompletionInProgress = false
+    private var authenticationActionGeneration: UInt = 0
     private var googleLoginID: UUID?
     private var googleLoginExpiryTask: Task<Void, Never>?
     private let openGoogleLinkingPage: () -> Void
@@ -241,6 +250,7 @@ final class AppModel: ObservableObject {
     ) {
         let resolvedAPI = api ?? APIClient()
         self.api = resolvedAPI
+        self.newsletterConsent = NewsletterConsentModel(api: resolvedAPI)
         self.appleStore = appleStore ?? AppleSubscriptionStore()
         self.appleVerificationRetryDelays = appleVerificationRetryDelays.isEmpty ? [0] : appleVerificationRetryDelays
         self.google = google ?? GoogleSignInService()
@@ -497,6 +507,8 @@ final class AppModel: ObservableObject {
         guard sessionCleanupTask == nil, sessionStateGeneration == generation,
               session == activeSession, api.storedSession == activeSession else { return }
         await reconcileAutoConnectOnLaunch()
+        guard sessionStateGeneration == generation else { return }
+        await newsletterConsent.refresh(showPrompt: true)
     }
 
     private func continueWithCachedSessionAfterTransientRestoreFailure() async {
@@ -688,7 +700,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func loginWithGoogle(newsletterConsent: Bool? = nil) async {
+    func loginWithGoogle() async {
         guard !isAuthenticating, sessionCleanupState == nil else { return }
         guard google.isConfigured else {
             presentedError = APIError(message: "Google sign-in is not configured for this build.")
@@ -701,7 +713,7 @@ final class AppModel: ObservableObject {
         isAuthenticating = true
         defer { if googleLoginID == id { isAuthenticating = false } }
         do {
-            let begin = try await api.beginGoogleLogin(newsletterConsent: newsletterConsent)
+            let begin = try await api.beginGoogleLogin()
             guard googleLoginID == id else { return }
             guard begin.expiresAt > Date(), begin.expiresAt.timeIntervalSinceNow <= 660 else {
                 throw APIError(message: "Google sign-in expired. Start again.", code: "GOOGLE_LOGIN_EXPIRED")
@@ -721,6 +733,8 @@ final class AppModel: ObservableObject {
     }
 
     func cancelGoogleLogin() {
+        authenticationActionGeneration &+= 1
+        cancelAppleLogin()
         googleLoginID = nil
         googleLoginExpiryTask?.cancel()
         googleLoginExpiryTask = nil
@@ -747,42 +761,59 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func prepareAppleSignIn(_ request: ASAuthorizationAppleIDRequest) {
-        guard !isAuthenticating, sessionCleanupState == nil else { return }
+    @discardableResult
+    func prepareAppleSignIn(_ request: ASAuthorizationAppleIDRequest) -> UUID? {
+        guard !isAuthenticating, sessionCleanupState == nil else { return nil }
         cancelGoogleLogin()
+        let id = UUID()
+        appleLoginID = id
+        appleLoginGeneration = sessionStateGeneration
+        request.state = id.uuidString
         presentedError = nil
         isAuthenticating = true
         appleSignIn.prepare(request)
+        return id
     }
 
-    func completeAppleSignIn(
-        _ result: Result<ASAuthorization, Error>,
-        newsletterConsent: Bool? = nil
-    ) async {
-        defer { isAuthenticating = false }
+    private func cancelAppleLogin() {
+        if appleLoginID != nil { isAuthenticating = false }
+        appleLoginID = nil
+        appleLoginGeneration = nil
+        appleCompletionInProgress = false
+    }
+
+    func completeAppleSignIn(_ result: Result<ASAuthorization, Error>, operationID: UUID) async {
+        guard let id = appleLoginID, id == operationID, let generation = appleLoginGeneration,
+              !appleCompletionInProgress, generation == sessionStateGeneration,
+              sessionCleanupState == nil else { return }
+        if case let .success(authorization) = result,
+           let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
+           credential.state != id.uuidString { return }
+        appleCompletionInProgress = true
+        let actionGeneration = authenticationActionGeneration
+        defer {
+            if appleLoginID == id { cancelAppleLogin(); isAuthenticating = false }
+        }
         do {
             let credential = try appleSignIn.credential(from: result)
-            let attempt = LoginAttempt.apple(
-                idToken: credential.idToken,
-                nonce: credential.nonce,
-                newsletterConsent: newsletterConsent,
-                userIdentifier: credential.userIdentifier
-            )
+            let attempt = LoginAttempt.apple(idToken: credential.idToken, nonce: credential.nonce,
+                                             userIdentifier: credential.userIdentifier)
             do {
-                let response = try await api.loginWithApple(
-                    idToken: credential.idToken,
-                    nonce: credential.nonce,
-                    newsletterConsent: newsletterConsent
-                )
+                let response = try await api.loginWithApple(idToken: credential.idToken, nonce: credential.nonce)
+                guard appleLoginID == id, sessionStateGeneration == generation,
+                      authenticationActionGeneration == actionGeneration, !Task.isCancelled else { return }
                 try await handleLogin(response, attempt: attempt, afterTwoFactor: false)
             } catch {
+                guard appleLoginID == id, sessionStateGeneration == generation,
+                      authenticationActionGeneration == actionGeneration else { return }
                 handle(error, attempt: attempt, afterTwoFactor: false)
             }
         } catch where Self.isAppleSignInCancellation(error) {
-            // Cancellation is a normal outcome of the system account sheet.
         } catch let error as APIError {
+            guard appleLoginID == id else { return }
             presentedError = error
         } catch {
+            guard appleLoginID == id else { return }
             presentedError = APIError(message: error.localizedDescription)
         }
     }
@@ -847,6 +878,8 @@ final class AppModel: ObservableObject {
             guard googleLoginID != nil, case let .twoFactor(active) = route, active.id == challenge.id else { return }
         }
         let googleID = googleLoginID
+        let actionGeneration = authenticationActionGeneration
+        let generation = sessionStateGeneration
         guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             presentedError = APIError(message: recovery ? "Enter a recovery code." : "Enter your authenticator code.")
             return
@@ -861,9 +894,11 @@ final class AppModel: ObservableObject {
             let response = recovery
                 ? try await api.verifyRecoveryCode(challenge, code: code)
                 : try await api.verifyTwoFactor(challenge, code: code)
+            guard authenticationActionGeneration == actionGeneration, sessionStateGeneration == generation else { return }
             if case .google = challenge.attempt, googleLoginID != googleID { return }
             try await handleLogin(response, attempt: challenge.attempt, afterTwoFactor: true)
         } catch {
+            guard authenticationActionGeneration == actionGeneration, sessionStateGeneration == generation else { return }
             if case .google = challenge.attempt {
                 guard googleLoginID == googleID else { return }
                 if let failure = error as? APIError,
@@ -880,6 +915,8 @@ final class AppModel: ObservableObject {
     func removeDeviceAndRetry(_ device: AccountDevice, context: DeviceLimitContext) async {
         guard context.canRemoveInApp, retryAfterSeconds == 0, !isAuthenticating else { return }
         let googleID = googleLoginID
+        let actionGeneration = authenticationActionGeneration
+        let generation = sessionStateGeneration
         isAuthenticating = true
         defer {
             if case .google = context.attempt {
@@ -902,17 +939,19 @@ final class AppModel: ObservableObject {
                 let response = try await api.continueGoogleLogin(token: token, deviceIdsToRemove: [device.id])
                 guard googleLoginID == googleID else { return }
                 try await handleLogin(response, attempt: .google, afterTwoFactor: context.afterTwoFactor)
-            case let .apple(idToken, nonce, newsletterConsent, _):
+            case let .apple(idToken, nonce, _):
                 try await api.removeAppleDevice(idToken: idToken, nonce: nonce, deviceId: device.id)
+                guard authenticationActionGeneration == actionGeneration, sessionStateGeneration == generation else { return }
                 deviceLimitContext = nil
                 let response = try await api.loginWithApple(
                     idToken: idToken,
-                    nonce: nonce,
-                    newsletterConsent: newsletterConsent
+                    nonce: nonce
                 )
+                guard authenticationActionGeneration == actionGeneration, sessionStateGeneration == generation else { return }
                 try await handleLogin(response, attempt: context.attempt, afterTwoFactor: false)
             }
         } catch {
+            guard authenticationActionGeneration == actionGeneration, sessionStateGeneration == generation else { return }
             if case .google = context.attempt {
                 guard googleLoginID == googleID else { return }
                 handle(error, attempt: .google, afterTwoFactor: context.afterTwoFactor)
@@ -1756,7 +1795,7 @@ final class AppModel: ObservableObject {
         let adoptedSession = try api.adoptSession(from: response)
         do {
             switch attempt {
-            case let .apple(_, _, _, userIdentifier):
+            case let .apple(_, _, userIdentifier):
                 try appleCredentialBindingStore.save(AppleCredentialBinding(
                     userIdentifier: userIdentifier,
                     backendUserId: adoptedSession.userId
@@ -1785,6 +1824,7 @@ final class AppModel: ObservableObject {
         route = .authenticated
         await refreshAccountData(showErrors: false)
         await ensureAppleRecovery()
+        await newsletterConsent.refresh(showPrompt: true)
         if response.warningRecoveryCodes == true {
             presentedError = APIError(message: "A recovery code was used. Generate a new set from Settings.")
         }

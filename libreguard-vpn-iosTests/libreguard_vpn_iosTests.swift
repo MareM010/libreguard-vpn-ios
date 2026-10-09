@@ -293,7 +293,7 @@ struct libreguard_vpn_iosTests {
         }
     }
 
-    @Test func nativeGoogleBeginBindsPlatformDeviceAndOptionalConsent() async throws {
+    @Test func nativeGoogleBeginBindsDeviceAndDefersNewsletterUntilAuthenticated() async throws {
         try await withSerializedRequests {
             var received: [[String: Any]] = []
             let client = makeClient { request in
@@ -303,7 +303,7 @@ struct libreguard_vpn_iosTests {
                 return try makeResponse(request, status: 200, json: googleBeginJSON)
             }
             _ = try await client.beginGoogleLogin()
-            _ = try await client.beginGoogleLogin(newsletterConsent: true)
+            _ = try await client.beginGoogleLogin()
             #expect(received.count == 2)
             #expect(received[0]["platform"] as? String == "ios")
             #expect(received[0]["deviceId"] as? String == "test-device")
@@ -312,7 +312,8 @@ struct libreguard_vpn_iosTests {
             #expect(received[0]["devicePublicKeyId"] as? String == "device-key-id")
             #expect(received[0]["devicePublicKeyAlgorithm"] as? String == "RSA-OAEP-256")
             #expect(received[0]["newsletterConsent"] == nil)
-            #expect(received[1]["newsletterConsent"] as? Bool == true)
+            #expect(received[1]["newsletterConsent"] == nil)
+            #expect(received.allSatisfy { $0["newsletterConsentFlow"] as? String == "postAuth" })
             #expect(received.allSatisfy { $0["idToken"] == nil && $0["codeVerifier"] == nil && $0["clientSecret"] == nil })
         }
     }
@@ -356,7 +357,7 @@ struct libreguard_vpn_iosTests {
         }
     }
 
-    @Test func appleLoginSendsNonceDeviceKeyAndOptionalConsent() async throws {
+    @Test func appleLoginSendsNonceDeviceKeyAndDefersNewsletter() async throws {
         try await withSerializedRequests {
             var receivedBodies: [[String: Any]] = []
             let client = makeClient { request in
@@ -370,8 +371,7 @@ struct libreguard_vpn_iosTests {
             _ = try await client.loginWithApple(idToken: "login-token", nonce: "login-nonce")
             _ = try await client.loginWithApple(
                 idToken: "registration-token",
-                nonce: "registration-nonce",
-                newsletterConsent: true
+                nonce: "registration-nonce"
             )
 
             #expect(receivedBodies.count == 2)
@@ -385,7 +385,8 @@ struct libreguard_vpn_iosTests {
             #expect(receivedBodies[0]["devicePublicKeyAlgorithm"] as? String == "RSA-OAEP-256")
             #expect(receivedBodies[1]["idToken"] as? String == "registration-token")
             #expect(receivedBodies[1]["nonce"] as? String == "registration-nonce")
-            #expect(receivedBodies[1]["newsletterConsent"] as? Bool == true)
+            #expect(receivedBodies[1]["newsletterConsent"] == nil)
+            #expect(receivedBodies.allSatisfy { $0["newsletterConsentFlow"] as? String == "postAuth" })
         }
     }
 
@@ -457,28 +458,85 @@ struct libreguard_vpn_iosTests {
             appleSignIn: service
         )
 
-        app.prepareAppleSignIn(ASAuthorizationAppleIDProvider().createRequest())
+        let firstOperation = app.prepareAppleSignIn(ASAuthorizationAppleIDProvider().createRequest())!
         #expect(app.isAuthenticating)
         let cancellation = NSError(
             domain: ASAuthorizationError.errorDomain,
             code: ASAuthorizationError.canceled.rawValue
         )
-        await app.completeAppleSignIn(.failure(cancellation))
+        await app.completeAppleSignIn(.failure(cancellation), operationID: firstOperation)
         #expect(app.presentedError == nil)
         #expect(!app.isAuthenticating)
         #expect(!service.hasPendingRequest)
 
-        app.prepareAppleSignIn(ASAuthorizationAppleIDProvider().createRequest())
+        let secondOperation = app.prepareAppleSignIn(ASAuthorizationAppleIDProvider().createRequest())!
         await app.completeAppleSignIn(.failure(NSError(
             domain: ASAuthorizationError.errorDomain,
             code: ASAuthorizationError.failed.rawValue,
             userInfo: [NSLocalizedDescriptionKey: "Authorization failed"]
-        )))
+        )), operationID: secondOperation)
         #expect(app.presentedError?.message == "Authorization failed")
         #expect(!service.hasPendingRequest)
     }
 
-    @Test func appleDeviceRemovalRetryPreservesTokenNonceAndConsent() async throws {
+    @Test func supersededAppleCallbackCannotConsumeNewPreparation() async throws {
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        let service = NewsletterAppleSigningStub()
+        let app = makeStartupApp(
+            backend: backend, vpn: StartupVPNManager(status: .disconnected),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!, appleSignIn: service
+        )
+        let firstRequest = ASAuthorizationAppleIDProvider().createRequest()
+        let first = try #require(app.prepareAppleSignIn(firstRequest))
+        app.cancelGoogleLogin()
+        let secondRequest = ASAuthorizationAppleIDProvider().createRequest()
+        let second = try #require(app.prepareAppleSignIn(secondRequest))
+        #expect(first != second)
+        #expect(secondRequest.state == second.uuidString)
+        await app.completeAppleSignIn(.failure(APIError(message: "Delayed callback")), operationID: first)
+        #expect(service.credentialCalls == 0)
+        #expect(backend.appleLoginIdToken == nil)
+        #expect(app.isAuthenticating)
+        #expect(app.presentedError == nil)
+        #expect(app.session == nil)
+        app.cancelGoogleLogin()
+    }
+
+    @Test func lateAppleResponseCannotReplaceNewAccountOrPresentConsent() async throws {
+        let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
+        var waiter: CheckedContinuation<LoginResponse, Error>?
+        backend.appleLoginHandler = {
+            try await withCheckedThrowingContinuation { waiter = $0 }
+        }
+        let bindings = InMemoryAppleCredentialBindingStore()
+        let app = makeStartupApp(
+            backend: backend, vpn: StartupVPNManager(status: .disconnected),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!,
+            appleSignIn: NewsletterAppleSigningStub(),
+            appleCredentialBindingStore: bindings
+        )
+        let operation = try #require(app.prepareAppleSignIn(ASAuthorizationAppleIDProvider().createRequest()))
+        let pending = Task {
+            await app.completeAppleSignIn(.failure(APIError(message: "Synthetic Apple completion")), operationID: operation)
+        }
+        for _ in 0..<1_000 { if waiter != nil { break }; await Task.yield() }
+        let completion = try #require(waiter)
+        let replacement = AuthSession(
+            accessToken: "replacement-access", refreshToken: "replacement-refresh",
+            email: "replacement@example.com", userId: "replacement", deviceId: "test-device"
+        )
+        backend.storedSession = replacement
+        app.session = replacement
+        completion.resume(returning: try loginResponse(userId: "old-apple"))
+        await pending.value
+        #expect(app.session == replacement)
+        #expect(backend.storedSession == replacement)
+        #expect(bindings.binding == nil)
+        #expect(app.newsletterConsent.prompt == nil)
+        #expect(!app.isAuthenticating)
+    }
+
+    @Test func appleDeviceRemovalRetryPreservesTokenNonceWithoutConsent() async throws {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let backend = StartupBackendStub(storedSession: nil, restoreResults: [])
         backend.appleLoginResponse = try JSONDecoder().decode(
@@ -511,7 +569,6 @@ struct libreguard_vpn_iosTests {
             attempt: .apple(
                 idToken: "apple-token",
                 nonce: "raw-nonce",
-                newsletterConsent: true,
                 userIdentifier: "apple-user"
             ),
             afterTwoFactor: false
@@ -529,12 +586,11 @@ struct libreguard_vpn_iosTests {
         #expect(backend.removedAppleNonce == "raw-nonce")
         #expect(backend.appleLoginIdToken == "apple-token")
         #expect(backend.appleLoginNonce == "raw-nonce")
-        #expect(backend.appleLoginConsent == true)
+        #expect(backend.appleLoginConsent == nil)
         if case let .twoFactor(challenge) = app.route {
-            if case let .apple(idToken, nonce, consent, userIdentifier) = challenge.attempt {
+            if case let .apple(idToken, nonce, userIdentifier) = challenge.attempt {
                 #expect(idToken == "apple-token")
                 #expect(nonce == "raw-nonce")
-                #expect(consent == true)
                 #expect(userIdentifier == "apple-user")
             } else {
                 Issue.record("Expected the Apple login attempt to survive the 2FA transition")
@@ -572,7 +628,6 @@ struct libreguard_vpn_iosTests {
             attempt: .apple(
                 idToken: "apple-token",
                 nonce: "raw-nonce",
-                newsletterConsent: nil,
                 userIdentifier: "apple-user-identifier"
             ),
             afterTwoFactor: false
@@ -2487,7 +2542,40 @@ private final class DNSSettingsTestVPNManager: VPNManaging {
 
 @MainActor
 final class StartupBackendStub: BackendServicing, SessionInvalidationObserving {
-    var storedSession: AuthSession?
+    var newsletterResponse: NewsletterPreference?
+    var newsletterWriteError: APIError?
+    var newsletterGetHandler: ((String) async throws -> NewsletterPreference)?
+    var newsletterUpdateHandler: ((UpdateNewsletterPreferenceRequest) async throws -> NewsletterPreference)?
+    var appleLoginHandler: (() async throws -> LoginResponse)?
+    var newsletterUpdates: [UpdateNewsletterPreferenceRequest] = []
+    var newsletterDecisions: [NewsletterOnboardingRequest] = []
+    func fetchNewsletterPreference(expectedAccountId: String, expectedSessionEpoch: UInt64) async throws -> NewsletterPreference {
+        guard newsletterSessionEpoch == expectedSessionEpoch, storedSession?.userId == expectedAccountId else { throw CancellationError() }
+        if let handler = newsletterGetHandler { return try await handler(expectedAccountId) }
+        guard let newsletterResponse else { return try unsupported() }
+        return newsletterResponse
+    }
+    func updateNewsletterPreference(subscribed: Bool, expectedRevision: UUID, consentTextVersion: String?, expectedAccountId: String, expectedSessionEpoch: UInt64) async throws -> NewsletterPreference {
+        guard newsletterSessionEpoch == expectedSessionEpoch, storedSession?.userId == expectedAccountId else { throw CancellationError() }
+        let request = UpdateNewsletterPreferenceRequest(subscribed: subscribed, expectedRevision: expectedRevision, consentTextVersion: consentTextVersion)
+        newsletterUpdates.append(request)
+        if let error = newsletterWriteError { throw error }
+        if let handler = newsletterUpdateHandler { return try await handler(request) }
+        guard let newsletterResponse else { return try unsupported() }
+        return newsletterResponse
+    }
+    func completeNewsletterOnboarding(decision: NewsletterOnboardingDecision, expectedRevision: UUID, consentTextVersion: String?, expectedAccountId: String, expectedSessionEpoch: UInt64) async throws -> NewsletterPreference {
+        guard newsletterSessionEpoch == expectedSessionEpoch, storedSession?.userId == expectedAccountId else { throw CancellationError() }
+        newsletterDecisions.append(NewsletterOnboardingRequest(decision: decision, expectedRevision: expectedRevision, consentTextVersion: consentTextVersion))
+        if let error = newsletterWriteError { throw error }
+        guard let newsletterResponse else { return try unsupported() }
+        return newsletterResponse
+    }
+
+    var newsletterSessionEpoch: UInt64 = 0
+    var storedSession: AuthSession? {
+        didSet { if oldValue != storedSession { newsletterSessionEpoch &+= 1 } }
+    }
     let deviceId = "startup-device"
     let appVersion = "1.0-test"
     var onSessionInvalidated: (() -> Void)?
@@ -2562,7 +2650,7 @@ final class StartupBackendStub: BackendServicing, SessionInvalidationObserving {
         guard let passwordLoginResponse else { return try unsupported() }
         return passwordLoginResponse
     }
-    func beginGoogleLogin(newsletterConsent: Bool?) async throws -> GoogleNativeBeginResponse {
+    func beginGoogleLogin() async throws -> GoogleNativeBeginResponse {
         googleBeginCalls += 1
         guard let googleBeginResponse else { return try unsupported() }
         return googleBeginResponse
@@ -2578,10 +2666,11 @@ final class StartupBackendStub: BackendServicing, SessionInvalidationObserving {
         guard let googleContinueResult else { return try unsupported() }
         return try googleContinueResult.get()
     }
-    func loginWithApple(idToken: String, nonce: String, newsletterConsent: Bool?) async throws -> LoginResponse {
+    func loginWithApple(idToken: String, nonce: String) async throws -> LoginResponse {
         appleLoginIdToken = idToken
         appleLoginNonce = nonce
-        appleLoginConsent = newsletterConsent
+        appleLoginConsent = nil
+        if let handler = appleLoginHandler { return try await handler() }
         guard let appleLoginResponse else { return try unsupported() }
         return appleLoginResponse
     }
