@@ -9,6 +9,14 @@ import Testing
 @Suite(SharedVPNFixtureScope())
 @MainActor
 struct libreguard_vpn_iosTests {
+    @Test func responsiveLayoutUsesAvailableWidthBreakpoints() {
+        #expect(!ResponsiveLayout.usesExpandedLayout(width: 699))
+        #expect(ResponsiveLayout.usesExpandedLayout(width: 700))
+        #expect(ResponsiveLayout.columnCount(width: 319) == 1)
+        #expect(ResponsiveLayout.columnCount(width: 640) == 2)
+        #expect(ResponsiveLayout.columnCount(width: 0) == 1)
+    }
+
     @Test func themeModeDefaultsToSystemForMissingOrInvalidStorage() {
         #expect(ThemeMode.fromStoredValue(nil) == .system)
         #expect(ThemeMode.fromStoredValue("unsupported") == .system)

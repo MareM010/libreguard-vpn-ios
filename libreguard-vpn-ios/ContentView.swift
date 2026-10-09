@@ -37,56 +37,15 @@ struct ContentView: View {
 
     var body: some View {
         let isUITestLoginMode = ProcessInfo.processInfo.environment["UITEST_FORCE_LOGIN"] == "1"
+        let isUITestMainAppMode = ProcessInfo.processInfo.environment["UITEST_FORCE_MAINAPP"] == "1"
         let isUITestSettingsMode = ProcessInfo.processInfo.environment["UITEST_FORCE_SETTINGS"] == "1"
         let isUITestServersMode = ProcessInfo.processInfo.environment["UITEST_FORCE_SERVERS"] == "1"
-        ZStack {
-            Theme.background.ignoresSafeArea()
+        let isUITestExpandedLayout = ProcessInfo.processInfo.environment["UITEST_FORCE_EXPANDED_LAYOUT"] == "1"
+        GeometryReader { geometry in
+            ZStack {
+                Theme.background.ignoresSafeArea()
 
-            if isUITestLoginMode {
-                LoginView(
-                    onRegister: app.showRegister,
-                    onForgotPassword: app.showForgotPassword
-                )
-            } else if isUITestSettingsMode {
-                SettingsView(
-                    themeMode: themeMode,
-                    effectiveDarkMode: effectiveDarkMode,
-                    onThemeModeChange: { selectedThemeMode in
-                        storedThemeMode = selectedThemeMode.rawValue
-                    },
-                    onUpgrade: {},
-                    onSignOut: {}
-                )
-            } else if isUITestServersMode {
-                ServerListView(
-                    onUpgrade: app.requestUpgrade,
-                    onSelectServer: { _ in }
-                )
-            } else {
-                switch app.route {
-                case .launching:
-                    SessionStartupView()
-                case .sessionCleanup:
-                    SessionCleanupView()
-                case .login:
-                    LoginView(
-                        onRegister: app.showRegister,
-                        onForgotPassword: app.showForgotPassword
-                    )
-                case .register:
-                    RegisterView(onLogin: { app.showLogin() })
-                case let .emailConfirmation(pending):
-                    EmailConfirmationView(
-                        pending: pending,
-                        onBack: app.showRegister
-                    )
-                case .forgotPassword:
-                    ForgotPasswordView(onBack: { app.showLogin() })
-                case let .resetPassword(link):
-                    ResetPasswordView(link: link, onBack: { app.showLogin(prefill: link.email) })
-                case let .twoFactor(challenge):
-                    TwoFactorLoginView(challenge: challenge, onBack: { app.showLogin(prefill: challenge.email) })
-                case .authenticated:
+                if isUITestMainAppMode {
                     MainAppView(
                         selectedTab: $selectedTab,
                         themeMode: themeMode,
@@ -94,16 +53,75 @@ struct ContentView: View {
                         onThemeModeChange: { selectedThemeMode in
                             storedThemeMode = selectedThemeMode.rawValue
                         },
-                        onSignOut: { Task { await app.signOut() } }
+                        onSignOut: {}
                     )
+                } else if isUITestLoginMode {
+                    LoginView(
+                        onRegister: app.showRegister,
+                        onForgotPassword: app.showForgotPassword
+                    )
+                } else if isUITestSettingsMode {
+                    SettingsView(
+                        themeMode: themeMode,
+                        effectiveDarkMode: effectiveDarkMode,
+                        onThemeModeChange: { selectedThemeMode in
+                            storedThemeMode = selectedThemeMode.rawValue
+                        },
+                        onUpgrade: {},
+                        onSignOut: {}
+                    )
+                } else if isUITestServersMode {
+                    ServerListView(
+                        onUpgrade: app.requestUpgrade,
+                        onSelectServer: { _ in }
+                    )
+                } else {
+                    switch app.route {
+                    case .launching:
+                        SessionStartupView()
+                    case .sessionCleanup:
+                        SessionCleanupView()
+                    case .login:
+                        LoginView(
+                            onRegister: app.showRegister,
+                            onForgotPassword: app.showForgotPassword
+                        )
+                    case .register:
+                        RegisterView(onLogin: { app.showLogin() })
+                    case let .emailConfirmation(pending):
+                        EmailConfirmationView(
+                            pending: pending,
+                            onBack: app.showRegister
+                        )
+                    case .forgotPassword:
+                        ForgotPasswordView(onBack: { app.showLogin() })
+                    case let .resetPassword(link):
+                        ResetPasswordView(link: link, onBack: { app.showLogin(prefill: link.email) })
+                    case let .twoFactor(challenge):
+                        TwoFactorLoginView(challenge: challenge, onBack: { app.showLogin(prefill: challenge.email) })
+                    case .authenticated:
+                        MainAppView(
+                            selectedTab: $selectedTab,
+                            themeMode: themeMode,
+                            effectiveDarkMode: effectiveDarkMode,
+                            onThemeModeChange: { selectedThemeMode in
+                                storedThemeMode = selectedThemeMode.rawValue
+                            },
+                            onSignOut: { Task { await app.signOut() } }
+                        )
+                    }
+                }
+
+                if app.upgradePromptRequested {
+                    UpgradeView(onBack: app.dismissUpgrade)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                        .zIndex(100)
                 }
             }
-
-            if app.upgradePromptRequested {
-                UpgradeView(onBack: app.dismissUpgrade)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-                    .zIndex(100)
-            }
+            .environment(
+                \.libreGuardUsesExpandedLayout,
+                isUITestExpandedLayout || ResponsiveLayout.usesExpandedLayout(width: geometry.size.width)
+            )
         }
         .overlay {
             if case .authenticated = app.route {
@@ -185,6 +203,7 @@ private struct SessionStartupView: View {
                 .multilineTextAlignment(.center)
         }
         .padding(32)
+        .frame(maxWidth: 480)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityIdentifier("session-startup-view")
     }
@@ -222,6 +241,7 @@ private struct SessionCleanupView: View {
             }
         }
         .padding(32)
+        .frame(maxWidth: 480)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityIdentifier("session-cleanup-view")
     }
@@ -326,6 +346,29 @@ enum Theme {
     static let border = primary.opacity(0.16)
 }
 
+enum ResponsiveLayout {
+    static let expandedWidth: CGFloat = 700
+
+    static func usesExpandedLayout(width: CGFloat) -> Bool {
+        width >= expandedWidth
+    }
+
+    static func columnCount(width: CGFloat, minimumColumnWidth: CGFloat = 320) -> Int {
+        max(1, Int(max(0, width) / minimumColumnWidth))
+    }
+}
+
+private struct LibreGuardExpandedLayoutKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+private extension EnvironmentValues {
+    var libreGuardUsesExpandedLayout: Bool {
+        get { self[LibreGuardExpandedLayoutKey.self] }
+        set { self[LibreGuardExpandedLayoutKey.self] = newValue }
+    }
+}
+
 extension VPNConnectionState {
     var color: Color {
         switch self {
@@ -343,6 +386,7 @@ extension VPNConnectionState {
 
 private struct MainAppView: View {
     @EnvironmentObject private var app: AppModel
+    @Environment(\.libreGuardUsesExpandedLayout) private var usesExpandedLayout
     @Binding var selectedTab: MainTab
     let themeMode: ThemeMode
     let effectiveDarkMode: Bool
@@ -350,9 +394,13 @@ private struct MainAppView: View {
     let onSignOut: () -> Void
 
     var body: some View {
-        ZStack {
+        HStack(spacing: 0) {
+            if usesExpandedLayout {
+                MainTabRail(selectedTab: $selectedTab)
+            }
+
             VStack(spacing: 0) {
-                ZStack {
+                Group {
                     switch selectedTab {
                     case .home:
                         DashboardView(onUpgrade: app.requestUpgrade)
@@ -378,9 +426,13 @@ private struct MainAppView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                BottomTabBar(selectedTab: $selectedTab)
+                if !usesExpandedLayout {
+                    BottomTabBar(selectedTab: $selectedTab)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .background(Theme.background)
     }
 }
 
@@ -1002,71 +1054,52 @@ private struct ResetPasswordView: View {
 
 private struct DashboardView: View {
     @EnvironmentObject private var app: AppModel
+    @Environment(\.libreGuardUsesExpandedLayout) private var usesExpandedLayout
     let onUpgrade: () -> Void
 
     var body: some View {
         GeometryReader { proxy in
-            let compact = proxy.size.height < 720 || status.isConnected
-            // Keep the dashboard's scale stable while the server-selection
-            // card changes from Quick Connect to a manually selected server.
-            let referenceHeight: CGFloat = if status.isConnected {
-                700
-            } else {
-                compact ? 560 : 740
-            }
-            let scale = min(1, proxy.size.height / referenceHeight)
+            let compactHeight = proxy.size.height < 680
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: usesExpandedLayout ? 18 : (compactHeight ? 10 : 20)) {
+                    header(compact: !usesExpandedLayout || compactHeight)
 
-            VStack(spacing: compact ? 10 : 22) {
-                header(compact: compact)
-
-                if status.isConnected {
-                    ProtectedIPCard(server: selectedServer)
-                    ProtectionIndicators()
-                }
-
-                if status == .disconnected || status == .invalid {
-                    if let selectedServer {
-                        SelectedServerCard(
-                            server: selectedServer,
-                            onClearSelection: {
-                                app.deselectServer()
+                    if usesExpandedLayout {
+                        HStack(alignment: .top, spacing: 18) {
+                            VStack(spacing: 16) {
+                                connectionSelection
+                                statusControl(compact: true)
+                                notificationNotice
                             }
-                        )
-                    } else {
-                        QuickConnectCard {
-                            app.requestQuickConnect()
+                            .frame(maxWidth: .infinity)
+
+                            VStack(spacing: 16) {
+                                connectedProtectionDetails
+                                connectedStats(compact: false)
+                                monthlyUsageCard
+                            }
+                            .frame(maxWidth: .infinity)
                         }
+                    } else {
+                        if status.isConnected {
+                            ProtectedIPCard(server: selectedServer)
+                            ProtectionIndicators()
+                        }
+
+                        connectionSelection
+                        statusControl(compact: compactHeight)
+                        notificationNotice
+                        connectedStats(compact: compactHeight)
+                        monthlyUsageCard
                     }
                 }
-
-                statusControl(compact: compact)
-                if let notice = app.notificationPermissionNotice {
-                    VStack(spacing: 6) {
-                        Text(notice).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                        Button("Open Notification Settings") { app.openNotificationSettings() }
-                            .font(.caption.weight(.semibold))
-                    }
-                    .accessibilityIdentifier("notificationPermissionNotice")
-                }
-                connectedStats(compact: compact)
-
-                Spacer(minLength: compact ? 2 : 8)
-
-                MonthlyUsageCard(
-                    quota: app.usageQuota,
-                    isPro: app.isProUser,
-                    onUpgrade: onUpgrade
-                )
+                .padding(.horizontal, usesExpandedLayout ? 18 : (compactHeight ? 16 : 24))
+                .padding(.top, usesExpandedLayout ? 18 : (compactHeight ? 10 : 24))
+                .padding(.bottom, 20)
+                .frame(maxWidth: usesExpandedLayout ? 1_200 : 680)
+                .frame(maxWidth: .infinity, alignment: .top)
             }
-            .padding(.horizontal, compact ? 16 : 24)
-            .padding(.top, compact ? 10 : 24)
-            .padding(.bottom, compact ? 8 : 12)
-            .frame(
-                width: proxy.size.width / scale,
-                height: proxy.size.height / scale,
-                alignment: .top
-            )
-            .scaleEffect(scale, anchor: .topLeading)
+            .accessibilityIdentifier("dashboard-scroll-content")
         }
         .background(Theme.background)
         .task {
@@ -1082,6 +1115,54 @@ private struct DashboardView: View {
     private var selectedServer: VPNServer? {
         guard let selectedServerID = app.selectedServerID else { return nil }
         return app.servers.first(where: { $0.id == selectedServerID })
+    }
+
+    @ViewBuilder
+    private var connectionSelection: some View {
+        if status == .disconnected || status == .invalid {
+            if let selectedServer {
+                SelectedServerCard(
+                    server: selectedServer,
+                    onClearSelection: { app.deselectServer() }
+                )
+            } else {
+                QuickConnectCard {
+                    app.requestQuickConnect()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var connectedProtectionDetails: some View {
+        if status.isConnected {
+            ProtectedIPCard(server: selectedServer)
+            ProtectionIndicators()
+        }
+    }
+
+    @ViewBuilder
+    private var notificationNotice: some View {
+        if let notice = app.notificationPermissionNotice {
+            VStack(spacing: 6) {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button("Open Notification Settings") { app.openNotificationSettings() }
+                    .font(.caption.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .accessibilityIdentifier("notificationPermissionNotice")
+        }
+    }
+
+    private var monthlyUsageCard: some View {
+        MonthlyUsageCard(
+            quota: app.usageQuota,
+            isPro: app.isProUser,
+            onUpgrade: onUpgrade
+        )
     }
 
     private func header(compact: Bool) -> some View {
@@ -1198,6 +1279,7 @@ private struct DashboardView: View {
 
 private struct ServerListView: View {
     @EnvironmentObject private var app: AppModel
+    @Environment(\.libreGuardUsesExpandedLayout) private var usesExpandedLayout
     @State private var query = ""
     let onUpgrade: () -> Void
     let onSelectServer: (VPNServer) -> Void
@@ -1264,9 +1346,18 @@ private struct ServerListView: View {
             }
             .padding(24)
             .padding(.bottom, 4)
+            .frame(maxWidth: 1_200)
+            .frame(maxWidth: .infinity)
 
             ScrollView(showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 18) {
+                LazyVGrid(
+                    columns: Array(
+                        repeating: GridItem(.flexible(), alignment: .top),
+                        count: usesExpandedLayout ? 2 : 1
+                    ),
+                    alignment: .leading,
+                    spacing: 18
+                ) {
                     if app.servers.isEmpty && app.isRefreshingServers {
                         ProgressView("Refreshing healthy servers…")
                             .frame(maxWidth: .infinity)
@@ -1330,7 +1421,10 @@ private struct ServerListView: View {
                 }
                 .padding(.horizontal, 24)
                 .padding(.bottom, 24)
+                .frame(maxWidth: 1_200)
+                .frame(maxWidth: .infinity)
             }
+            .accessibilityIdentifier(usesExpandedLayout ? "server-list-wide-grid" : "server-list-compact-list")
             .animation(.spring(response: 0.42, dampingFraction: 0.86), value: app.favoriteServerIDs)
         }
         .background(Theme.background)
@@ -1393,6 +1487,7 @@ private struct ServerListView: View {
 private struct StatisticsView: View {
     @EnvironmentObject private var app: AppModel
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.libreGuardUsesExpandedLayout) private var usesExpandedLayout
     @Query private var records: [LocalConnectionRecord]
     private let userId: String?
     @State private var timeRange = "This Week"
@@ -1429,6 +1524,8 @@ private struct StatisticsView: View {
             }
             .padding(24)
             .padding(.bottom, 4)
+            .frame(maxWidth: 1_200)
+            .frame(maxWidth: .infinity)
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 20) {
@@ -1447,58 +1544,15 @@ private struct StatisticsView: View {
                             SummaryCard(icon: "arrow.up", value: ByteCountFormatter.libreGuardString(from: summary.uploadedBytes), label: "Uploaded", color: Theme.purpleBar)
                         }
 
-                        CardContainer {
-                            VStack(alignment: .leading, spacing: 18) {
-                                HStack {
-                                    Text("Daily Usage")
-                                        .font(.headline)
-                                    Spacer()
-                                    HStack(spacing: 10) {
-                                        LegendDot(color: Theme.blueBar, text: "Download")
-                                        LegendDot(color: Theme.purpleBar, text: "Upload")
-                                    }
-                                }
-
-                                VStack(spacing: 14) {
-                                    ForEach(dailyUsage) { day in
-                                        UsageBar(day: day, maxValue: dailyUsage.map { $0.download + $0.upload }.max() ?? 1)
-                                    }
-                                }
+                        if usesExpandedLayout {
+                            HStack(alignment: .top, spacing: 14) {
+                                dailyUsageCard
+                                recentConnectionsCard
                             }
+                        } else {
+                            dailyUsageCard
+                            recentConnectionsCard
                         }
-                        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                        CardContainer {
-                            VStack(alignment: .leading, spacing: 14) {
-                                Label("Recent Connections", systemImage: "calendar")
-                                    .font(.headline)
-                                    .foregroundStyle(.primary)
-
-                                ForEach(Array(summary.filtered.prefix(10))) { item in
-                                    HStack {
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            Text(item.serverName)
-                                                .font(.subheadline.weight(.semibold))
-                                            Text(item.connectedAt.formatted(date: .abbreviated, time: .shortened))
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                        Spacer()
-                                        VStack(alignment: .trailing, spacing: 4) {
-                                            Text(ByteCountFormatter.libreGuardString(from: item.downloadedBytes + item.uploadedBytes))
-                                                .font(.subheadline.weight(.semibold))
-                                            Text(durationString(item.duration))
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                    }
-                                    if item.id != summary.filtered.prefix(10).last?.id {
-                                        Divider()
-                                    }
-                                }
-                            }
-                        }
-                        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                         Button(role: .destructive) { confirmClear = true } label: {
                             Label("Clear My Statistics", systemImage: "trash")
@@ -1520,6 +1574,8 @@ private struct StatisticsView: View {
                 .padding(.horizontal, 24)
                 .padding(.bottom, 24)
             }
+            .frame(maxWidth: 1_200)
+            .frame(maxWidth: .infinity)
         }
         .background(Theme.background)
         .confirmationDialog("Clear all local statistics?", isPresented: $confirmClear, titleVisibility: .visible) {
@@ -1535,6 +1591,67 @@ private struct StatisticsView: View {
 
     private var summary: LocalStatisticsSummary {
         LocalStatisticsSummary(records: records, interval: selectedInterval)
+    }
+
+    private var dailyUsageCard: some View {
+        CardContainer {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    Text("Daily Usage")
+                        .font(.headline)
+                    Spacer(minLength: 8)
+                    HStack(spacing: 10) {
+                        LegendDot(color: Theme.blueBar, text: "Download")
+                        LegendDot(color: Theme.purpleBar, text: "Upload")
+                    }
+                }
+
+                VStack(spacing: 14) {
+                    ForEach(dailyUsage) { day in
+                        UsageBar(day: day, maxValue: dailyUsage.map { $0.download + $0.upload }.max() ?? 1)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var recentConnectionsCard: some View {
+        CardContainer {
+            VStack(alignment: .leading, spacing: 14) {
+                Label("Recent Connections", systemImage: "calendar")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+
+                ForEach(Array(summary.filtered.prefix(10))) { item in
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.serverName)
+                                .font(.subheadline.weight(.semibold))
+                                .lineLimit(2)
+                            Text(item.connectedAt.formatted(date: .abbreviated, time: .shortened))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 4)
+                        VStack(alignment: .trailing, spacing: 4) {
+                            Text(ByteCountFormatter.libreGuardString(from: item.downloadedBytes + item.uploadedBytes))
+                                .font(.subheadline.weight(.semibold))
+                                .lineLimit(1)
+                            Text(durationString(item.duration))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if item.id != summary.filtered.prefix(10).last?.id {
+                        Divider()
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private var selectedInterval: DateInterval {
@@ -1566,6 +1683,7 @@ private struct StatisticsView: View {
 private struct SettingsView: View {
     @EnvironmentObject private var app: AppModel
     @Environment(\.openURL) private var openURL
+    @Environment(\.libreGuardUsesExpandedLayout) private var usesExpandedLayout
     let themeMode: ThemeMode
     let effectiveDarkMode: Bool
     let onThemeModeChange: (ThemeMode) -> Void
@@ -1592,10 +1710,20 @@ private struct SettingsView: View {
             }
             .padding(24)
             .padding(.bottom, 4)
+            .frame(maxWidth: 1_200)
+            .frame(maxWidth: .infinity)
 
             ScrollView(showsIndicators: false) {
-                VStack(spacing: 22) {
+                LazyVGrid(
+                    columns: Array(
+                        repeating: GridItem(.flexible(), alignment: .top),
+                        count: usesExpandedLayout ? 2 : 1
+                    ),
+                    alignment: .leading,
+                    spacing: 22
+                ) {
                     UpgradeCard(action: onUpgrade)
+                        .gridCellColumns(usesExpandedLayout ? 2 : 1)
 
                     NewsletterAccountSettingsView(model: app.newsletterConsent)
 
@@ -1732,6 +1860,7 @@ private struct SettingsView: View {
                     }
                     .buttonStyle(.plain)
                     .rippleEffect(tint: Theme.destructive, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .gridCellColumns(usesExpandedLayout ? 2 : 1)
 
                     VStack(spacing: 4) {
                         Text("LibreGuard v1.0.0")
@@ -1740,10 +1869,14 @@ private struct SettingsView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 12)
+                    .gridCellColumns(usesExpandedLayout ? 2 : 1)
                 }
                 .padding(.horizontal, 24)
                 .padding(.bottom, 24)
+                .frame(maxWidth: 1_200)
+                .frame(maxWidth: .infinity)
             }
+            .accessibilityIdentifier(usesExpandedLayout ? "settings-expanded-grid" : "settings-compact-list")
         }
         .background(Theme.background)
         .task { await app.refreshNotificationAuthorizationStatus() }
@@ -2554,6 +2687,8 @@ private struct BottomTabBar: View {
                 }
                 .buttonStyle(.plain)
                 .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .accessibilityIdentifier("main-bottom-tab-\(tab.rawValue.lowercased())")
+                .accessibilityAddTraits(selectedTab == tab ? .isSelected : [])
             }
         }
         .padding(.horizontal, 8)
@@ -2563,6 +2698,53 @@ private struct BottomTabBar: View {
             Rectangle()
                 .fill(Theme.border)
                 .frame(height: 1)
+        }
+    }
+}
+
+private struct MainTabRail: View {
+    @Binding var selectedTab: MainTab
+
+    var body: some View {
+        VStack(spacing: 10) {
+            ForEach(MainTab.allCases) { tab in
+                Button {
+                    selectedTab = tab
+                } label: {
+                    VStack(spacing: 6) {
+                        Image(systemName: tab.icon)
+                            .font(.system(size: 22, weight: selectedTab == tab ? .semibold : .regular))
+                        Text(tab.rawValue)
+                            .font(.caption.weight(.medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                    }
+                    .foregroundStyle(selectedTab == tab ? Theme.primary : Color.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 64)
+                    .background {
+                        if selectedTab == tab {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(Theme.primary.opacity(0.10))
+                        }
+                    }
+                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .accessibilityIdentifier("main-rail-tab-\(tab.rawValue.lowercased())")
+                .accessibilityAddTraits(selectedTab == tab ? .isSelected : [])
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 12)
+        .frame(width: 92)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(Theme.border)
+                .frame(width: 1)
         }
     }
 }
@@ -3021,6 +3203,7 @@ private struct SessionTrafficTotal: View {
 }
 
 private struct ServerRow: View {
+    @Environment(\.libreGuardUsesExpandedLayout) private var usesExpandedLayout
     let server: VPNServer
     let isSelected: Bool
     let isFavorite: Bool
@@ -3029,12 +3212,9 @@ private struct ServerRow: View {
     let onFavorite: () -> Void
 
     var body: some View {
-        // The favourite control is positioned in the space above the load bar.
-        // Aligning to the top of the content keeps its centre at the midpoint
-        // between the card's top edge and the progress bar.
         ZStack(alignment: .topTrailing) {
             Button(action: onSelect) {
-                VStack(spacing: 10) {
+                VStack(spacing: usesExpandedLayout ? 8 : 10) {
                     HStack(spacing: 12) {
                         FlagBadge(flag: server.flagEmoji)
 
@@ -3060,26 +3240,23 @@ private struct ServerRow: View {
                         }
                         .lineLimit(1)
 
-                        Spacer()
+                        Spacer(minLength: 0)
 
-                        VStack(alignment: .trailing, spacing: 4) {
-                            HStack(spacing: 5) {
-                                Image(systemName: "wifi")
-                                    .foregroundStyle(latencyColor)
-                                Text(latency.map { "\($0)ms" } ?? "—")
-                            }
-                            HStack(spacing: 5) {
-                                Image(systemName: "internaldrive")
-                                    .foregroundStyle(loadColor)
-                                Text(loadLabel)
-                            }
+                        if !usesExpandedLayout {
+                            serverMetrics(alignment: .trailing)
                         }
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
 
                         // Reserve space for the independent favourite button.
                         Color.clear
                             .frame(width: 34)
+                    }
+
+                    if usesExpandedLayout {
+                        HStack {
+                            serverMetrics(alignment: .leading)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.leading, 46)
                     }
 
                     ProgressBar(progress: loadProgress, color: loadColor, height: 5)
@@ -3094,11 +3271,11 @@ private struct ServerRow: View {
                 Image(systemName: isFavorite ? "star.fill" : "star")
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(isFavorite ? Theme.primary : .secondary)
-                    .contentTransition(.symbolEffect(.replace))
-                    .symbolEffect(.bounce, value: isFavorite)
-                    .frame(width: 34, height: 34)
+            .contentTransition(.symbolEffect(.replace))
+            .symbolEffect(.bounce, value: isFavorite)
+            .frame(width: 34, height: 34)
             }
-            .offset(y: favoriteVerticalOffset)
+            .offset(y: usesExpandedLayout ? 12 : favoriteVerticalOffset)
             .buttonStyle(.plain)
             .rippleEffect(tint: Theme.primary, shape: Circle())
             .accessibilityLabel(isFavorite ? "Remove \(server.serverName) from favourites" : "Add \(server.serverName) to favourites")
@@ -3119,6 +3296,23 @@ private struct ServerRow: View {
         let contentOriginFromCardTop = cardInset
 
         return midpointFromCardTop - contentOriginFromCardTop - favoriteControlSize / 2
+    }
+
+    private func serverMetrics(alignment: HorizontalAlignment) -> some View {
+        VStack(alignment: alignment, spacing: 4) {
+            HStack(spacing: 5) {
+                Image(systemName: "wifi")
+                    .foregroundStyle(latencyColor)
+                Text(latency.map { "\($0)ms" } ?? "—")
+            }
+            HStack(spacing: 5) {
+                Image(systemName: "internaldrive")
+                    .foregroundStyle(loadColor)
+                Text(loadLabel)
+            }
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
     }
 
     private var loadLabel: String {
@@ -3266,15 +3460,26 @@ private struct UsageBar: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            HStack(spacing: 2) {
-                Capsule()
-                    .fill(Theme.blueBar)
-                    .frame(width: max(12, CGFloat(day.download / maxValue) * 210), height: 28)
-                Capsule()
-                    .fill(Theme.purpleBar)
-                    .frame(width: max(8, CGFloat(day.upload / maxValue) * 210), height: 28)
+            GeometryReader { geometry in
+                let total = day.download + day.upload
+                let availableWidth = max(0, geometry.size.width - 2)
+                let totalWidth = total > 0
+                    ? availableWidth * CGFloat(min(total / max(maxValue, 1), 1))
+                    : 0
+                let downloadWidth = total > 0 ? totalWidth * CGFloat(day.download / total) : 0
+                let uploadWidth = total > 0 ? totalWidth * CGFloat(day.upload / total) : 0
+
+                HStack(spacing: 2) {
+                    Capsule()
+                        .fill(Theme.blueBar)
+                        .frame(width: downloadWidth, height: 28)
+                    Capsule()
+                        .fill(Theme.purpleBar)
+                        .frame(width: uploadWidth, height: 28)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 28)
         }
     }
 }

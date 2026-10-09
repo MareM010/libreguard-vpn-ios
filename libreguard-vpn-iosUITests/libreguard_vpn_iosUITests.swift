@@ -79,6 +79,63 @@ final class libreguard_vpn_iosUITests: XCTestCase {
     }
 
     @MainActor
+    func testExpandedShellUsesSideRailAndKeepsNavigationWorking() throws {
+        let app = XCUIApplication()
+        app.launchArguments.append("--uitesting-reset")
+        app.launchEnvironment["UITEST_FORCE_MAINAPP"] = "1"
+        app.launchEnvironment["UITEST_FORCE_EXPANDED_LAYOUT"] = "1"
+        app.launch()
+
+        let homeTab = app.buttons["main-rail-tab-home"]
+        let serversTab = app.buttons["main-rail-tab-servers"]
+        XCTAssertTrue(homeTab.waitForExistence(timeout: 20))
+        XCTAssertTrue(serversTab.exists)
+        XCTAssertFalse(app.buttons["main-bottom-tab-home"].exists)
+
+        serversTab.tap()
+        XCTAssertTrue(app.staticTexts["Server Locations"].waitForExistence(timeout: 5))
+        app.buttons["main-rail-tab-settings"].tap()
+        XCTAssertTrue(app.staticTexts["Settings"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testCompactShellKeepsBottomTabs() throws {
+        let app = XCUIApplication()
+        app.launchArguments.append("--uitesting-reset")
+        app.launchEnvironment["UITEST_FORCE_MAINAPP"] = "1"
+        app.launch()
+
+        XCTAssertTrue(app.buttons["main-bottom-tab-home"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["main-bottom-tab-servers"].exists)
+        XCTAssertFalse(app.buttons["main-rail-tab-home"].exists)
+    }
+
+    @MainActor
+    func testWideServerAndSettingsScreensUseExpandedLayouts() throws {
+        let serversApp = XCUIApplication()
+        serversApp.launchArguments.append("--uitesting-reset")
+        serversApp.launchEnvironment["UITEST_FORCE_SERVERS"] = "1"
+        serversApp.launchEnvironment["UITEST_FORCE_EXPANDED_LAYOUT"] = "1"
+        serversApp.launch()
+
+        XCTAssertTrue(
+            serversApp.descendants(matching: .any)["server-list-wide-grid"].waitForExistence(timeout: 20)
+        )
+        serversApp.terminate()
+
+        let settingsApp = XCUIApplication()
+        settingsApp.launchArguments.append("--uitesting-reset")
+        settingsApp.launchEnvironment["UITEST_FORCE_SETTINGS"] = "1"
+        settingsApp.launchEnvironment["UITEST_FORCE_EXPANDED_LAYOUT"] = "1"
+        settingsApp.launch()
+
+        XCTAssertTrue(
+            settingsApp.descendants(matching: .any)["settings-expanded-grid"].waitForExistence(timeout: 20)
+        )
+        XCTAssertTrue(settingsApp.buttons["theme-system-button"].exists)
+    }
+
+    @MainActor
     func testThemeSelectorShowsThreeModesAndPersistsSelection() throws {
         let app = XCUIApplication()
         app.launchArguments.append("--uitesting-reset")
