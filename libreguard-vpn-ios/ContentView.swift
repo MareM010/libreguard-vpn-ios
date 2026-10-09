@@ -666,7 +666,7 @@ private struct RegisterView: View {
                     .accessibilityIdentifier("google-register-button")
 
                     Toggle(isOn: $newsletterConsent) {
-                        Text("Send me LibreGuard news, product updates and occasional offers by email. I can unsubscribe at any time.")
+                        Text("Yes, I’d like to receive occasional LibreGuard news, product updates, and other relevant information by email. I can unsubscribe at any time.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
