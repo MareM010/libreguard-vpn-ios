@@ -105,6 +105,11 @@ struct ContentView: View {
                     .zIndex(100)
             }
         }
+        .overlay {
+            if case .authenticated = app.route {
+                NewsletterConsentPresenter(model: app.newsletterConsent)
+            }
+        }
         .animation(.spring(response: 0.32, dampingFraction: 0.88), value: app.upgradePromptRequested)
         .preferredColorScheme(themeMode.colorSchemeOverride)
         .task {
@@ -157,6 +162,7 @@ struct ContentView: View {
                 guard case .authenticated = app.route else { return }
                 guard await app.checkAppleCredentialStateIfNeeded() else { return }
                 await app.refreshAccountData(showErrors: false)
+                await app.newsletterConsent.refresh()
                 await app.refreshVPNStatus()
                 app.refreshServers(trigger: .sceneActivation)
                 await app.refreshNotificationAuthorizationStatus()
@@ -625,16 +631,6 @@ private struct RegisterView: View {
                         .background(Theme.card.opacity(0.7), in: RoundedRectangle(cornerRadius: 14))
                         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border.opacity(0.8)))
 
-                    Toggle(isOn: $newsletterConsent) {
-                        Text("Yes, I’d like to receive occasional LibreGuard news, product updates, and other relevant information by email. I can unsubscribe at any time.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                    .tint(Theme.primary)
-                    .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("newsletter-consent-checkbox")
-
                     DividerWithText(text: "Or continue with")
 
                     SignInWithAppleButton(.continue) { request in
@@ -642,8 +638,7 @@ private struct RegisterView: View {
                     } onCompletion: { result in
                         Task {
                             await app.completeAppleSignIn(
-                                result,
-                                newsletterConsent: newsletterConsent
+                                result
                             )
                         }
                     }
@@ -668,7 +663,7 @@ private struct RegisterView: View {
                     .accessibilityIdentifier("apple-register-button")
 
                     Button {
-                        Task { await app.loginWithGoogle(newsletterConsent: newsletterConsent) }
+                        Task { await app.loginWithGoogle() }
                     } label: {
                         GoogleSignInButtonLabel(height: 48)
                             .frame(maxWidth: .infinity)
@@ -677,6 +672,16 @@ private struct RegisterView: View {
                     .disabled(app.isAuthenticating || !app.isGoogleSignInConfigured)
                     .accessibilityLabel("Sign in with Google")
                     .accessibilityIdentifier("google-register-button")
+
+                    Toggle(isOn: $newsletterConsent) {
+                        Text("Send me LibreGuard news, product updates and occasional offers by email. I can unsubscribe at any time.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .tint(Theme.primary)
+                    .rippleEffect(tint: Theme.primary, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("newsletter-consent-checkbox")
 
                     PrimaryButton(title: app.isAuthenticating ? "Creating Account..." : "Create Account") {
                         guard password.count >= 8 else {
@@ -1599,6 +1604,8 @@ private struct SettingsView: View {
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 22) {
                     UpgradeCard(action: onUpgrade)
+
+                    NewsletterAccountSettingsView(model: app.newsletterConsent)
 
                     SettingsSection(title: "Security") {
                         NavigationRow(

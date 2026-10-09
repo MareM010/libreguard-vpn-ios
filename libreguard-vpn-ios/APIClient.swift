@@ -4,14 +4,15 @@ import OSLog
 @MainActor
 protocol BackendServicing: AnyObject {
     var storedSession: AuthSession? { get }
+    var newsletterSessionEpoch: UInt64 { get }
     var deviceId: String { get }
     var appVersion: String { get }
     func restoreSession() async throws -> AuthSession?
     func login(email: String, password: String) async throws -> LoginResponse
-    func beginGoogleLogin(newsletterConsent: Bool?) async throws -> GoogleNativeBeginResponse
+    func beginGoogleLogin() async throws -> GoogleNativeBeginResponse
     func completeGoogleLogin(attempt: GoogleNativeBeginResponse, authorization: GoogleAuthorizationResult) async throws -> LoginResponse
     func continueGoogleLogin(token: String, deviceIdsToRemove: [Int]) async throws -> LoginResponse
-    func loginWithApple(idToken: String, nonce: String, newsletterConsent: Bool?) async throws -> LoginResponse
+    func loginWithApple(idToken: String, nonce: String) async throws -> LoginResponse
     func verifyTwoFactor(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse
     func verifyRecoveryCode(_ challenge: TwoFactorChallenge, code: String) async throws -> LoginResponse
     func register(email: String, password: String, newsletterConsent: Bool) async throws -> RegistrationResponse
@@ -32,6 +33,9 @@ protocol BackendServicing: AnyObject {
     func fetchUsage() async throws -> UsageQuota
     func fetchConnectionEligibility() async throws -> CanConnectResponse
     func fetchSubscription() async throws -> SubscriptionStatus
+    func fetchNewsletterPreference(expectedAccountId: String, expectedSessionEpoch: UInt64) async throws -> NewsletterPreference
+    func updateNewsletterPreference(subscribed: Bool, expectedRevision: UUID, consentTextVersion: String?, expectedAccountId: String, expectedSessionEpoch: UInt64) async throws -> NewsletterPreference
+    func completeNewsletterOnboarding(decision: NewsletterOnboardingDecision, expectedRevision: UUID, consentTextVersion: String?, expectedAccountId: String, expectedSessionEpoch: UInt64) async throws -> NewsletterPreference
     func fetchDNSPreference() async throws -> DNSPreference
     func updateDNSPreference(adBlockingEnabled: Bool) async throws -> DNSPreference
     func fetchAppleAccountToken(environment: AppleAPIEnvironment) async throws -> UUID
@@ -70,6 +74,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
     private var refreshTask: Task<AuthSession, Error>?
     private var refreshTaskID: UUID?
     private var sessionGeneration: UInt64 = 0
+    private(set) var newsletterSessionEpoch: UInt64 = 0
     var onSessionInvalidated: (() -> Void)?
 
     init(
@@ -119,12 +124,12 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         return response
     }
 
-    func beginGoogleLogin(newsletterConsent: Bool? = nil) async throws -> GoogleNativeBeginResponse {
+    func beginGoogleLogin() async throws -> GoogleNativeBeginResponse {
         let key = try deviceKeyStore.publicKeyPayload()
         return try await send(
             .post, path: "/api/login/google/native/begin",
             body: GoogleNativeBeginRequest(
-                newsletterConsent: newsletterConsent, deviceId: deviceId, appVersion: appVersion,
+                deviceId: deviceId, appVersion: appVersion,
                 devicePublicKey: key.devicePublicKey, devicePublicKeyId: key.devicePublicKeyId,
                 devicePublicKeyAlgorithm: key.devicePublicKeyAlgorithm
             ), authorized: false, retryAfterRefresh: false
@@ -149,7 +154,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         )
     }
 
-    func loginWithApple(idToken: String, nonce: String, newsletterConsent: Bool? = nil) async throws -> LoginResponse {
+    func loginWithApple(idToken: String, nonce: String) async throws -> LoginResponse {
         let keyPayload = try deviceKeyStore.publicKeyPayload()
         let response: LoginResponse = try await send(
             .post,
@@ -157,7 +162,6 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
             body: AppleLoginRequest(
                 idToken: idToken,
                 nonce: nonce,
-                newsletterConsent: newsletterConsent,
                 deviceId: deviceId,
                 appVersion: appVersion,
                 devicePublicKey: keyPayload.devicePublicKey,
@@ -262,6 +266,10 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
     }
 
     func adoptSession(from response: LoginResponse) throws -> AuthSession {
+        try adoptSession(from: response, advancingNewsletterEpoch: true)
+    }
+
+    private func adoptSession(from response: LoginResponse, advancingNewsletterEpoch: Bool) throws -> AuthSession {
         guard let token = response.token,
               let refreshToken = response.refreshToken,
               let email = response.email,
@@ -276,6 +284,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
             deviceId: response.deviceId ?? deviceId
         )
         try sessionStore.save(session)
+        if advancingNewsletterEpoch { newsletterSessionEpoch &+= 1 }
         retireRefresh()
         return session
     }
@@ -295,6 +304,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
     }
 
     func clearLocalSession() {
+        newsletterSessionEpoch &+= 1
         retireRefresh()
         sessionStore.clear()
     }
@@ -356,6 +366,40 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
     func fetchSubscription() async throws -> SubscriptionStatus {
         let response: SubscriptionStatus = try await send(.get, path: "/api/subscription/status")
         return response
+    }
+
+    func fetchNewsletterPreference(expectedAccountId: String, expectedSessionEpoch: UInt64) async throws -> NewsletterPreference {
+        let value: NewsletterPreference = try await send(
+            .get, path: "/api/account/newsletter", expectedAccountId: expectedAccountId, expectedSessionEpoch: expectedSessionEpoch)
+        return try validatedNewsletter(value, expectedAccountId: expectedAccountId, expectedSessionEpoch: expectedSessionEpoch)
+    }
+
+    func updateNewsletterPreference(subscribed: Bool, expectedRevision: UUID,
+                                    consentTextVersion: String?, expectedAccountId: String, expectedSessionEpoch: UInt64) async throws -> NewsletterPreference {
+        let value: NewsletterPreference = try await send(
+            .put, path: "/api/account/newsletter",
+            body: UpdateNewsletterPreferenceRequest(subscribed: subscribed, expectedRevision: expectedRevision,
+                                                     consentTextVersion: subscribed ? consentTextVersion : nil),
+            expectedAccountId: expectedAccountId, expectedSessionEpoch: expectedSessionEpoch)
+        return try validatedNewsletter(value, expectedAccountId: expectedAccountId, expectedSessionEpoch: expectedSessionEpoch)
+    }
+
+    func completeNewsletterOnboarding(decision: NewsletterOnboardingDecision, expectedRevision: UUID,
+                                      consentTextVersion: String?, expectedAccountId: String, expectedSessionEpoch: UInt64) async throws -> NewsletterPreference {
+        let value: NewsletterPreference = try await send(
+            .post, path: "/api/account/newsletter/onboarding",
+            body: NewsletterOnboardingRequest(decision: decision, expectedRevision: expectedRevision,
+                                               consentTextVersion: decision == .subscribe ? consentTextVersion : nil),
+            expectedAccountId: expectedAccountId, expectedSessionEpoch: expectedSessionEpoch)
+        return try validatedNewsletter(value, expectedAccountId: expectedAccountId, expectedSessionEpoch: expectedSessionEpoch)
+    }
+
+    private func validatedNewsletter(_ value: NewsletterPreference, expectedAccountId: String, expectedSessionEpoch: UInt64) throws -> NewsletterPreference {
+        guard newsletterSessionEpoch == expectedSessionEpoch,
+              sessionStore.session?.userId == expectedAccountId, value.accountId == expectedAccountId else {
+            throw CancellationError()
+        }
+        return value
     }
 
     func fetchDNSPreference() async throws -> DNSPreference {
@@ -471,7 +515,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
                   response.deviceId == nil || response.deviceId == existing.deviceId else {
                 throw APIError(message: "The server returned an invalid refreshed session.")
             }
-            return try self.adoptSession(from: response)
+            return try self.adoptSession(from: response, advancingNewsletterEpoch: false)
         }
         refreshTask = task
         refreshTaskID = operationID
@@ -510,7 +554,9 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         path: String,
         authorized: Bool = true,
         retryAfterRefresh: Bool = true,
-        requestBaseURL: URL? = nil
+        requestBaseURL: URL? = nil,
+        expectedAccountId: String? = nil,
+        expectedSessionEpoch: UInt64? = nil
     ) async throws -> Response {
         try await send(
             method,
@@ -518,7 +564,8 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
             body: Optional<EmptyBody>.none,
             authorized: authorized,
             retryAfterRefresh: retryAfterRefresh,
-            requestBaseURL: requestBaseURL
+            requestBaseURL: requestBaseURL,
+            expectedAccountId: expectedAccountId, expectedSessionEpoch: expectedSessionEpoch
         )
     }
 
@@ -529,8 +576,14 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         authorized: Bool = true,
         retryAfterRefresh: Bool = true,
         requestBaseURL: URL? = nil,
-        explicitBearerToken: String? = nil
+        explicitBearerToken: String? = nil,
+        expectedAccountId: String? = nil,
+        expectedSessionEpoch: UInt64? = nil
     ) async throws -> Response {
+        if let expectedSessionEpoch, newsletterSessionEpoch != expectedSessionEpoch { throw CancellationError() }
+        if let expectedAccountId, sessionStore.session?.userId != expectedAccountId {
+            throw CancellationError()
+        }
         var requestURL = (requestBaseURL ?? baseURL).appending(path: path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? path)
         if let query = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).dropFirst().first,
            var components = URLComponents(url: requestURL, resolvingAgainstBaseURL: false) {
@@ -586,7 +639,8 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
                     body: body,
                     authorized: authorized,
                     retryAfterRefresh: false,
-                    requestBaseURL: requestBaseURL
+                    requestBaseURL: requestBaseURL,
+                    expectedAccountId: expectedAccountId, expectedSessionEpoch: expectedSessionEpoch
                 )
             }
 
