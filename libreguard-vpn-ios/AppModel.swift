@@ -31,9 +31,9 @@ final class AppModel: ObservableObject {
     @Published var prefilledEmail = ""
     @Published var session: AuthSession? {
         didSet {
+            newsletterConsent.updateAccount(session?.userId)
             if oldValue != session {
                 sessionStateGeneration &+= 1
-                newsletterConsent.updateAccount(session?.userId)
                 cancelAppleLogin()
             }
             if session != nil {

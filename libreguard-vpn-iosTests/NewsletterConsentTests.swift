@@ -282,6 +282,69 @@ struct NewsletterConsentTests {
         #expect(calls == 0)
     }
 
+    @Test func sameAccountStableEpochPreservesDisplayedStateOnTokenRefresh() async throws {
+        let backend = makeBackend()
+        backend.newsletterResponse = preference(pending: true)
+        let model = NewsletterConsentModel(api: backend)
+        model.updateAccount("account-a")
+        await model.refresh(showPrompt: true)
+        let displayed = try #require(model.snapshot)
+        let prompt = try #require(model.prompt)
+        let stableEpoch = backend.newsletterSessionEpoch
+        backend.storedSession = AuthSession(accessToken: "refreshed", refreshToken: "refreshed-refresh",
+            email: "account-a@example.com", userId: "account-a", deviceId: "test-device")
+        // Mirror APIClient's internal refresh: credentials change, login epoch does not.
+        backend.newsletterSessionEpoch = stableEpoch
+        model.updateAccount("account-a")
+        #expect(model.snapshot == displayed)
+        #expect(model.prompt?.id == prompt.id)
+        #expect(model.prompt?.origin == prompt.origin)
+        backend.newsletterResponse = preference(subscribed: true)
+        model.decide(.subscribe, prompt: prompt)
+        await finishSave(model)
+        #expect(backend.newsletterDecisions.count == 1)
+        #expect(model.preference?.subscribed == true)
+    }
+
+    @Test func displayedEnrollmentAcceptsItsOwnRefreshedSession() async throws {
+        var consentModel: NewsletterConsentModel?
+        var requests: [URLRequest] = []
+        let client = makeClient { request in
+            requests.append(request)
+            if request.url?.path == "/api/login/refresh" {
+                return self.response(request, status: 200, json: [
+                    "token": "refreshed", "refreshToken": "refreshed-refresh", "email": "account-a@example.com",
+                    "userId": "account-a", "deviceId": "test-device"
+                ])
+            }
+            var json = self.preferenceJSON()
+            if request.httpMethod == "GET" {
+                json["promptPending"] = true
+                return self.response(request, status: 200, json: json)
+            }
+            if request.value(forHTTPHeaderField: "Authorization") != "Bearer refreshed" {
+                return self.response(request, status: 401, json: ["message": "Expired"])
+            }
+            // Publish the refreshed credentials during the write, as deferred restoration can.
+            consentModel?.updateAccount("account-a")
+            json["subscribed"] = true
+            return self.response(request, status: 200, json: json)
+        }
+        let model = NewsletterConsentModel(api: client)
+        consentModel = model
+        model.updateAccount("account-a")
+        await model.refresh(showPrompt: true)
+        let displayed = try #require(model.snapshot)
+        model.setSubscribed(true, snapshot: displayed)
+        await finishSave(model)
+        #expect(client.newsletterSessionEpoch == displayed.origin.sessionEpoch)
+        #expect(model.snapshot?.origin == displayed.origin)
+        #expect(model.preference?.subscribed == true)
+        #expect(model.prompt == nil)
+        #expect(requests.map { $0.httpMethod } == ["GET", "PUT", "POST", "PUT"])
+        #expect(requests[1].httpBody == requests[3].httpBody)
+    }
+
     @Test func sameAccountReloginRejectsOldTransportEpochBeforeSending() async throws {
         var calls = 0
         let client = makeClient { request in

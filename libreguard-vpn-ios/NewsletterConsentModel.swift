@@ -56,13 +56,17 @@ final class NewsletterConsentModel: ObservableObject {
     @Published private(set) var errorMessage: String?
     private let api: BackendServicing
     private var accountId: String?
+    private var accountSessionEpoch: UInt64?
     private var generation: UInt = 0
 
     init(api: BackendServicing) { self.api = api }
 
     func updateAccount(_ accountId: String?) {
+        let epoch = accountId.map { _ in api.newsletterSessionEpoch }
+        guard self.accountId != accountId || accountSessionEpoch != epoch else { return }
         generation &+= 1
         self.accountId = accountId
+        accountSessionEpoch = epoch
         snapshot = nil
         prompt = nil
         isLoading = false
