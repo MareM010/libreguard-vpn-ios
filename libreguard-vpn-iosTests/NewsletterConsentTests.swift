@@ -319,7 +319,9 @@ struct NewsletterConsentTests {
     }
 
     private func body(_ request: URLRequest) throws -> [String: Any] {
-        try #require(JSONSerialization.jsonObject(with: try #require(request.httpBody)) as? [String: Any])
+        let data = try #require(request.httpBody)
+        let object = try JSONSerialization.jsonObject(with: data)
+        return try #require(object as? [String: Any])
     }
 
     private func preferenceJSON() -> [String: Any] {
