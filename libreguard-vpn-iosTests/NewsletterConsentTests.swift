@@ -23,6 +23,47 @@ struct NewsletterConsentTests {
         #expect(model.prompt != nil)
     }
 
+    @Test func normalRefreshUpdatesAlreadyOpenPromptToCurrentServerChoice() async throws {
+        let backend = makeBackend()
+        let original = preference(pending: true)
+        backend.newsletterResponse = original
+        let model = NewsletterConsentModel(api: backend)
+        model.updateAccount("account-a")
+        await model.refresh(showPrompt: true)
+        let current = preference(pending: true, version: "updated-wording")
+        backend.newsletterResponse = current
+        await model.refresh()
+        let prompt = try #require(model.prompt)
+        #expect(prompt.preference == current)
+        #expect(prompt.preference.revision != original.revision)
+        #expect(prompt.origin == model.snapshot?.origin)
+        backend.newsletterResponse = preference(subscribed: true)
+        model.decide(.subscribe, prompt: prompt)
+        await finishSave(model)
+        #expect(backend.newsletterDecisions.count == 1)
+        #expect(backend.newsletterDecisions.first?.expectedRevision == current.revision)
+        #expect(backend.newsletterDecisions.first?.consentTextVersion == current.consentTextVersion)
+        #expect(model.prompt == nil)
+    }
+
+    @Test func normalRefreshPreservesDismissalAndClosesCompletedPrompt() async throws {
+        let backend = makeBackend()
+        backend.newsletterResponse = preference(pending: true)
+        let model = NewsletterConsentModel(api: backend)
+        model.updateAccount("account-a")
+        await model.refresh(showPrompt: true)
+        model.prompt = nil
+        backend.newsletterResponse = preference(pending: true, version: "updated-wording")
+        await model.refresh()
+        #expect(model.prompt == nil)
+        #expect(model.preference?.consentTextVersion == "updated-wording")
+        await model.refresh(showPrompt: true)
+        #expect(model.prompt != nil)
+        backend.newsletterResponse = preference(pending: false)
+        await model.refresh()
+        #expect(model.prompt == nil)
+    }
+
     @Test func settingsEnrollmentUsesRenderedWordingAndServerResult() async throws {
         let backend = makeBackend()
         let original = preference(pending: true)

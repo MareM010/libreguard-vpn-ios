@@ -80,7 +80,7 @@ final class NewsletterConsentModel: ObservableObject {
             snapshot = NewsletterPreferenceSnapshot(preference: loaded, origin: origin)
             errorMessage = nil
             if !loaded.promptPending { prompt = nil }
-            else if showPrompt { prompt = NewsletterPrompt(preference: loaded, origin: origin) }
+            else if showPrompt || prompt != nil { prompt = NewsletterPrompt(preference: loaded, origin: origin) }
         } catch is CancellationError {
         } catch {
             guard isCurrent(origin) else { return }
