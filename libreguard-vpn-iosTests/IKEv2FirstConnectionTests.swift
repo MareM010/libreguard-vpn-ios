@@ -5,6 +5,169 @@ import Testing
 
 @MainActor
 struct IKEv2FirstConnectionTests {
+    @Test func stalledInitialStartupStopsBeforeRestartingTheApprovedProfileOnce() async throws {
+        var native: NEVPNStatus = .connecting
+        var elapsed: Duration = .zero
+        var events: [String] = []
+        try await VPNInitialStartupRecovery.recoverIfStalled(
+            status: { native },
+            stopTunnel: { events.append("stop"); native = .disconnecting },
+            restartTunnel: {
+                #expect(native == .disconnected)
+                events.append("restart approved profile")
+                // A second stall must remain subject to the existing deadline.
+                native = .connecting
+            },
+            onRecoveryStateChange: { events.append($0 ? "recovering" : "finished recovery") },
+            sleep: { duration in
+                elapsed += duration
+                if native == .disconnecting { native = .disconnected }
+            }
+        )
+        #expect(elapsed >= .seconds(10))
+        #expect(events == ["recovering", "stop", "restart approved profile", "finished recovery"])
+    }
+
+    @Test func successfulFirstConnectionDoesNotStopOrRestart() async throws {
+        var native: NEVPNStatus = .connecting
+        try await VPNInitialStartupRecovery.recoverIfStalled(
+            status: { native },
+            stopTunnel: { Issue.record("A successful first connection must not stop") },
+            restartTunnel: { Issue.record("A successful first connection must not restart") },
+            onRecoveryStateChange: { _ in Issue.record("Recovery must not begin") },
+            sleep: { _ in native = .connected }
+        )
+    }
+
+    @Test func oldDisconnectedSnapshotDoesNotSkipInitialStartupObservation() async throws {
+        var native: NEVPNStatus = .disconnected
+        var observations = 0
+        var restarts = 0
+        try await VPNInitialStartupRecovery.recoverIfStalled(
+            status: { native },
+            stopTunnel: { native = .disconnected },
+            restartTunnel: { restarts += 1 },
+            onRecoveryStateChange: { _ in },
+            sleep: { _ in observations += 1; native = .connecting }
+        )
+        #expect(observations > 1)
+        #expect(restarts == 1)
+    }
+
+    @Test(arguments: [NEVPNStatus.disconnected, .invalid, .disconnecting])
+    func terminalNativeStartupIsNotRetried(terminal: NEVPNStatus) async throws {
+        var native: NEVPNStatus = .connecting
+        do {
+            try await VPNInitialStartupRecovery.recoverIfStalled(
+                status: { native },
+                stopTunnel: { Issue.record("An explicit native failure must not be retried") },
+                restartTunnel: { Issue.record("An explicit native failure must not be retried") },
+                onRecoveryStateChange: { _ in Issue.record("Recovery must not begin") },
+                sleep: { _ in native = terminal }
+            )
+            #expect(terminal == .disconnecting)
+        } catch {
+            #expect(terminal != .disconnecting)
+            #expect((error as? VPNConnectionFailure)?.kind == .connectionFailed)
+        }
+    }
+
+    @Test func connectionCompletingAtRecoveryCheckpointIsNotStopped() async throws {
+        var native: NEVPNStatus = .connecting
+        var elapsed: Duration = .zero
+        try await VPNInitialStartupRecovery.recoverIfStalled(
+            status: { native },
+            stopTunnel: { Issue.record("A connected tunnel must not stop") },
+            restartTunnel: { Issue.record("A connected tunnel must not restart") },
+            onRecoveryStateChange: { _ in Issue.record("Recovery must not begin") },
+            sleep: { duration in
+                elapsed += duration
+                if elapsed >= .seconds(10) { native = .connected }
+            }
+        )
+    }
+
+    @Test(arguments: [NEVPNStatus.disconnected, .invalid])
+    func nativeFailureAtRecoveryCheckpointIsReportedWithoutRestarting(terminal: NEVPNStatus) async {
+        var native: NEVPNStatus = .connecting
+        var elapsed: Duration = .zero
+        do {
+            try await VPNInitialStartupRecovery.recoverIfStalled(
+                status: { native },
+                stopTunnel: { Issue.record("A failed native start must not restart") },
+                restartTunnel: { Issue.record("A failed native start must not restart") },
+                onRecoveryStateChange: { _ in Issue.record("Recovery must not begin") },
+                sleep: { duration in
+                    elapsed += duration
+                    if elapsed >= .seconds(10) { native = terminal }
+                }
+            )
+            Issue.record("The native startup failure must reach the caller")
+        } catch {
+            #expect((error as? VPNConnectionFailure)?.kind == .connectionFailed)
+        }
+    }
+
+    @Test func unconfirmedStopBlocksInitialStartupRecovery() async {
+        var native: NEVPNStatus = .connecting
+        var recoveryStates: [Bool] = []
+        do {
+            try await VPNInitialStartupRecovery.recoverIfStalled(
+                status: { native },
+                stopTunnel: { native = .disconnecting },
+                restartTunnel: { Issue.record("A provider that has not stopped must not restart") },
+                onRecoveryStateChange: { recoveryStates.append($0) },
+                sleep: { _ in }
+            )
+            Issue.record("An unconfirmed stop must fail")
+        } catch {
+            #expect((error as? VPNConnectionFailure)?.kind == .stopFailed)
+        }
+        #expect(recoveryStates == [true, false])
+    }
+
+    @Test(arguments: [false, true])
+    func cancellationPreventsInitialStartupRestart(duringStop: Bool) async {
+        var native: NEVPNStatus = .connecting
+        var recoveryStates: [Bool] = []
+        let task = Task {
+            try await VPNInitialStartupRecovery.recoverIfStalled(
+                status: { native },
+                stopTunnel: { native = .disconnecting },
+                restartTunnel: { Issue.record("A cancelled first connection must not restart") },
+                onRecoveryStateChange: { recoveryStates.append($0) },
+                sleep: { _ in
+                    if !duringStop || native == .disconnecting {
+                        withUnsafeCurrentTask { $0?.cancel() }
+                    }
+                }
+            )
+        }
+        do {
+            try await task.value
+            Issue.record("Cancellation must reach the caller")
+        } catch { #expect(error is CancellationError) }
+        #expect(recoveryStates == (duringStop ? [true, false] : []))
+    }
+
+    @Test func failedRestartRestoresStatusObservationAndPropagatesTheError() async {
+        var native: NEVPNStatus = .connecting
+        var recoveryStates: [Bool] = []
+        var restarts = 0
+        do {
+            try await VPNInitialStartupRecovery.recoverIfStalled(
+                status: { native },
+                stopTunnel: { native = .disconnected },
+                restartTunnel: { restarts += 1; throw vpnError(.configurationDisabled) },
+                onRecoveryStateChange: { recoveryStates.append($0) },
+                sleep: { _ in }
+            )
+            Issue.record("A failed restart must reach the caller")
+        } catch { #expect((error as NSError).code == NEVPNError.configurationDisabled.rawValue) }
+        #expect(restarts == 1)
+        #expect(recoveryStates == [true, false])
+    }
+
     @Test func approvedProfileIsReloadedBeforeStarting() async throws {
         var events: [String] = []
         try await IKEv2TunnelStarter.start(

@@ -871,6 +871,52 @@ struct ConnectionTransitionTests {
         #expect(app.vpnRecoveryActionTitle == "Retry Connection")
     }
 
+    @Test func initialStartObservationKeepsTheCompletedConnectionPhase() async throws {
+        let ike = ControlledVPNManager()
+        ike.holdConnect = true
+        let coordinator = VPNManagerCoordinator(ikev2Manager: ike, openVPNManager: ControlledVPNManager())
+        var phases: [VPNAttemptPhase] = []
+        coordinator.onAttemptEvent = { phases.append($0.phase) }
+        let connection = Task { try await coordinator.connect(to: makeServer(id: 1), protocol: .ikev2, policy: .disabled) }
+        await settle()
+        ike.emit(.connected)
+        ike.onAttemptEvent?(VPNAttemptEvent(attemptID: ike.attemptID, protocolName: .ikev2, phase: .connected))
+        ike.completeConnect()
+        try await connection.value
+        #expect(coordinator.status == .connected)
+        #expect(phases.last == .connected)
+        _ = await coordinator.stopAndWait(releaseProtection: true)
+    }
+
+    @Test func initialStartupRecoveryDoesNotExtendTheOverallDeadline() async throws {
+        let clock = ManualVPNClock()
+        let ike = ControlledVPNManager()
+        var scheduledDeadlines: [Duration] = []
+        let coordinator = VPNManagerCoordinator(ikev2Manager: ike, openVPNManager: ControlledVPNManager(),
+            timing: VPNConnectionTiming(sleep: { duration in
+                scheduledDeadlines.append(duration)
+                try await clock.sleep(duration)
+            }))
+        var failures: [VPNConnectionFailure.Kind] = []
+        coordinator.onAttemptEvent = { event in
+            if let failure = event.failure { failures.append(failure.kind) }
+        }
+        try await coordinator.connect(to: makeServer(id: 1), protocol: .ikev2, policy: .disabled)
+        await settle()
+        #expect(scheduledDeadlines == [.seconds(30)])
+        ike.onAttemptEvent?(VPNAttemptEvent(attemptID: ike.attemptID, protocolName: .ikev2, phase: .recoveringStartup))
+        ike.onAttemptEvent?(VPNAttemptEvent(attemptID: ike.attemptID, protocolName: .ikev2, phase: .starting))
+        await settle()
+        #expect(scheduledDeadlines == [.seconds(30)])
+        // This harness releases a requested-duration wait, rather than advancing
+        // cumulative wall time. Release the original deadline after recovery.
+        clock.advance(.seconds(30))
+        await settle()
+        #expect(failures == [.startupTimeout])
+        #expect(ike.disconnectCalls == 1)
+        #expect(coordinator.status == .disconnected)
+    }
+
     @Test func approvalWaitingDoesNotConsumeStartupDeadline() async throws {
         let clock = ManualVPNClock()
         let ike = ControlledVPNManager()

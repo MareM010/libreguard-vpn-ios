@@ -158,8 +158,10 @@ final class VPNManagerCoordinator: VPNManaging {
                 self.preparationTask = nil
                 try Task.checkCancellation()
                 guard generation == self.requestGeneration else { throw CancellationError() }
-                // Test doubles and restored managers may not emit progress.
-                self.receive(VPNAttemptEvent(attemptID: request.sessionID, protocolName: request.protocolName, phase: .starting))
+                // Initial-start observation may finish after the native session
+                // connects. Preserve that completed phase in the fallback event.
+                self.receive(VPNAttemptEvent(attemptID: request.sessionID, protocolName: request.protocolName,
+                    phase: target.status.isConnected ? .connected : .starting))
                 self.reconcileStatus()
             } catch {
                 VPNConnectionJournal.record(VPNAttemptEvent(attemptID: request.sessionID,

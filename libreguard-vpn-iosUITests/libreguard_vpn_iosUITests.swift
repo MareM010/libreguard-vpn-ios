@@ -111,6 +111,21 @@ final class libreguard_vpn_iosUITests: XCTestCase {
     }
 
     @MainActor
+    func testCompactDashboardKeepsMonthlyUsageAboveBottomTabs() throws {
+        let app = XCUIApplication()
+        app.launchArguments.append("--uitesting-reset")
+        app.launchEnvironment["UITEST_FORCE_MAINAPP"] = "1"
+        app.launch()
+
+        let usageTitle = app.staticTexts["Monthly Data Usage"]
+        let homeTab = app.buttons["main-bottom-tab-home"]
+        XCTAssertTrue(usageTitle.waitForExistence(timeout: 20))
+        XCTAssertTrue(homeTab.waitForExistence(timeout: 5))
+        XCTAssertTrue(usageTitle.isHittable)
+        XCTAssertLessThan(homeTab.frame.minY - usageTitle.frame.maxY, 220)
+    }
+
+    @MainActor
     func testWideServerAndSettingsScreensUseExpandedLayouts() throws {
         let serversApp = XCUIApplication()
         serversApp.launchArguments.append("--uitesting-reset")

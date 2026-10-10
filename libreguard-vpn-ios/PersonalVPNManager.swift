@@ -183,6 +183,7 @@ final class PersonalVPNManager: VPNManaging {
     private var phase: VPNAttemptPhase = .preparing
     private var lifecycleGeneration: UInt = 0
     private var expectedStop = false
+    private var isRecoveringInitialStartup = false
     private var killSwitchEnabled = false
     private var approvedIdentity: IKEv2ApprovedIdentity?
 
@@ -300,6 +301,7 @@ final class PersonalVPNManager: VPNManaging {
                 try await self.loadPreferences()
                 try Task.checkCancellation()
                 self.logger.debug("Loaded existing VPN preferences")
+                let recoverInitialStartup = self.manager.protocolConfiguration == nil && vpnProtocol.includeAllNetworks
                 self.manager.localizedDescription = "LibreGuard"
                 self.manager.protocolConfiguration = vpnProtocol
                 self.manager.isEnabled = true
@@ -323,10 +325,36 @@ final class PersonalVPNManager: VPNManaging {
                         self.logger.notice("Reloading approved IKEv2 profile for start retry \(retry, privacy: .public): \(Self.describe(error), privacy: .public)")
                     }
                 )
+                if recoverInitialStartup {
+                    try await VPNInitialStartupRecovery.recoverIfStalled(
+                        status: { self.manager.connection.status },
+                        stopTunnel: { self.manager.connection.stopVPNTunnel() },
+                        restartTunnel: {
+                            self.expectedStop = false
+                            self.publish(.starting)
+                            try await IKEv2TunnelStarter.start(
+                                reload: { try await self.loadPreferences() },
+                                startTunnel: { try self.manager.connection.startVPNTunnel() }
+                            )
+                        },
+                        onRecoveryStateChange: { recovering in
+                            self.isRecoveringInitialStartup = recovering
+                            if recovering {
+                                self.expectedStop = true
+                                self.lifecycleGeneration &+= 1
+                                self.logger.notice("Restarting stalled first IKEv2 startup with the approved profile")
+                                self.publish(.recoveringStartup)
+                            }
+                        },
+                        sleep: self.timing.sleep,
+                        stopTimeout: self.timing.stop
+                    )
+                }
             }
             try Task.checkCancellation()
             logger.info("startVPNTunnel() returned without throwing")
             updateStatus(from: manager.connection.status)
+            if status == .connected, phase != .connected { publish(.connected) }
         } catch is CancellationError {
             logger.info("VPN connect request cancelled")
             connectionsBeingPrepared.remove(preparationID)
@@ -608,6 +636,9 @@ final class PersonalVPNManager: VPNManaging {
     }
 
     private func updateStatus(from neStatus: NEVPNStatus) {
+        // The internal stop belongs to the same user request. Keep Connecting
+        // visible and prevent its terminal notification from failing that request.
+        guard !isRecoveringInitialStartup else { return }
         if neStatus == .connecting || neStatus == .reasserting {
             onAttemptEvent?(VPNAttemptEvent(attemptID: attemptID, protocolName: .ikev2,
                 phase: .starting, nativeStartupObserved: true))

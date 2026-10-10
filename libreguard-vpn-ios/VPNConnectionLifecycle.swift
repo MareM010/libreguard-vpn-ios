@@ -3,7 +3,7 @@ import NetworkExtension
 import OSLog
 
 enum VPNAttemptPhase: String, Sendable {
-    case preparing, awaitingApproval, starting, connected, stopping, stopped, cancelled
+    case preparing, awaitingApproval, starting, recoveringStartup, connected, stopping, stopped, cancelled
 }
 
 struct VPNAttemptEvent {

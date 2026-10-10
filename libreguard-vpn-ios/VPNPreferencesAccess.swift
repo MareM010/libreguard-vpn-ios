@@ -61,3 +61,59 @@ enum IKEv2TunnelStarter {
         }
     }
 }
+
+/// A newly installed IncludeAllNetworks profile can leave the native provider
+/// waiting for a usable interface without ever beginning its handshake. Recover
+/// once using the already approved profile, within the coordinator's existing
+/// startup deadline. Explicit disconnects and completed connections are not retried.
+@MainActor
+enum VPNInitialStartupRecovery {
+    static func recoverIfStalled(
+        status: () -> NEVPNStatus,
+        stopTunnel: () -> Void,
+        restartTunnel: () async throws -> Void,
+        onRecoveryStateChange: (Bool) -> Void,
+        sleep: (Duration) async throws -> Void,
+        startupGrace: Duration = .seconds(10),
+        stopTimeout: Duration = .seconds(10)
+    ) async throws {
+        var elapsed: Duration = .zero
+        var observedStarting = false
+        while elapsed < startupGrace {
+            try Task.checkCancellation()
+            let current = status()
+            if current == .connected || current == .disconnecting { return }
+            if current == .invalid || (current == .disconnected && observedStarting) {
+                // Preparation masks old terminal notifications. A terminal state
+                // after actual startup is a failure, not a stalled provider; do
+                // not let that failure disappear while observing the first start.
+                if observedStarting { throw VPNConnectionFailure(kind: .connectionFailed) }
+                return
+            }
+            observedStarting = observedStarting || current == .connecting || current == .reasserting
+            let delay = min(.milliseconds(200), startupGrace - elapsed)
+            try await sleep(delay)
+            elapsed += delay
+        }
+        try Task.checkCancellation()
+        let current = status()
+        if observedStarting, current == .disconnected || current == .invalid {
+            throw VPNConnectionFailure(kind: .connectionFailed)
+        }
+        guard current == .connecting else { return }
+
+        onRecoveryStateChange(true)
+        defer { onRecoveryStateChange(false) }
+        stopTunnel()
+        elapsed = .zero
+        while status() != .disconnected && status() != .invalid {
+            try Task.checkCancellation()
+            guard elapsed < stopTimeout else { throw VPNConnectionFailure(kind: .stopFailed) }
+            let delay = min(.milliseconds(200), stopTimeout - elapsed)
+            try await sleep(delay)
+            elapsed += delay
+        }
+        try Task.checkCancellation()
+        try await restartTunnel()
+    }
+}

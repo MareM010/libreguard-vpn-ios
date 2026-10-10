@@ -1059,47 +1059,11 @@ private struct DashboardView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let compactHeight = proxy.size.height < 680
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: usesExpandedLayout ? 18 : (compactHeight ? 10 : 20)) {
-                    header(compact: !usesExpandedLayout || compactHeight)
-
-                    if usesExpandedLayout {
-                        HStack(alignment: .top, spacing: 18) {
-                            VStack(spacing: 16) {
-                                connectionSelection
-                                statusControl(compact: true)
-                                notificationNotice
-                            }
-                            .frame(maxWidth: .infinity)
-
-                            VStack(spacing: 16) {
-                                connectedProtectionDetails
-                                connectedStats(compact: false)
-                                monthlyUsageCard
-                            }
-                            .frame(maxWidth: .infinity)
-                        }
-                    } else {
-                        if status.isConnected {
-                            ProtectedIPCard(server: selectedServer)
-                            ProtectionIndicators()
-                        }
-
-                        connectionSelection
-                        statusControl(compact: compactHeight)
-                        notificationNotice
-                        connectedStats(compact: compactHeight)
-                        monthlyUsageCard
-                    }
-                }
-                .padding(.horizontal, usesExpandedLayout ? 18 : (compactHeight ? 16 : 24))
-                .padding(.top, usesExpandedLayout ? 18 : (compactHeight ? 10 : 24))
-                .padding(.bottom, 20)
-                .frame(maxWidth: usesExpandedLayout ? 1_200 : 680)
-                .frame(maxWidth: .infinity, alignment: .top)
+            if usesExpandedLayout {
+                expandedDashboard(size: proxy.size)
+            } else {
+                compactDashboard(size: proxy.size)
             }
-            .accessibilityIdentifier("dashboard-scroll-content")
         }
         .background(Theme.background)
         .task {
@@ -1108,6 +1072,72 @@ private struct DashboardView: View {
             }
             await app.refreshVPNStatus()
             app.refreshServers(trigger: .dashboardAppearance)
+        }
+    }
+
+    private func compactDashboard(size: CGSize) -> some View {
+        let compact = size.height < 720 || status.isConnected
+        let referenceHeight: CGFloat = if status.isConnected {
+            700
+        } else {
+            compact ? 560 : 740
+        }
+        let scale = min(1, size.height / referenceHeight)
+
+        return VStack(spacing: compact ? 10 : 22) {
+            header(compact: compact)
+
+            if status.isConnected {
+                ProtectedIPCard(server: selectedServer)
+                ProtectionIndicators()
+            }
+
+            connectionSelection
+            statusControl(compact: compact)
+            notificationNotice
+            connectedStats(compact: compact)
+
+            Spacer(minLength: compact ? 2 : 8)
+            monthlyUsageCard
+        }
+        .padding(.horizontal, compact ? 16 : 24)
+        .padding(.top, compact ? 10 : 24)
+        .padding(.bottom, compact ? 8 : 12)
+        .frame(
+            width: size.width / scale,
+            height: size.height / scale,
+            alignment: .top
+        )
+        .scaleEffect(scale, anchor: .topLeading)
+    }
+
+    private func expandedDashboard(size: CGSize) -> some View {
+        let compactHeight = size.height < 680
+
+        return ScrollView(showsIndicators: false) {
+            VStack(spacing: 18) {
+                header(compact: compactHeight)
+                HStack(alignment: .top, spacing: 18) {
+                    VStack(spacing: 16) {
+                        connectionSelection
+                        statusControl(compact: true)
+                        notificationNotice
+                    }
+                    .frame(maxWidth: .infinity)
+
+                    VStack(spacing: 16) {
+                        connectedProtectionDetails
+                        connectedStats(compact: false)
+                        monthlyUsageCard
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
+            .padding(.bottom, 20)
+            .frame(maxWidth: 1_200)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
     }
 
@@ -2890,25 +2920,48 @@ private struct ProtectedIPCard: View {
 
     var body: some View {
         CardContainer {
-            HStack(spacing: 16) {
-                FlagBadge(flag: server?.flagEmoji ?? "🌐")
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Selected Server")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(server?.serverName ?? "Auto Select")
-                        .foregroundStyle(.primary)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 16) {
+                    FlagBadge(flag: server?.flagEmoji ?? "🌐")
+                    serverDetails
+                    Spacer(minLength: 8)
+                    endpointDetails
                 }
-                Spacer()
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Endpoint")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(server?.serverHostname ?? server?.serverIp ?? "—")
-                        .foregroundStyle(Theme.primary)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 16) {
+                        FlagBadge(flag: server?.flagEmoji ?? "🌐")
+                        serverDetails
+                    }
+                    endpointDetails
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .font(.subheadline.weight(.medium))
+        }
+    }
+
+    private var serverDetails: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Selected Server")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(server?.serverName ?? "Auto Select")
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+        }
+    }
+
+    private var endpointDetails: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Endpoint")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(server?.serverHostname ?? server?.serverIp ?? "—")
+                .foregroundStyle(Theme.primary)
+                .lineLimit(2)
+                .minimumScaleFactor(0.85)
         }
     }
 }

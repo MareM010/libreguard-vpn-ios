@@ -22,6 +22,7 @@ final class OpenVPNManager: VPNManaging {
     private var phase: VPNAttemptPhase = .preparing
     private var lifecycleGeneration: UInt = 0
     private var expectedStop = false
+    private var isRecoveringInitialStartup = false
     private var isPreparing = false
 
 
@@ -165,6 +166,7 @@ final class OpenVPNManager: VPNManaging {
                 try await self.loadPreferences()
                 try Task.checkCancellation()
                 try await self.removeStaleProviderConfiguration(ifProviderIdentifierDiffersFrom: providerBundleIdentifier)
+                let recoverInitialStartup = self.manager.protocolConfiguration == nil && policy.killSwitchEnabled
                 tunnelProtocol.providerBundleIdentifier = providerBundleIdentifier
                 policy.apply(to: tunnelProtocol)
 
@@ -187,10 +189,41 @@ final class OpenVPNManager: VPNManaging {
                         try self.manager.connection.startVPNTunnel(options: ["LibreGuardAttemptID": self.attemptID.uuidString as NSString])
                     }
                 )
+                if recoverInitialStartup {
+                    try await VPNInitialStartupRecovery.recoverIfStalled(
+                        status: { self.manager.connection.status },
+                        stopTunnel: { self.manager.connection.stopVPNTunnel() },
+                        restartTunnel: {
+                            self.expectedStop = false
+                            self.publish(.starting)
+                            try await IKEv2TunnelStarter.start(
+                                reload: {
+                                    try await self.loadPreferences()
+                                    try self.verifySavedProviderConfiguration(expectedIdentifier: providerBundleIdentifier)
+                                },
+                                startTunnel: {
+                                    try self.manager.connection.startVPNTunnel(options: ["LibreGuardAttemptID": self.attemptID.uuidString as NSString])
+                                }
+                            )
+                        },
+                        onRecoveryStateChange: { recovering in
+                            self.isRecoveringInitialStartup = recovering
+                            if recovering {
+                                self.expectedStop = true
+                                self.lifecycleGeneration &+= 1
+                                self.logger.notice("Restarting stalled first OpenVPN startup with the approved profile")
+                                self.publish(.recoveringStartup)
+                            }
+                        },
+                        sleep: self.timing.sleep,
+                        stopTimeout: self.timing.stop
+                    )
+                }
             }
             try Task.checkCancellation()
             logger.info("OpenVPN startVPNTunnel() returned without throwing")
             updateStatus(from: manager.connection.status)
+            if status == .connected, phase != .connected { publish(.connected) }
         } catch is CancellationError {
             logger.info("OpenVPN connect request cancelled")
             status = .disconnecting
@@ -483,6 +516,7 @@ final class OpenVPNManager: VPNManaging {
     }
 
     private func updateStatus(from neStatus: NEVPNStatus) {
+        guard !isRecoveringInitialStartup else { return }
         if neStatus == .connecting || neStatus == .reasserting {
             onAttemptEvent?(VPNAttemptEvent(attemptID: attemptID, protocolName: .openVPN,
                 phase: .starting, nativeStartupObserved: true))
