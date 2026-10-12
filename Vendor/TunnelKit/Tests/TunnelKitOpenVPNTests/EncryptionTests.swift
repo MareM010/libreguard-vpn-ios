@@ -137,10 +137,8 @@ class EncryptionTests: XCTestCase {
         
         XCTAssertThrowsError(try TLSBox.decryptedPrivateKey(fromPath: encryptedPath, passphrase: "wrongone"))
         let decryptedViaPath = try! TLSBox.decryptedPrivateKey(fromPath: encryptedPath, passphrase: "foobar")
-        print(decryptedViaPath)
         let encryptedPEM = try! String(contentsOfFile: encryptedPath, encoding: .utf8)
         let decryptedViaString = try! TLSBox.decryptedPrivateKey(fromPEM: encryptedPEM, passphrase: "foobar")
-        print(decryptedViaString)
         XCTAssertEqual(decryptedViaPath, decryptedViaString)
         
         let expDecrypted = try! String(contentsOfFile: decryptedPath)

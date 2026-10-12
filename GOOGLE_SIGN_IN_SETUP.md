@@ -20,9 +20,9 @@ Late callbacks cannot restore a discarded attempt.
    accounts while the consent application is in Testing.
 4. In **Data Access**, this flow requests only openid email. Retain scopes needed
    by other integrations.
-5. In **Clients > Create client**, choose **iOS**, name **LibreGuard iOS**, bundle
-   ID **net.libreguard.libreguard-vpn-ios**, Team ID **4P475Q5Y45**. Supply the actual
-   App Store ID only if a published listing exists.
+5. In **Clients > Create client**, choose **iOS**, name **LibreGuard iOS**, and use
+   the app's registered bundle ID and the Apple Developer team that owns this
+   build. Supply the actual App Store ID only if a published listing exists.
 6. Leave Firebase App Check client protection disabled for this AppAuth flow,
    which supplies no Google App Check assertions.
 7. Copy this new client ID and displayed iOS URL scheme. This registration must
@@ -53,34 +53,25 @@ The Google button uses an unmodified official pre-approved PNG, preserving its
 aspect ratio. Asset attribution and branding requirements appear in
 THIRD_PARTY_NOTICES.md.
 
-## Backend contract and rollout
+## Backend coordination and rollout
 
-Deploy the coordinated ManagementPanel database/backend changes first:
+The app requires a compatible backend integration for native Google sign-in.
+The backend owns authorization validation, code exchange, account/session
+creation, and any required multi-factor or device-limit steps. Deploy and
+acceptance-test the coordinated backend changes before enabling Google sign-in
+for the iOS app.
 
-- POST /api/login/google/native/begin: platform ios, device metadata/public key,
-  optional newsletter consent. Returns attemptId, redemptionToken, expiresAt,
-  clientId, redirectUri, state, nonce and codeChallenge.
-- POST /api/login/google/native/complete: attemptId, redemptionToken, code, state.
-- Existing /api/login/verify-2fa and /api/login/verify-recovery-code handle MFA.
-- POST /api/login/google/native/continue: loginContinuationToken and
-  deviceIdsToRemove. Device-limit responses include loginContinuationToken and
-  loginContinuationExpiresAt.
+Configure the backend with the same public iOS client ID used by the app. Keep
+the integration disabled until acceptance testing is complete, then enable it
+for the iOS client. Do not treat a matching email address as proof that two
+accounts belong to the same person; linking an existing account requires the
+user to authenticate and explicitly approve the link.
 
-Configure Authentication:Google:AppleNative:Ios:ClientId with the same public ID.
-Keep Enabled false until acceptance testing, then enable the iOS profile. Never
-add this ID to the legacy Google token/code/device-removal audience allowlists.
-
-GOOGLE_LINK_REQUIRED opens the fixed management External Logins page. The user
-proves their existing account, completes required MFA and explicitly links
-Google, then starts a fresh Google login in the app. Matching email alone must
-never link accounts.
-
-Google device removal uses a single-use backend continuation, including after
-TOTP/recovery. It never repeats the Google code or provider-token authentication.
-An ambiguous exchange/removal response requires a fresh interactive login.
-Invalid factor/recovery codes and retriable factor security/rate-limit failures
-retain only the unexpired pending challenge. Cancellation is dismissal.
-Closing the device-limit sheet discards its capability.
+Sensitive sign-in steps use short-lived, single-use backend state. The app does
+not repeat a Google authorization code or provider credential to continue an
+MFA or device-management step. If a response leaves the result uncertain, the
+user must start a fresh interactive sign-in. Cancellation or dismissal discards
+the pending sign-in state.
 
 ## Verification and release gate
 

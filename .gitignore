@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+
+# Xcode per-user state and local build products
+**/xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+*.xcresult/
+*.xcarchive/
+
+# Swift Package Manager local state
+.build/
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+
+# Local signing material; never commit signing keys or provisioning profiles
+*.mobileprovision
+*.p12
+*.p8
+
+# Local-only credentials/configuration files
+.env
+.env.*
+!.env.example
+*.local.xcconfig
+
+# Local diagnostics
+*.log
