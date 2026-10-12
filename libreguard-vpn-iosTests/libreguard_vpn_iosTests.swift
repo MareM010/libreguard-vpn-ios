@@ -1385,6 +1385,80 @@ struct libreguard_vpn_iosTests {
         #expect(app.applePurchaseMessage?.contains("already linked") == true)
     }
 
+    @Test func appleRestoreStopsAtFirstAccountLinkRejection() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let store = ControllableAppleSubscriptionStore()
+        let rejection = APIError(statusCode: 409, message: "Account link mismatch", code: "APPLE_ACCOUNT_TOKEN_MISMATCH")
+        store.currentResults = [.verified(AppleStoreTransaction(
+            id: 240,
+            productID: AppleSubscriptionCatalog.monthlyProductID,
+            signedTransactionInfo: "signed-transaction-240",
+            environment: .sandbox,
+            appAccountToken: backend.appleAccountToken
+        ))]
+        store.unfinishedResults = store.currentResults + [.verified(appleTransaction(id: 241))]
+        backend.appleVerificationResults = [.failure(rejection), .failure(rejection)]
+        let app = await makeApplePurchaseApp(backend: backend, store: store)
+
+        await app.restoreApplePurchases()
+
+        #expect(backend.appleVerificationAllowTransfer == [false])
+        #expect(backend.requestedAppleEnvironments == [.sandbox])
+        #expect(store.finishedIDs.isEmpty)
+        #expect(!app.isProUser)
+        #expect(app.pendingAppleSubscriptionTransfer == nil)
+        #expect(app.applePurchaseMessage?.contains("could not match") == true)
+    }
+
+    @Test func appleVerificationRateLimitStopsRecoveryAndRepeatedPurchaseActions() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let store = ControllableAppleSubscriptionStore()
+        store.currentResults = [.verified(appleTransaction(id: 242))]
+        store.unfinishedResults = [.verified(appleTransaction(id: 243)), .verified(appleTransaction(id: 244))]
+        backend.appleVerificationResults = [
+            .failure(APIError(statusCode: 429, message: "Rate limited", code: "RATE_LIMIT_EXCEEDED", retryAfterSeconds: 660)),
+            .success(AppleTransactionVerificationResponse(subscription: try subscriptionStatus(plan: "Pro", isPro: true), transferred: false))
+        ]
+        let app = await makeApplePurchaseApp(backend: backend, store: store)
+
+        await app.restoreApplePurchases()
+        await app.restoreApplePurchases()
+        await app.purchaseSelectedAppleSubscription()
+
+        #expect(backend.appleVerificationAllowTransfer == [false])
+        #expect(store.syncCount == 1)
+        #expect(store.purchaseCalls.isEmpty)
+        #expect(store.finishedIDs.isEmpty)
+        #expect(!app.isProUser)
+        #expect(app.applePurchaseMessage?.contains("Try Restore Purchases in") == true)
+    }
+
+    @Test func appleVerificationCooldownSurvivesRelaunchAndIsScopedToAccount() async throws {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        backend.appleVerificationResults = [
+            .failure(APIError(statusCode: 429, message: "Rate limited", retryAfterSeconds: 660)),
+            .success(AppleTransactionVerificationResponse(subscription: try subscriptionStatus(plan: "Pro", isPro: true), transferred: false))
+        ]
+        let firstStore = ControllableAppleSubscriptionStore()
+        firstStore.currentResults = [.verified(appleTransaction(id: 245))]
+        let firstApp = await makeApplePurchaseApp(backend: backend, store: firstStore, defaults: defaults)
+        await firstApp.restoreApplePurchases()
+
+        let secondStore = ControllableAppleSubscriptionStore()
+        secondStore.currentResults = [.verified(appleTransaction(id: 246))]
+        let secondApp = await makeApplePurchaseApp(backend: backend, store: secondStore, defaults: defaults)
+        await secondApp.restoreApplePurchases()
+        #expect(secondStore.syncCount == 0)
+        #expect(backend.appleVerificationAllowTransfer == [false])
+
+        secondApp.session = AuthSession(accessToken: "other", refreshToken: "other", email: "other@example.com", userId: "other-user", deviceId: "other-device")
+        await secondApp.restoreApplePurchases()
+        #expect(secondStore.syncCount == 1)
+        #expect(backend.appleVerificationAllowTransfer == [false, false])
+        #expect(secondApp.isProUser)
+    }
+
     @Test func appleRestoreRecoversCurrentEntitlementAndTemporaryFailureKeepsTransaction() async throws {
         let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
         let store = ControllableAppleSubscriptionStore()
@@ -2300,12 +2374,13 @@ struct libreguard_vpn_iosTests {
     private func makeApplePurchaseApp(
         backend: StartupBackendStub,
         store: ControllableAppleSubscriptionStore,
-        retryDelays: [UInt64] = [0]
+        retryDelays: [UInt64] = [0],
+        defaults: UserDefaults? = nil
     ) async -> AppModel {
         let app = makeStartupApp(
             backend: backend,
             vpn: StartupVPNManager(status: .disconnected),
-            defaults: UserDefaults(suiteName: UUID().uuidString)!,
+            defaults: defaults ?? UserDefaults(suiteName: UUID().uuidString)!,
             appleStore: store,
             appleVerificationRetryDelays: retryDelays
         )

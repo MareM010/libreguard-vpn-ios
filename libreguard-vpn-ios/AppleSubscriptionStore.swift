@@ -43,15 +43,18 @@ struct AppleStoreTransaction: Equatable, Sendable {
     let environment: AppleAPIEnvironment
     let purchaseDate: Date?
     let expirationDate: Date?
+    let appAccountToken: UUID?
 
     init(id: UInt64, productID: String, signedTransactionInfo: String,
-         environment: AppleAPIEnvironment, purchaseDate: Date? = nil, expirationDate: Date? = nil) {
+         environment: AppleAPIEnvironment, purchaseDate: Date? = nil, expirationDate: Date? = nil,
+         appAccountToken: UUID? = nil) {
         self.id = id
         self.productID = productID
         self.signedTransactionInfo = signedTransactionInfo
         self.environment = environment
         self.purchaseDate = purchaseDate
         self.expirationDate = expirationDate
+        self.appAccountToken = appAccountToken
     }
 }
 
@@ -132,7 +135,10 @@ final class AppleSubscriptionStore: AppleSubscriptionStoreServing {
 
     private func environment(from result: VerificationResult<AppTransaction>) throws -> AppleAPIEnvironment {
         switch result {
-        case let .verified(transaction): AppleAPIEnvironment(transaction.environment)
+        case let .verified(transaction):
+            let environment = AppleAPIEnvironment(transaction.environment)
+            logger.info("Verified app transaction environment=\(String(describing: environment), privacy: .public)")
+            return environment
         case .unverified: throw AppleStoreError.unverifiedTransaction
         }
     }
@@ -173,7 +179,8 @@ final class AppleSubscriptionStore: AppleSubscriptionStoreServing {
         case let .success(verification):
             switch verification {
             case let .verified(transaction):
-                return .success(cache(transaction, signedTransactionInfo: verification.jwsRepresentation))
+                logger.info("StoreKit purchase returned; transaction=\(transaction.id, privacy: .public), appAccountTokenPresent=\(transaction.appAccountToken != nil, privacy: .public), tokenMatchesRequested=\(transaction.appAccountToken == appAccountToken, privacy: .public)")
+                return .success(cache(transaction, signedTransactionInfo: verification.jwsRepresentation, source: "Product.purchase"))
             case .unverified:
                 throw AppleStoreError.unverifiedTransaction
             }
@@ -193,7 +200,7 @@ final class AppleSubscriptionStore: AppleSubscriptionStoreServing {
     func currentEntitlements() async -> [AppleStoreUpdate] {
         var updates: [AppleStoreUpdate] = []
         for await result in Transaction.currentEntitlements {
-            updates.append(map(result))
+            updates.append(map(result, source: "Transaction.currentEntitlements"))
         }
         return updates
     }
@@ -201,7 +208,7 @@ final class AppleSubscriptionStore: AppleSubscriptionStoreServing {
     func unfinishedTransactions() async -> [AppleStoreUpdate] {
         var updates: [AppleStoreUpdate] = []
         for await result in Transaction.unfinished {
-            updates.append(map(result))
+            updates.append(map(result, source: "Transaction.unfinished"))
         }
         return updates
     }
@@ -212,7 +219,7 @@ final class AppleSubscriptionStore: AppleSubscriptionStoreServing {
                 guard let self else { return }
                 for await result in Transaction.updates {
                     guard !Task.isCancelled else { break }
-                    continuation.yield(map(result))
+                    continuation.yield(map(result, source: "Transaction.updates"))
                 }
                 continuation.finish()
             }
@@ -243,24 +250,29 @@ final class AppleSubscriptionStore: AppleSubscriptionStoreServing {
         )
     }
 
-    private func map(_ result: VerificationResult<Transaction>) -> AppleStoreUpdate {
+    private func map(_ result: VerificationResult<Transaction>, source: String) -> AppleStoreUpdate {
         switch result {
         case let .verified(transaction):
-            .verified(cache(transaction, signedTransactionInfo: result.jwsRepresentation))
+            .verified(cache(transaction, signedTransactionInfo: result.jwsRepresentation, source: source))
         case let .unverified(transaction, error):
             .unverified(productID: transaction.productID, message: error.localizedDescription)
         }
     }
 
-    private func cache(_ transaction: Transaction, signedTransactionInfo: String) -> AppleStoreTransaction {
+    private func cache(_ transaction: Transaction, signedTransactionInfo: String, source: String) -> AppleStoreTransaction {
         transactionsByID[transaction.id] = transaction
+        let environment = AppleAPIEnvironment(transaction.environment)
+        let expirationDate = transaction.expirationDate?.ISO8601Format() ?? "none"
+        // Correlate StoreKit recovery with backend logs without exposing tokens or signed payloads.
+        logger.info("StoreKit transaction; source=\(source, privacy: .public), transaction=\(transaction.id, privacy: .public), originalTransaction=\(transaction.originalID, privacy: .public), product=\(transaction.productID, privacy: .public), environment=\(String(describing: environment), privacy: .public), purchased=\(transaction.purchaseDate.ISO8601Format(), privacy: .public), expires=\(expirationDate, privacy: .public), appAccountTokenPresent=\(transaction.appAccountToken != nil, privacy: .public)")
         return AppleStoreTransaction(
             id: transaction.id,
             productID: transaction.productID,
             signedTransactionInfo: signedTransactionInfo,
-            environment: AppleAPIEnvironment(transaction.environment),
+            environment: environment,
             purchaseDate: transaction.purchaseDate,
-            expirationDate: transaction.expirationDate
+            expirationDate: transaction.expirationDate,
+            appAccountToken: transaction.appAccountToken
         )
     }
 }
