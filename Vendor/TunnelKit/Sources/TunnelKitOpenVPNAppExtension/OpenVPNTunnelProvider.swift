@@ -155,6 +155,15 @@ open class OpenVPNTunnelProvider: NEPacketTunnelProvider {
     private var shouldReconnect = false
 
     // MARK: NEPacketTunnelProvider (XPC queue)
+
+    /// Containing applications may resolve sensitive configuration from
+    /// Keychain without changing the persisted Network Extension preferences.
+    open func resolvedProviderConfiguration(for tunnelProtocol: NETunnelProviderProtocol) throws -> [String: Any] {
+        guard let configuration = tunnelProtocol.providerConfiguration else {
+            throw OpenVPNProviderConfigurationError.parameter(name: "protocolConfiguration.providerConfiguration")
+        }
+        return configuration
+    }
     
     open override var reasserting: Bool {
         didSet {
@@ -172,9 +181,7 @@ open class OpenVPNTunnelProvider: NEPacketTunnelProvider {
             guard let serverAddress = tunnelProtocol.serverAddress else {
                 throw OpenVPNProviderConfigurationError.parameter(name: "protocolConfiguration.serverAddress")
             }
-            guard let providerConfiguration = tunnelProtocol.providerConfiguration else {
-                throw OpenVPNProviderConfigurationError.parameter(name: "protocolConfiguration.providerConfiguration")
-            }
+            let providerConfiguration = try resolvedProviderConfiguration(for: tunnelProtocol)
             try appGroup = OpenVPNProvider.Configuration.appGroup(from: providerConfiguration)
 
             var configuration = providerConfiguration

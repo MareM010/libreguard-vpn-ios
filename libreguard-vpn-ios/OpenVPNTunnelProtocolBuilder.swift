@@ -10,8 +10,11 @@ protocol OpenVPNTunnelProtocolBuilding {
 
 struct TunnelKitOpenVPNProtocolBuilder: OpenVPNTunnelProtocolBuilding {
     private static let tunnelMTU = 1280
+    private let configurationStore: OpenVPNProviderConfigurationStore
 
-    nonisolated init() {}
+    nonisolated init(configurationStore: OpenVPNProviderConfigurationStore = OpenVPNProviderConfigurationStore()) {
+        self.configurationStore = configurationStore
+    }
 
     nonisolated func makeTunnelProtocol(configuration: String, privateKeyPassphrase: String) throws -> NETunnelProviderProtocol {
         try OpenVPNProfilePreflightValidator.validate(configuration)
@@ -32,11 +35,11 @@ struct TunnelKitOpenVPNProtocolBuilder: OpenVPNTunnelProtocolBuilding {
         var providerConfigurationBuilder = OpenVPNProvider.ConfigurationBuilder(
             sessionConfiguration: sessionBuilder.build()
         )
-        // Keep TunnelKit's diagnostic log enabled while we resolve connection
-        // failures. TunnelKit masks private data by default, so this does not
-        // put certificates or keys in the log. PacketTunnelProvider snapshots
-        // the in-memory log to the app group for OpenVPNManager on failure.
+        #if DEBUG
         providerConfigurationBuilder.shouldDebug = true
+        #else
+        providerConfigurationBuilder.shouldDebug = false
+        #endif
         providerConfigurationBuilder.masksPrivateData = true
         let providerConfiguration = providerConfigurationBuilder.build()
         let tunnelProtocol = try providerConfiguration.generatedTunnelProtocol(
@@ -49,7 +52,6 @@ struct TunnelKitOpenVPNProtocolBuilder: OpenVPNTunnelProtocolBuilding {
             throw OpenVPNConfigurationError.providerConfigurationUnavailable
         }
         serializedProviderConfiguration[OpenVPNConstants.ipv6BlockingConfigurationKey] = true
-        tunnelProtocol.providerConfiguration = serializedProviderConfiguration
         if !privateKeyPassphrase.isEmpty,
            let serializedConfiguration = try? PropertyListSerialization.data(
                fromPropertyList: serializedProviderConfiguration,
@@ -59,6 +61,7 @@ struct TunnelKitOpenVPNProtocolBuilder: OpenVPNTunnelProtocolBuilding {
            serializedConfiguration.range(of: Data(privateKeyPassphrase.utf8)) != nil {
             throw OpenVPNConfigurationError.passphraseSerializationDetected
         }
+        tunnelProtocol.providerConfiguration = try configurationStore.protect(serializedProviderConfiguration)
         return tunnelProtocol
     }
 }

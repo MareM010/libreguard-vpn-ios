@@ -14,6 +14,7 @@ import StoreKit
 import AuthenticationServices
 
 struct ContentView: View {
+    var initialURL: URL? = nil
     @EnvironmentObject private var app: AppModel
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var systemColorScheme
@@ -135,6 +136,7 @@ struct ContentView: View {
                 storedThemeMode = ThemeMode.system.rawValue
             }
             await app.start()
+            if let initialURL { app.handleOpenURL(initialURL) }
         }
         .sheet(item: $app.deviceLimitContext) { context in
             DeviceLimitView(context: context)
@@ -1721,6 +1723,7 @@ private struct SettingsView: View {
     @State private var showProtocolSelection = false
     @State private var showDNSSettings = false
     @State private var showSignOutConfirmation = false
+    @State private var showOpenSourceLicenses = false
 
     let onUpgrade: () -> Void
     let onSignOut: () -> Void
@@ -1873,7 +1876,7 @@ private struct SettingsView: View {
                             _ = openURL(URL(string: "https://github.com/MareM010/libreguard-vpn-ios")!)
                         }
                         NavigationRow(icon: "chevron.left.forwardslash.chevron.right", title: "Open Source Licenses") {
-                            _ = openURL(URL(string: "https://github.com/MareM010/libreguard-vpn-ios/blob/main/THIRD_PARTY_NOTICES.md")!)
+                            showOpenSourceLicenses = true
                         }
                     }
 
@@ -1893,7 +1896,7 @@ private struct SettingsView: View {
                     .gridCellColumns(usesExpandedLayout ? 2 : 1)
 
                     VStack(spacing: 4) {
-                        Text("LibreGuard v1.0.0")
+                        Text("LibreGuard v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
                         Text("Open-source privacy VPN")
                     }
                     .font(.subheadline)
@@ -1918,6 +1921,16 @@ private struct SettingsView: View {
         }
         .sheet(isPresented: $showDNSSettings) {
             LibreGuardDNSSettingsView(onUpgrade: onUpgrade)
+        }
+        .sheet(isPresented: $showOpenSourceLicenses) {
+            NavigationStack {
+                OpenSourceLicensesView()
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showOpenSourceLicenses = false }
+                        }
+                    }
+            }
         }
         .confirmationDialog(
             "Sign out of LibreGuard?",

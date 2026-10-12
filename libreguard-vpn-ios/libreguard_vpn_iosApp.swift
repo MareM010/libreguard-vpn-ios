@@ -11,22 +11,20 @@ import SwiftData
 @main
 struct libreguard_vpn_iosApp: App {
     private let modelContainer: ModelContainer
-    @StateObject private var appModel: AppModel
 
     init() {
         let container = try! ModelContainer(for: LocalConnectionRecord.self)
         self.modelContainer = container
-        _appModel = StateObject(
-            wrappedValue: AppModel(
-                statisticsRecorder: SwiftDataStatisticsRecorder(context: container.mainContext)
-            )
-        )
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--uitesting-reset") {
+            UserDefaults.standard.removeObject(forKey: DataUseDisclosure.acceptanceKey)
+        }
+        #endif
     }
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environmentObject(appModel)
+            DataUseDisclosureGate(modelContainer: modelContainer)
         }
         .modelContainer(modelContainer)
     }

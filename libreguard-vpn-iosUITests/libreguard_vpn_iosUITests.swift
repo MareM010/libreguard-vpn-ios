@@ -27,7 +27,7 @@ final class libreguard_vpn_iosUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments.append("--uitesting-reset")
         app.launchEnvironment["UITEST_FORCE_LOGIN"] = "1"
-        app.launch()
+        app.launchAcceptingDataUse()
 
         XCTAssertTrue(app.scrollViews["login-screen"].waitForExistence(timeout: 20))
         XCTAssertTrue(app.buttons["login-sign-in-button"].waitForExistence(timeout: 20))
@@ -41,7 +41,7 @@ final class libreguard_vpn_iosUITests: XCTestCase {
     func testRegistrationScreenShowsOptionalNewsletterConsentAndProviderSignup() throws {
         let app = XCUIApplication()
         app.launchArguments.append("--uitesting-reset")
-        app.launch()
+        app.launchAcceptingDataUse()
 
         XCTAssertTrue(app.buttons["create-account-button"].waitForExistence(timeout: 20))
         app.buttons["create-account-button"].tap()
@@ -56,7 +56,7 @@ final class libreguard_vpn_iosUITests: XCTestCase {
     func testForgotPasswordOpensResetRequestScreen() throws {
         let app = XCUIApplication()
         app.launchArguments.append("--uitesting-reset")
-        app.launch()
+        app.launchAcceptingDataUse()
 
         XCTAssertTrue(app.buttons["Forgot password?"].waitForExistence(timeout: 20))
         app.buttons["Forgot password?"].tap()
@@ -69,7 +69,7 @@ final class libreguard_vpn_iosUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments.append("--uitesting-reset")
         app.launchEnvironment["UITEST_FORCE_SERVERS"] = "1"
-        app.launch()
+        app.launchAcceptingDataUse()
 
         let openVPNButton = app.buttons["protocol-openvpn-button"]
         XCTAssertTrue(openVPNButton.waitForExistence(timeout: 20))
@@ -84,7 +84,7 @@ final class libreguard_vpn_iosUITests: XCTestCase {
         app.launchArguments.append("--uitesting-reset")
         app.launchEnvironment["UITEST_FORCE_MAINAPP"] = "1"
         app.launchEnvironment["UITEST_FORCE_EXPANDED_LAYOUT"] = "1"
-        app.launch()
+        app.launchAcceptingDataUse()
 
         let homeTab = app.buttons["main-rail-tab-home"]
         let serversTab = app.buttons["main-rail-tab-servers"]
@@ -103,7 +103,7 @@ final class libreguard_vpn_iosUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments.append("--uitesting-reset")
         app.launchEnvironment["UITEST_FORCE_MAINAPP"] = "1"
-        app.launch()
+        app.launchAcceptingDataUse()
 
         XCTAssertTrue(app.buttons["main-bottom-tab-home"].waitForExistence(timeout: 20))
         XCTAssertTrue(app.buttons["main-bottom-tab-servers"].exists)
@@ -115,7 +115,7 @@ final class libreguard_vpn_iosUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments.append("--uitesting-reset")
         app.launchEnvironment["UITEST_FORCE_MAINAPP"] = "1"
-        app.launch()
+        app.launchAcceptingDataUse()
 
         let usageTitle = app.staticTexts["Monthly Data Usage"]
         let homeTab = app.buttons["main-bottom-tab-home"]
@@ -155,7 +155,7 @@ final class libreguard_vpn_iosUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments.append("--uitesting-reset")
         app.launchEnvironment["UITEST_FORCE_SETTINGS"] = "1"
-        app.launch()
+        app.launchAcceptingDataUse()
 
         let systemButton = app.buttons["theme-system-button"]
         let lightButton = app.buttons["theme-light-button"]
@@ -173,7 +173,7 @@ final class libreguard_vpn_iosUITests: XCTestCase {
 
         app.terminate()
         app.launchArguments.removeAll()
-        app.launch()
+        app.launchAcceptingDataUse()
 
         XCTAssertTrue(app.buttons["theme-dark-button"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["theme-dark-button"].isSelected)

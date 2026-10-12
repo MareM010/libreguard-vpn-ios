@@ -24,9 +24,19 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
     private var connectivityProbeObservations: [NSKeyValueObservation] = []
     private static let connectivityProbeResultsKey = "OpenVPNConnectivityProbeResults"
 
+    override func resolvedProviderConfiguration(for tunnelProtocol: NETunnelProviderProtocol) throws -> [String: Any] {
+        guard let configuration = tunnelProtocol.providerConfiguration else {
+            throw OpenVPNCredentialError.credentialsUnavailable
+        }
+        return try OpenVPNProviderConfigurationStore().resolve(configuration)
+    }
+
     override init() {
         super.init()
         dataCountInterval = 1_000
+        #if !DEBUG
+        OpenVPNExtensionLifecycleJournal.clearDiagnosticFiles()
+        #endif
     }
 
     override func shouldDropPacket(_ packet: Data) -> Bool {
@@ -94,7 +104,9 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
                 completionHandler(error)
                 return
             }
+            #if DEBUG
             self.persistTunnelKitLog()
+            #endif
             self.mutateDiagnostics { diagnostics in
                 if let error {
                     diagnostics.state = .failed
@@ -115,9 +127,11 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
                 OpenVPNExtensionLifecycleJournal.append("start-completed")
                 self.logger.info("OpenVPN tunnel connected")
                 self.beginActivityUpdates()
+                #if DEBUG
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                     self?.runConnectivityProbes()
                 }
+                #endif
             }
             completionHandler(error)
         }
@@ -137,7 +151,9 @@ final class PacketTunnelProvider: OpenVPNTunnelProvider {
         connectivityProbeObservations.removeAll()
         publishFinalState()
         super.stopTunnel(with: reason) { [weak self] in
+            #if DEBUG
             self?.persistTunnelKitLog()
+            #endif
             OpenVPNExtensionLifecycleJournal.append("stop-completed")
             self?.mutateDiagnostics { diagnostics in
                 diagnostics.state = .stopped

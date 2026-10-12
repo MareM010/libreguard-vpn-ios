@@ -60,22 +60,60 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a") as output:
               output.write("SIMULATOR_ID=" + max(choices)[1] + "\n")
           PY
+      - name: Cache pinned OpenSSL framework
+        id: openssl-cache
+        uses: actions/cache@v4
+        with:
+          path: Vendor/OpenSSL/openssl.xcframework
+          key: openssl-3.5.9-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Vendor/OpenSSL/build.py', 'Vendor/OpenSSL/Package.swift') }}
+      - name: Build pinned OpenSSL
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        run: python3 Vendor/OpenSSL/build.py --work-dir "$RUNNER_TEMP/openssl-build"
       - name: Resolve pinned packages
-        run: xcodebuild -resolvePackageDependencies -project libreguard-vpn-ios.xcodeproj -scheme libreguard-vpn-ios -onlyUsePackageVersionsFromResolvedFile
+        run: xcodebuild -resolvePackageDependencies -project libreguard-vpn-ios.xcodeproj -scheme libreguard-vpn-ios -clonedSourcePackagesDirPath "$RUNNER_TEMP/source-packages" -onlyUsePackageVersionsFromResolvedFile
       - name: Build and test
         run: >-
           xcodebuild test
           -project libreguard-vpn-ios.xcodeproj
           -scheme libreguard-vpn-ios
+          -clonedSourcePackagesDirPath "$RUNNER_TEMP/source-packages"
           -destination "platform=iOS Simulator,id=$SIMULATOR_ID"
           -only-testing:libreguard-vpn-iosTests
           -disableAutomaticPackageResolution
           -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult"
           CODE_SIGNING_ALLOWED=NO
+      - name: Test disclosure and offline licenses
+        run: >-
+          xcodebuild test
+          -project libreguard-vpn-ios.xcodeproj
+          -scheme libreguard-vpn-ios
+          -clonedSourcePackagesDirPath "$RUNNER_TEMP/source-packages"
+          -destination "platform=iOS Simulator,id=$SIMULATOR_ID"
+          -only-testing:libreguard-vpn-iosUITests/DataUseDisclosureUITests
+          -disableAutomaticPackageResolution
+          -resultBundlePath "$RUNNER_TEMP/privacy-ui-tests.xcresult"
+          CODE_SIGNING_ALLOWED=NO
+      - name: Test TunnelKit encryption and protocols
+        run: swift test --package-path Vendor/TunnelKit --filter test
+      - name: Build Release bundle
+        run: >-
+          xcodebuild build
+          -project libreguard-vpn-ios.xcodeproj
+          -scheme libreguard-vpn-ios
+          -clonedSourcePackagesDirPath "$RUNNER_TEMP/source-packages"
+          -configuration Release
+          -destination 'generic/platform=iOS'
+          -derivedDataPath "$RUNNER_TEMP/release-build"
+          -disableAutomaticPackageResolution
+          CODE_SIGNING_ALLOWED=NO
+      - name: Check Release bundle
+        run: python3 scripts/check_release_artifact.py "$RUNNER_TEMP/release-build/Build/Products/Release-iphoneos/libreguard-vpn-ios.app"
       - name: Save test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ios-tests
-          path: ${{ runner.temp }}/ios-tests.xcresult
+          path: |
+            ${{ runner.temp }}/ios-tests.xcresult
+            ${{ runner.temp }}/privacy-ui-tests.xcresult
           if-no-files-found: ignore

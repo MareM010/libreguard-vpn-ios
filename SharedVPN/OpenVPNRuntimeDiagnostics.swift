@@ -54,6 +54,7 @@ enum OpenVPNExtensionLifecycleJournal {
     private static let maximumBytes = 32_000
 
     static func append(_ event: String) {
+        #if DEBUG
         guard !event.isEmpty,
               let containerURL = FileManager.default.containerURL(
                 forSecurityApplicationGroupIdentifier: VPNSharedConstants.appGroupIdentifier
@@ -69,9 +70,11 @@ enum OpenVPNExtensionLifecycleJournal {
             data = data.suffix(maximumBytes)
         }
         try? data.write(to: url, options: .atomic)
+        #endif
     }
 
     static func tail(maximumCharacters: Int = 8_000) -> String? {
+        #if DEBUG
         guard let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: VPNSharedConstants.appGroupIdentifier
         ) else {
@@ -84,5 +87,21 @@ enum OpenVPNExtensionLifecycleJournal {
             return nil
         }
         return String(contents.suffix(maximumCharacters))
+        #else
+        return nil
+        #endif
+    }
+
+    static func clearDiagnosticFiles() {
+        var directories = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+        if let shared = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: VPNSharedConstants.appGroupIdentifier) {
+            directories.append(shared)
+        }
+        for directory in directories {
+            for name in [filename, "debug.log"] {
+                try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+            }
+        }
+        UserDefaults(suiteName: VPNSharedConstants.appGroupIdentifier)?.removeObject(forKey: "OpenVPNConnectivityProbeResults")
     }
 }

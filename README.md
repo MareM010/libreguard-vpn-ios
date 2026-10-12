@@ -40,10 +40,13 @@
 
 ### Open and build
 
-1. Clone this repository and open `libreguard-vpn-ios.xcodeproj` in Xcode.
-2. Let Xcode resolve the Swift packages.
-3. Select the shared `libreguard-vpn-ios` scheme and an iOS simulator, then build or run.
-4. For a signed device build, select your own development team and configure app identifiers and capabilities for your Apple account.
+1. Clone this repository.
+2. Build the pinned crypto dependency with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer python3 Vendor/OpenSSL/build.py`.
+3. Open `libreguard-vpn-ios.xcodeproj` in Xcode and let the Swift packages resolve. Select the shared `libreguard-vpn-ios` scheme and an iOS simulator, then build or run.
+4. For a signed device build, create an ignored `Signing.local.xcconfig` containing `DEVELOPMENT_TEAM = YOUR_TEAM_ID`. All targets inherit it. Configure app identifiers and capabilities for your Apple account.
+
+Set release version and build numbers once in `AppVersion.xcconfig`; the app,
+packet tunnel and widget inherit the same values in both build configurations.
 
 Google sign-in builds also need an iOS OAuth client ID and its exact reversed callback scheme in the Debug and Release build settings. See [Google sign-in setup](GOOGLE_SIGN_IN_SETUP.md). The OAuth client ID is public app configuration; do not add a Google client secret to the app.
 
@@ -59,4 +62,4 @@ The opt-in `VPNProtocolStress` scheme is for physical-device validation and requ
 
 ## License
 
-This project is distributed under the GNU General Public License version 3. See [LICENSE](LICENSE). TunnelKit's upstream license includes an additional permission for Apple App Store distribution; see its license and the other dependency notices in `Vendor/TunnelKit` and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+This project is distributed under the GNU General Public License version 3. See [LICENSE](LICENSE) and the additional App Store distribution permission in [LICENSE-APP-STORE.md](LICENSE-APP-STORE.md). TunnelKit retains its own App Store permission; see its license and the dependency notices in `Vendor/TunnelKit` and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

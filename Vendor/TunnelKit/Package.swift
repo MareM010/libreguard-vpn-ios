@@ -33,7 +33,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-log", exact: "1.8.0"),
-        .package(url: "https://github.com/pia-foss/ios-openssl.git", exact: "1.0.0")
+        .package(path: "../OpenSSL")
     ],
     targets: [
         .target(
@@ -89,7 +89,8 @@ let package = Package(
             dependencies: [
                 "TunnelKitManager",
                 "TunnelKitOpenVPNCore"
-            ]
+            ],
+            resources: [.process("PrivacyInfo.xcprivacy")]
         ),
         .target(
             name: "TunnelKitOpenVPNProtocol",
@@ -105,7 +106,8 @@ let package = Package(
                 "TunnelKitOpenVPNCore",
                 "TunnelKitOpenVPNManager",
                 "TunnelKitOpenVPNProtocol"
-            ]
+            ],
+            resources: [.process("PrivacyInfo.xcprivacy")]
         ),
         .target(
             name: "TunnelKitLZO",
@@ -127,7 +129,7 @@ let package = Package(
             dependencies: [
                 "CTunnelKitCore",
                 "CTunnelKitOpenVPNCore",
-                .product(name: "openssl-apple", package: "ios-openssl")
+                .product(name: "openssl-apple", package: "OpenSSL")
             ]
         ),
         .target(

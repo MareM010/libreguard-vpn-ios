@@ -26,3 +26,13 @@ build/
 
 # Local diagnostics
 *.log
+
+# Local release assessments, policy drafts and review evidence
+/.local/
+/APP_STORE_*READINESS*.md
+/APP_STORE_POLICY_DRAFTS.md
+/APP_STORE_SOURCE_HISTORY_REVIEW.md
+
+# Rebuild from the checksum-pinned source before resolving Swift packages.
+Vendor/OpenSSL/openssl.xcframework/
+Vendor/OpenSSL/build-provenance.json

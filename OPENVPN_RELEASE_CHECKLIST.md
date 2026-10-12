@@ -18,3 +18,11 @@
 - [ ] With kill switch enabled, confirm traffic remains protected during
       connection changes and unexpected server loss.
 - [ ] Archive and validate the final signed build before submission.
+
+## Build checks
+
+On a clean checkout, build the pinned OpenSSL archive with
+`Vendor/OpenSSL/build.py` before package resolution. Run
+`scripts/check_release_artifact.py` against the built Release app or archive
+to verify versions, bundled privacy manifests, licenses and crypto packaging.
+Physical-device, service and App Store distribution checks remain separate.

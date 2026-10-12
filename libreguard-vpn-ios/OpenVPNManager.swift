@@ -9,6 +9,7 @@ final class OpenVPNManager: VPNManaging {
     private let configurationResolver: VPNConfigurationResolving
     private let deviceKeyStore: VPNDeviceKeyProviding
     private let protocolBuilder: OpenVPNTunnelProtocolBuilding
+    private let configurationStore = OpenVPNProviderConfigurationStore()
     private let manager: NETunnelProviderManager
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "libreguard-vpn-ios",
@@ -124,6 +125,8 @@ final class OpenVPNManager: VPNManaging {
         isPreparing = true
         publish(.preparing)
         defer { isPreparing = false }
+        var createdConfiguration: [String: Any]?
+        var configurationPersisted = false
 
         do {
             logger.debug("Resolving OpenVPN configuration from backend")
@@ -141,8 +144,8 @@ final class OpenVPNManager: VPNManaging {
                 configuration: response.configContent,
                 privateKeyPassphrase: passphrase
             )
+            createdConfiguration = tunnelProtocol.providerConfiguration
             try Task.checkCancellation()
-
             let serverAddress = tunnelProtocol.serverAddress ?? Self.fallbackServerAddress(response: response, server: server)
             tunnelProtocol.serverAddress = serverAddress
             let resolvedAddresses = Self.applyResolvedAddresses(
@@ -167,6 +170,7 @@ final class OpenVPNManager: VPNManaging {
                 try Task.checkCancellation()
                 try await self.removeStaleProviderConfiguration(ifProviderIdentifierDiffersFrom: providerBundleIdentifier)
                 let recoverInitialStartup = self.manager.protocolConfiguration == nil && policy.killSwitchEnabled
+                let previousConfiguration = (self.manager.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
                 tunnelProtocol.providerBundleIdentifier = providerBundleIdentifier
                 policy.apply(to: tunnelProtocol)
 
@@ -178,6 +182,12 @@ final class OpenVPNManager: VPNManaging {
                 self.logger.debug("Saving OpenVPN preferences")
                 self.publish(.awaitingApproval)
                 try await self.savePreferences()
+                configurationPersisted = true
+                if let previousConfiguration,
+                   OpenVPNProviderConfigurationStore.reference(in: previousConfiguration) !=
+                    tunnelProtocol.providerConfiguration.flatMap(OpenVPNProviderConfigurationStore.reference(in:)) {
+                    self.configurationStore.remove(previousConfiguration)
+                }
                 try Task.checkCancellation()
                 self.publish(.starting)
                 try await IKEv2TunnelStarter.start(
@@ -225,12 +235,14 @@ final class OpenVPNManager: VPNManaging {
             updateStatus(from: manager.connection.status)
             if status == .connected, phase != .connected { publish(.connected) }
         } catch is CancellationError {
+            if !configurationPersisted, let createdConfiguration { configurationStore.remove(createdConfiguration) }
             logger.info("OpenVPN connect request cancelled")
             status = .disconnecting
             manager.connection.stopVPNTunnel()
             await refreshStatus()
             throw CancellationError()
         } catch {
+            if !configurationPersisted, let createdConfiguration { configurationStore.remove(createdConfiguration) }
             logger.error("OpenVPN connect failed: \(Self.describe(error))")
             OpenVPNConnectionMetadataStore.clear()
             status = .disconnected
@@ -343,6 +355,7 @@ final class OpenVPNManager: VPNManaging {
             }
             OpenVPNConnectionMetadataStore.clear()
             status = VPNConnectionState(networkExtensionStatus: manager.connection.status)
+            OpenVPNExtensionLifecycleJournal.clearDiagnosticFiles()
             let result = VPNProfileCleanupResult(
                 tunnelStopped: true,
                 onDemandDisabled: onDemandDisabled,
@@ -552,6 +565,21 @@ final class OpenVPNManager: VPNManaging {
                 }
             })
         }
+        if let profile = manager.protocolConfiguration as? NETunnelProviderProtocol,
+           let legacy = profile.providerConfiguration,
+           OpenVPNProviderConfigurationStore.isLegacy(legacy) {
+            let protected = try configurationStore.protect(legacy)
+            profile.providerConfiguration = protected
+            manager.protocolConfiguration = profile
+            do {
+                try await savePreferences()
+            } catch {
+                profile.providerConfiguration = legacy
+                manager.protocolConfiguration = profile
+                configurationStore.remove(protected)
+                throw error
+            }
+        }
     }
 
     private func savePreferences() async throws {
@@ -570,6 +598,7 @@ final class OpenVPNManager: VPNManaging {
 
     private func removePreferences() async throws {
         let logger = logger
+        let configuration = (manager.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             manager.removeFromPreferences(completionHandler: { error in
                 if let error {
@@ -580,6 +609,7 @@ final class OpenVPNManager: VPNManaging {
                 }
             })
         }
+        if let configuration { configurationStore.remove(configuration) }
     }
 
     private var isRunningInSimulator: Bool {
@@ -667,6 +697,7 @@ final class OpenVPNManager: VPNManaging {
     }
 
     private static func loadTunnelKitDebugLogTail() -> String? {
+        #if DEBUG
         guard let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: VPNSharedConstants.appGroupIdentifier
         ) else {
@@ -677,6 +708,9 @@ final class OpenVPNManager: VPNManaging {
             return nil
         }
         return String(log.suffix(8_000))
+        #else
+        return nil
+        #endif
     }
 }
 

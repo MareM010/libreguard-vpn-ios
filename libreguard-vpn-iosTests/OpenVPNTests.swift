@@ -632,7 +632,9 @@ struct OpenVPNTests {
     }
 
     @Test func tunnelKitRejectsIncompleteOpenVPNConfiguration() {
-        let builder = TunnelKitOpenVPNProtocolBuilder()
+        let keychain = MemoryVPNKeychain()
+        let store = OpenVPNProviderConfigurationStore(keychain: keychain)
+        let builder = TunnelKitOpenVPNProtocolBuilder(configurationStore: store)
         #expect(throws: (any Error).self) {
             _ = try builder.makeTunnelProtocol(
                 configuration: "client\ndev tun\nproto udp\nremote vpn.example.com 1194",
@@ -644,12 +646,15 @@ struct OpenVPNTests {
     @Test func tunnelKitReplacesProfileDNSWithLibreGuardPrivateResolver() throws {
         let publicResolver = "8.8.8.8"
         let filteredResolver = "10.254.0.54"
-        let builder = TunnelKitOpenVPNProtocolBuilder()
+        let keychain = MemoryVPNKeychain()
+        let store = OpenVPNProviderConfigurationStore(keychain: keychain)
+        let builder = TunnelKitOpenVPNProtocolBuilder(configurationStore: store)
         let tunnelProtocol = try builder.makeTunnelProtocol(
             configuration: openVPNSampleConfig() + "\ndhcp-option DNS \(publicResolver)",
             privateKeyPassphrase: "test-passphrase"
         )
-        let providerConfiguration = try #require(tunnelProtocol.providerConfiguration)
+        let savedConfiguration = try #require(tunnelProtocol.providerConfiguration)
+        let providerConfiguration = try store.resolve(savedConfiguration)
         #expect(providerConfiguration[OpenVPNConstants.ipv6BlockingConfigurationKey] as? Bool == true)
         let serialized = try PropertyListSerialization.data(
             fromPropertyList: providerConfiguration,
@@ -663,11 +668,13 @@ struct OpenVPNTests {
     }
 
     @Test func tunnelKitUsesCellularSafeTunnelMTU() throws {
-        let tunnelProtocol = try TunnelKitOpenVPNProtocolBuilder().makeTunnelProtocol(
+        let store = OpenVPNProviderConfigurationStore(keychain: MemoryVPNKeychain())
+        let tunnelProtocol = try TunnelKitOpenVPNProtocolBuilder(configurationStore: store).makeTunnelProtocol(
             configuration: openVPNSampleConfig(),
             privateKeyPassphrase: "test-passphrase"
         )
-        let providerConfiguration = try #require(tunnelProtocol.providerConfiguration)
+        let savedConfiguration = try #require(tunnelProtocol.providerConfiguration)
+        let providerConfiguration = try store.resolve(savedConfiguration)
         let sessionConfiguration = try #require(
             providerConfiguration["sessionConfiguration"] as? [String: Any]
         )
@@ -910,7 +917,7 @@ struct OpenVPNTests {
         # 2048 bit OpenVPN static key
         #
         -----BEGIN OpenVPN Static key V1-----
-        STATIC_KEY_BODY
+        \(String(repeating: "0123456789abcdef", count: 32))
         -----END OpenVPN Static key V1-----
         </tls-crypt>
         """

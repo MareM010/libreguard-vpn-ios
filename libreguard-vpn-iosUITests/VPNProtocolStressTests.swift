@@ -15,7 +15,7 @@ final class VPNProtocolStressTests: XCTestCase {
         }
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launch()
+        app.launchAcceptingDataUse()
         let control = app.buttons["vpn-connection-control"]
         XCTAssertTrue(control.waitForExistence(timeout: 30))
         defer {
@@ -61,7 +61,7 @@ final class VPNProtocolStressTests: XCTestCase {
         }
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launch()
+        app.launchAcceptingDataUse()
         let control = app.buttons["vpn-connection-control"]
         XCTAssertTrue(control.waitForExistence(timeout: 30), "Sign into an account with OpenVPN access first.")
         addUIInterruptionMonitor(withDescription: "VPN setup approval") { alert in
