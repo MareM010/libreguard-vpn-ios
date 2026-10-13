@@ -1611,6 +1611,29 @@ struct libreguard_vpn_iosTests {
         #expect(store.finishedIDs.isEmpty)
     }
 
+    @Test func oldPurchaseCompletionCannotClearNewAccountPurchaseBusyState() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        backend.holdFirstAppleVerification = true
+        backend.holdSecondAppleVerification = true
+        backend.subscriptionResults = Array(repeating: .success(try subscriptionStatus(plan: "Free", isPro: false)), count: 6)
+        let response = AppleTransactionVerificationResponse(subscription: try subscriptionStatus(plan: "Pro", isPro: true), transferred: false)
+        backend.appleVerificationResults = [.success(response), .success(response)]
+        let store = ControllableAppleSubscriptionStore()
+        store.purchaseResult = .success(.success(appleTransaction(id: 803)))
+        let app = await makeApplePurchaseApp(backend: backend, store: store)
+        let old = Task { await app.purchaseSelectedAppleSubscription() }
+        await backend.waitForFirstAppleVerification()
+        app.session = AuthSession(accessToken: "other", refreshToken: "other", email: "other@example.com", userId: "other-user", deviceId: "other-device")
+        let current = Task { await app.purchaseSelectedAppleSubscription() }
+        await backend.waitForSecondAppleVerification()
+        backend.releaseFirstAppleVerification()
+        await old.value
+        #expect(app.isPurchasingAppleSubscription)
+        backend.releaseSecondAppleVerification()
+        await current.value
+        #expect(!app.isPurchasingAppleSubscription)
+    }
+
     @Test func accountSwitchDuringBrowserRecoveryCannotRedeemOrGrant() async throws {
         let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
         let browser = ImmediateRecoveryBrowser()
@@ -2720,6 +2743,10 @@ final class StartupBackendStub: BackendServicing, SessionInvalidationObserving {
     private(set) var requestedAppleEnvironments: [AppleAPIEnvironment] = []
     private(set) var appleVerificationAllowTransfer: [Bool] = []
     var holdFirstAppleVerification = false
+    var holdSecondAppleVerification = false
+    private var secondAppleVerificationStarted = false
+    private var secondAppleVerificationWaiter: CheckedContinuation<Void, Never>?
+    private var secondAppleVerificationRelease: CheckedContinuation<Void, Never>?
     private var firstAppleVerificationStarted = false
     private var firstAppleVerificationWaiter: CheckedContinuation<Void, Never>?
     private var firstAppleVerificationRelease: CheckedContinuation<Void, Never>?
@@ -2890,8 +2917,22 @@ final class StartupBackendStub: BackendServicing, SessionInvalidationObserving {
             firstAppleVerificationWaiter = nil
             await withCheckedContinuation { continuation in firstAppleVerificationRelease = continuation }
         }
+        if holdSecondAppleVerification, appleVerificationAllowTransfer.count == 2 {
+            secondAppleVerificationStarted = true
+            secondAppleVerificationWaiter?.resume()
+            secondAppleVerificationWaiter = nil
+            await withCheckedContinuation { continuation in secondAppleVerificationRelease = continuation }
+        }
         guard !appleVerificationResults.isEmpty else { return try unsupported() }
         return try appleVerificationResults.removeFirst().get()
+    }
+    func waitForSecondAppleVerification() async {
+        guard !secondAppleVerificationStarted else { return }
+        await withCheckedContinuation { continuation in secondAppleVerificationWaiter = continuation }
+    }
+    func releaseSecondAppleVerification() {
+        secondAppleVerificationRelease?.resume()
+        secondAppleVerificationRelease = nil
     }
     func waitForFirstAppleVerification() async {
         guard !firstAppleVerificationStarted else { return }

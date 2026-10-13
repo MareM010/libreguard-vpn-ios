@@ -49,6 +49,8 @@ final class AppModel: ObservableObject {
             processingAppleFamilies.removeAll()
             processingAppleTransactionIDs.removeAll()
             pendingAppleSubscriptionTransfer = nil
+            isPurchasingAppleSubscription = false
+            isRestoringApplePurchases = false
             appleRecoveryTask?.cancel()
             appleRecoveryTask = nil
             appleRecoveryAccountID = nil
