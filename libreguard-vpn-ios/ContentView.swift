@@ -2477,6 +2477,17 @@ private struct UpgradeView: View {
                     .accessibilityIdentifier("apple-purchase-message")
                 }
 
+                if app.pendingAppleAccountRecovery != nil {
+                    Button("Resolve account link") { app.isAppleRecoveryConfirmationPresented = true }
+                        .disabled(app.isResolvingAppleAccount)
+                        .confirmationDialog("Move this purchase to your signed-in account?", isPresented: $app.isAppleRecoveryConfirmationPresented, titleVisibility: .visible) {
+                            Button("Verify previous account and move access", role: .destructive) { Task { await app.resolveAppleAccountLink() } }
+                            Button("Cancel", role: .cancel) {}
+                        } message: { Text("You will verify the previous account in a secure sign-in window. Its subscription access will move only after approval.") }
+                    Button("Sign in to previous account") { Task { await app.signOut() } }
+                    Link("Contact support", destination: URL(string: "https://libreguard.net/Support")!)
+                }
+
                 if app.shouldShowUpgradePrompt {
                     PlanCard(
                         title: "Free Plan",

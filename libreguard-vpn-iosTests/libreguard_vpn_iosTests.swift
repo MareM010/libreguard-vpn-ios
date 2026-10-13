@@ -1611,6 +1611,36 @@ struct libreguard_vpn_iosTests {
         #expect(store.finishedIDs.isEmpty)
     }
 
+    @Test func accountSwitchDuringBrowserRecoveryCannotRedeemOrGrant() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let browser = ImmediateRecoveryBrowser()
+        let app = makeStartupApp(backend: backend, vpn: StartupVPNManager(status: .disconnected),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!, appleRecoveryBrowser: browser)
+        app.session = startupSession()
+        app.pendingAppleAccountRecovery = appleTransaction(id: 801)
+        browser.onAuthenticate = {
+            app.session = AuthSession(accessToken: "other", refreshToken: "other", email: "other@example.com", userId: "other-user", deviceId: "other-device")
+        }
+        await app.resolveAppleAccountLink()
+        #expect(backend.appleRecoveryRedeemCalls == 0)
+        #expect(app.pendingAppleAccountRecovery == nil)
+        #expect(app.subscription == nil)
+        #expect(!app.isResolvingAppleAccount)
+    }
+
+    @Test func recoveryCallbackCannotGrantWithoutMatchingStateAndPkce() async throws {
+        let backend = StartupBackendStub(storedSession: startupSession(), restoreResults: [])
+        let browser = ImmediateRecoveryBrowser()
+        let app = makeStartupApp(backend: backend, vpn: StartupVPNManager(status: .disconnected),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!, appleRecoveryBrowser: browser)
+        app.session = startupSession()
+        app.pendingAppleAccountRecovery = appleTransaction(id: 802)
+        await app.resolveAppleAccountLink()
+        #expect(backend.appleRecoveryRedeemCalls == 0)
+        #expect(backend.appleVerificationAllowTransfer.isEmpty)
+        #expect(app.pendingAppleAccountRecovery != nil)
+    }
+
     @Test func passwordResetRequestsUseUnauthenticatedAccountEndpoints() async throws {
         try await withSerializedRequests {
             var requestCount = 0
@@ -2400,7 +2430,8 @@ struct libreguard_vpn_iosTests {
         appleSignIn: AppleSigning? = nil,
         appleCredentialStateChecker: AppleCredentialStateChecking? = nil,
         appleCredentialBindingStore: AppleCredentialBindingStoring? = nil,
-        notificationCenter: NotificationCenter = .default
+        notificationCenter: NotificationCenter = .default,
+        appleRecoveryBrowser: AppleRecoveryBrowserServing? = nil
     ) -> AppModel {
         VPNTestFixtures.track(AppModel(
             api: backend,
@@ -2414,7 +2445,8 @@ struct libreguard_vpn_iosTests {
             latencyProbe: NoOpLatencyProbe(),
             vpnManager: vpn,
             defaults: defaults,
-            appleVerificationRetryDelays: appleVerificationRetryDelays
+            appleVerificationRetryDelays: appleVerificationRetryDelays,
+            appleRecoveryBrowser: appleRecoveryBrowser
         ))
     }
 
@@ -2836,6 +2868,16 @@ final class StartupBackendStub: BackendServicing, SessionInvalidationObserving {
     }
     func fetchDNSPreference() async throws -> DNSPreference { try unsupported() }
     func updateDNSPreference(adBlockingEnabled: Bool) async throws -> DNSPreference { try unsupported() }
+    var appleRecoveryRedeemCalls = 0
+    func startAppleRecovery(transaction: String, state: String, challenge: String, environment: AppleAPIEnvironment) async throws -> AppleRecoveryStart {
+        let id = UUID()
+        return AppleRecoveryStart(recoveryId: id, authorizationUrl: URL(string: "https://management.libreguard.net/Account/ApplePurchaseRecovery/\(id.uuidString)#launch=\(String(repeating: "a", count: 43))")!, expiresAtUtc: Date().addingTimeInterval(600))
+    }
+    func redeemAppleRecovery(id: UUID, verifier: String, environment: AppleAPIEnvironment) async throws -> AppleRecoveryStatus {
+        appleRecoveryRedeemCalls += 1
+        throw AppleRecoveryError.unavailable
+    }
+    func cancelAppleRecovery(id: UUID, environment: AppleAPIEnvironment) async throws {}
     func fetchAppleAccountToken(environment: AppleAPIEnvironment) async throws -> UUID {
         requestedAppleEnvironments.append(environment)
         return appleAccountToken
@@ -3147,4 +3189,13 @@ private final class ControlledGoogleSigner: GoogleSigning {
         callback?.resume(throwing: CancellationError())
     }
     func handle(url: URL) -> Bool { false }
+}
+
+@MainActor private final class ImmediateRecoveryBrowser: AppleRecoveryBrowserServing {
+    var onAuthenticate: (() -> Void)?
+    func authenticate(url: URL, callbackScheme: String) async throws -> URL {
+        onAuthenticate?()
+        return URL(string: "\(callbackScheme)://complete?recoveryId=\(UUID().uuidString)&state=wrong")!
+    }
+    func cancel() {}
 }

@@ -41,6 +41,14 @@ final class AppModel: ObservableObject {
             }
             guard oldValue?.userId != session?.userId else { return }
             accountStateGeneration &+= 1
+            appleAccountRecoveryBrowser.cancel()
+            activeAppleAccountRecovery = nil
+            pendingAppleAccountRecovery = nil
+            isAppleRecoveryConfirmationPresented = false
+            isResolvingAppleAccount = false
+            processingAppleFamilies.removeAll()
+            processingAppleTransactionIDs.removeAll()
+            pendingAppleSubscriptionTransfer = nil
             appleRecoveryTask?.cancel()
             appleRecoveryTask = nil
             appleRecoveryAccountID = nil
@@ -82,6 +90,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var isPurchasingAppleSubscription = false
     @Published private(set) var isRestoringApplePurchases = false
     @Published var applePurchaseMessage: String?
+    @Published var pendingAppleAccountRecovery: AppleStoreTransaction?
+    @Published var isAppleRecoveryConfirmationPresented = false
+    @Published private(set) var isResolvingAppleAccount = false
+    private let appleAccountRecoveryBrowser: AppleRecoveryBrowserServing
+    private var activeAppleAccountRecovery: (id: UUID, environment: AppleAPIEnvironment)?
+    private var processingAppleFamilies = Set<String>()
     @Published var pendingAppleSubscriptionTransfer: PendingAppleSubscriptionTransfer?
     @Published var twoFactorStatus: TwoFactorStatus?
     @Published var authenticatorSetup: AuthenticatorSetup?
@@ -250,13 +264,15 @@ final class AppModel: ObservableObject {
         eventNotifier: VPNEventNotifying? = nil,
         liveActivityController: VPNLiveActivityControlling? = nil,
         defaults: UserDefaults = .standard,
-        appleVerificationRetryDelays: [UInt64] = [0, 1, 3]
+        appleVerificationRetryDelays: [UInt64] = [0, 1, 3],
+        appleRecoveryBrowser: AppleRecoveryBrowserServing? = nil
     ) {
+        self.appleAccountRecoveryBrowser = appleRecoveryBrowser ?? AppleRecoveryBrowser()
         let resolvedAPI = api ?? APIClient()
         self.api = resolvedAPI
         self.newsletterConsent = NewsletterConsentModel(api: resolvedAPI)
         self.appleStore = appleStore ?? AppleSubscriptionStore()
-        self.appleVerificationRetryDelays = appleVerificationRetryDelays.isEmpty ? [0] : appleVerificationRetryDelays
+        self.appleVerificationRetryDelays = appleVerificationRetryDelays.isEmpty ? [0] : Array(appleVerificationRetryDelays.prefix(3))
         self.google = google ?? GoogleSignInService()
         self.openGoogleLinkingPage = openGoogleLinkingPage ?? {
             UIApplication.shared.open(URL(string: "https://management.libreguard.net/Identity/Account/Manage/ExternalLogins")!)
@@ -1256,11 +1272,47 @@ final class AppModel: ObservableObject {
     }
 
     func confirmAppleSubscriptionTransfer(_ transaction: AppleStoreTransaction) async {
+        guard pendingAppleSubscriptionTransfer?.id == transaction.id, let userID = session?.userId else { return }
+        let generation = accountStateGeneration
         guard !stopForAppleVerificationCooldown() else { return }
         isRestoringApplePurchases = true
-        defer { isRestoringApplePurchases = false }
+        defer { if isCurrentAppleAccount(userID, generation: generation) { isRestoringApplePurchases = false } }
         pendingAppleSubscriptionTransfer = nil
         await processAppleTransaction(transaction, allowTransfer: true)
+    }
+
+    func resolveAppleAccountLink() async {
+        guard let transaction = pendingAppleAccountRecovery, let userID = session?.userId,
+            !isResolvingAppleAccount, !stopForAppleVerificationCooldown() else { return }
+        let generation = accountStateGeneration
+        isResolvingAppleAccount = true
+        defer { if isCurrentAppleAccount(userID, generation: generation) { isResolvingAppleAccount = false } }
+        var request: AppleRecoveryStart?
+        do {
+            let proof = try AppleRecoveryProof()
+            let started = try await api.startAppleRecovery(transaction: transaction.signedTransactionInfo, state: proof.state,
+                challenge: proof.challenge, environment: transaction.environment)
+            guard isCurrentAppleAccount(userID, generation: generation) else { return }
+            request = started
+            activeAppleAccountRecovery = (started.recoveryId, transaction.environment)
+            try proof.validate(start: started)
+            let callback = try await appleAccountRecoveryBrowser.authenticate(url: started.authorizationUrl, callbackScheme: "libreguard-ios-recovery")
+            guard isCurrentAppleAccount(userID, generation: generation) else { return }
+            try proof.validate(callback: callback, id: started.recoveryId, scheme: "libreguard-ios-recovery")
+            let redeemed = try await api.redeemAppleRecovery(id: started.recoveryId, verifier: proof.verifier, environment: transaction.environment)
+            guard isCurrentAppleAccount(userID, generation: generation) else { return }
+            guard redeemed.recoveryId == started.recoveryId, redeemed.status == "ready", redeemed.expiresAtUtc > Date() else { throw AppleRecoveryError.invalidResponse }
+            pendingAppleAccountRecovery = nil
+            activeAppleAccountRecovery = nil
+            await processAppleTransaction(transaction, allowTransfer: true)
+        } catch {
+            guard isCurrentAppleAccount(userID, generation: generation) else { return }
+            if let request { try? await api.cancelAppleRecovery(id: request.recoveryId, environment: transaction.environment) }
+            guard isCurrentAppleAccount(userID, generation: generation) else { return }
+            activeAppleAccountRecovery = nil
+            if recordAppleVerificationRateLimit(error) { return }
+            applePurchaseMessage = error is CancellationError ? "Account recovery cancelled. The purchase remains linked to its current account." : error.localizedDescription
+        }
     }
 
     func cancelAppleSubscriptionTransfer() {
@@ -1558,6 +1610,10 @@ final class AppModel: ObservableObject {
     }
 
     func signOut() async {
+        if let recovery = activeAppleAccountRecovery {
+            try? await api.cancelAppleRecovery(id: recovery.id, environment: recovery.environment)
+        }
+        appleAccountRecoveryBrowser.cancel()
         // Remote logout is best effort. Never leave a locally active tunnel
         // up while waiting for it to finish.
         async let remoteLogout: Void = api.logout()
@@ -2100,10 +2156,19 @@ final class AppModel: ObservableObject {
         guard !Task.isCancelled, isCurrentAppleAccount(accountUserID, generation: generation) else { return }
         let unfinished = await appleStore.unfinishedTransactions()
         var seenIDs = Set<UInt64>()
-        for update in current + unfinished {
+        var seenFamilies = Set<String>()
+        let updates = (current + unfinished).sorted { a, b in
+            if case let .verified(x) = a, case let .verified(y) = b { return (x.purchaseDate ?? .distantPast) > (y.purchaseDate ?? .distantPast) }
+            return false
+        }
+        for update in updates {
             guard !Task.isCancelled, isCurrentAppleAccount(accountUserID, generation: generation) else { return }
             if case let .verified(transaction) = update,
                !seenIDs.insert(transaction.id).inserted { continue }
+            if case let .verified(transaction) = update {
+                let key = "\(transaction.environment.rawValue):\(transaction.originalID)"
+                if !seenFamilies.insert(key).inserted { continue }
+            }
             await processAppleUpdate(update)
             if shouldStopAppleRecovery(after: update) { break }
         }
@@ -2139,9 +2204,13 @@ final class AppModel: ObservableObject {
     }
 
     private func processAppleTransaction(_ transaction: AppleStoreTransaction, allowTransfer: Bool) async {
+        let transactionGeneration = accountStateGeneration
+        let familyKey = "\(transactionGeneration):\(transaction.environment.rawValue):\(transaction.originalID)"
+        guard processingAppleFamilies.insert(familyKey).inserted else { return }
+        defer { processingAppleFamilies.remove(familyKey) }
         guard let accountUserID = session?.userId,
               processingAppleTransactionIDs.insert(transaction.id).inserted else { return }
-        defer { processingAppleTransactionIDs.remove(transaction.id) }
+        defer { if isCurrentAppleAccount(accountUserID, generation: transactionGeneration) { processingAppleTransactionIDs.remove(transaction.id) } }
         if stopForAppleVerificationCooldown() {
             unresolvedAppleTransactionIDs.insert(transaction.id)
             return
@@ -2150,7 +2219,6 @@ final class AppModel: ObservableObject {
             applePurchaseMessage = AppleStoreError.unsupportedEnvironment.localizedDescription
             return
         }
-        let transactionGeneration = accountStateGeneration
         logger.info(
             "Apple subscription verification started; account=\(accountUserID, privacy: .private(mask: .hash)), transaction=\(transaction.id, privacy: .public), product=\(transaction.productID, privacy: .public), environment=\(String(describing: transaction.environment), privacy: .public), appAccountTokenPresent=\(transaction.appAccountToken != nil, privacy: .public), allowTransfer=\(allowTransfer, privacy: .public)"
         )
@@ -2189,17 +2257,20 @@ final class AppModel: ObservableObject {
                 return
             } catch let error as APIError {
                 guard isCurrentAppleAccount(accountUserID, generation: transactionGeneration) else { return }
+                if error.code == "APPLE_ACCOUNT_TOKEN_MISMATCH" {
+                    pendingAppleAccountRecovery = transaction
+                }
                 if error.code == "APPLE_SUBSCRIPTION_TRANSFER_REQUIRED", !allowTransfer {
                     unresolvedAppleTransactionIDs.insert(transaction.id)
                     pendingAppleSubscriptionTransfer = PendingAppleSubscriptionTransfer(transaction: transaction)
                     return
                 }
-                if isRetryableAppleVerificationError(error), attempt + 1 < appleVerificationRetryDelays.count { continue }
-                logApplePurchaseFailure(error, stage: "verifying the Apple transaction")
                 if recordAppleVerificationRateLimit(error) {
                     unresolvedAppleTransactionIDs.insert(transaction.id)
                     return
                 }
+                if isRetryableAppleVerificationError(error), attempt + 1 < appleVerificationRetryDelays.count { continue }
+                logApplePurchaseFailure(error, stage: "verifying the Apple transaction")
                 if error.code == "APPLE_ACCOUNT_TOKEN_MISMATCH" {
                     unresolvedAppleTransactionIDs.insert(transaction.id)
                     await logAppleAccountLinkDiagnostic(transaction, accountUserID: accountUserID, generation: transactionGeneration)
@@ -2260,7 +2331,7 @@ final class AppModel: ObservableObject {
 
     private func recordAppleVerificationRateLimit(_ error: Error) -> Bool {
         guard let error = error as? APIError,
-              error.statusCode == 429 || error.code == "RATE_LIMIT_EXCEEDED",
+              error.statusCode == 429 || error.code == "RATE_LIMIT_EXCEEDED" || ((error.statusCode ?? 0) >= 500 && error.retryAfterSeconds != nil),
               let userID = session?.userId else { return false }
         let retrySeconds = max(1, error.retryAfterSeconds ?? 900)
         let retryDate = Date().addingTimeInterval(TimeInterval(retrySeconds))
@@ -2293,7 +2364,7 @@ final class AppModel: ObservableObject {
         }
         switch apiError.code {
         case "APPLE_ACCOUNT_TOKEN_MISMATCH":
-            return "LibreGuard could not match this Apple purchase to your account. Contact support to check the purchase link."
+            return "This Apple purchase is linked to another LibreGuard account. Resolve the account link or sign in to that account."
         case "APPLE_SUBSCRIPTION_FAMILY_CONFLICT":
             return "Another active Apple subscription is already linked to this account."
         case "ACTIVE_EXTERNAL_SUBSCRIPTION":

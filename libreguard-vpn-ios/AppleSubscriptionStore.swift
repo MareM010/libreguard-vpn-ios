@@ -13,7 +13,7 @@ enum AppleSubscriptionPeriod: String, Sendable {
     case annual
 }
 
-enum AppleAPIEnvironment: Equatable, Sendable {
+enum AppleAPIEnvironment: String, Equatable, Sendable {
     case production
     case sandbox
     case xcode
@@ -38,6 +38,7 @@ struct AppleSubscriptionProduct: Identifiable, Equatable, Sendable {
 
 struct AppleStoreTransaction: Equatable, Sendable {
     let id: UInt64
+    let originalID: UInt64
     let productID: String
     let signedTransactionInfo: String
     let environment: AppleAPIEnvironment
@@ -47,8 +48,9 @@ struct AppleStoreTransaction: Equatable, Sendable {
 
     init(id: UInt64, productID: String, signedTransactionInfo: String,
          environment: AppleAPIEnvironment, purchaseDate: Date? = nil, expirationDate: Date? = nil,
-         appAccountToken: UUID? = nil) {
+         appAccountToken: UUID? = nil, originalID: UInt64? = nil) {
         self.id = id
+        self.originalID = originalID ?? id
         self.productID = productID
         self.signedTransactionInfo = signedTransactionInfo
         self.environment = environment
@@ -272,7 +274,7 @@ final class AppleSubscriptionStore: AppleSubscriptionStoreServing {
             environment: environment,
             purchaseDate: transaction.purchaseDate,
             expirationDate: transaction.expirationDate,
-            appAccountToken: transaction.appAccountToken
+            appAccountToken: transaction.appAccountToken, originalID: transaction.originalID
         )
     }
 }
