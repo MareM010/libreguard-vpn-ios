@@ -1624,8 +1624,20 @@ struct libreguard_vpn_iosTests {
         let old = Task { await app.purchaseSelectedAppleSubscription() }
         await backend.waitForFirstAppleVerification()
         app.session = AuthSession(accessToken: "other", refreshToken: "other", email: "other@example.com", userId: "other-user", deviceId: "other-device")
+        store.purchaseResult = .success(.success(appleTransaction(id: 804)))
         let current = Task { await app.purchaseSelectedAppleSubscription() }
-        await backend.waitForSecondAppleVerification()
+        for _ in 0..<200 {
+            if backend.appleVerificationAllowTransfer.count >= 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard backend.appleVerificationAllowTransfer.count == 2 else {
+            #expect(backend.appleVerificationAllowTransfer.count == 2, "Second purchase did not start: \(app.applePurchaseMessage ?? "no message")")
+            backend.releaseFirstAppleVerification()
+            backend.releaseSecondAppleVerification()
+            await old.value
+            await current.value
+            return
+        }
         backend.releaseFirstAppleVerification()
         await old.value
         #expect(app.isPurchasingAppleSubscription)
