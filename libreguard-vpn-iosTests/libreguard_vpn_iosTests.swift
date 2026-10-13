@@ -2932,13 +2932,14 @@ final class StartupBackendStub: BackendServicing, SessionInvalidationObserving {
     }
     func verifyAppleTransaction(_ signedTransactionInfo: String, allowTransfer: Bool, environment: AppleAPIEnvironment) async throws -> AppleTransactionVerificationResponse {
         appleVerificationAllowTransfer.append(allowTransfer)
-        if holdFirstAppleVerification, appleVerificationAllowTransfer.count == 1 {
+        let invocation = appleVerificationAllowTransfer.count
+        if holdFirstAppleVerification, invocation == 1 {
             firstAppleVerificationStarted = true
             firstAppleVerificationWaiter?.resume()
             firstAppleVerificationWaiter = nil
             await withCheckedContinuation { continuation in firstAppleVerificationRelease = continuation }
         }
-        if holdSecondAppleVerification, appleVerificationAllowTransfer.count == 2 {
+        if holdSecondAppleVerification, invocation == 2 {
             secondAppleVerificationStarted = true
             secondAppleVerificationWaiter?.resume()
             secondAppleVerificationWaiter = nil
