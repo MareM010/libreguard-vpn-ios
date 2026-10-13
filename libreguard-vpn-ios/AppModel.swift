@@ -1129,7 +1129,7 @@ final class AppModel: ObservableObject {
         let generation = accountStateGeneration
         isPurchasingAppleSubscription = true
         applePurchaseMessage = nil
-        defer { isPurchasingAppleSubscription = false }
+        defer { if isCurrentAppleAccount(accountUserID, generation: generation) { isPurchasingAppleSubscription = false } }
 
         var stage = "recovering previous purchases"
         do {
@@ -1230,7 +1230,7 @@ final class AppModel: ObservableObject {
         let generation = accountStateGeneration
         isRestoringApplePurchases = true
         applePurchaseMessage = nil
-        defer { isRestoringApplePurchases = false }
+        defer { if isCurrentAppleAccount(accountUserID, generation: generation) { isRestoringApplePurchases = false } }
 
         do {
             try await appleStore.sync()

@@ -1407,7 +1407,7 @@ struct libreguard_vpn_iosTests {
         #expect(store.finishedIDs.isEmpty)
         #expect(!app.isProUser)
         #expect(app.pendingAppleSubscriptionTransfer == nil)
-        #expect(app.applePurchaseMessage?.contains("could not match") == true)
+        #expect(app.applePurchaseMessage?.contains("linked to another LibreGuard account") == true)
     }
 
     @Test func appleVerificationRateLimitStopsRecoveryAndRepeatedPurchaseActions() async throws {
