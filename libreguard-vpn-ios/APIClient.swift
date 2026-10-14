@@ -40,6 +40,9 @@ protocol BackendServicing: AnyObject {
     func updateDNSPreference(adBlockingEnabled: Bool) async throws -> DNSPreference
     func fetchAppleAccountToken(environment: AppleAPIEnvironment) async throws -> UUID
     func verifyAppleTransaction(_ signedTransactionInfo: String, allowTransfer: Bool, environment: AppleAPIEnvironment) async throws -> AppleTransactionVerificationResponse
+    func startAppleRecovery(transaction: String, state: String, challenge: String, environment: AppleAPIEnvironment) async throws -> AppleRecoveryStart
+    func redeemAppleRecovery(id: UUID, verifier: String, environment: AppleAPIEnvironment) async throws -> AppleRecoveryStatus
+    func cancelAppleRecovery(id: UUID, environment: AppleAPIEnvironment) async throws
     func fetchTwoFactorStatus() async throws -> TwoFactorStatus
     func setupTwoFactor() async throws -> AuthenticatorSetup
     func enableTwoFactor(code: String) async throws -> [String]
@@ -418,7 +421,7 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
         let response: AppleAccountTokenResponse = try await send(
             .get,
             path: "/api/subscription/apple/account-token",
-            requestBaseURL: try appleBaseURL(for: environment)
+            requestBaseURL: try appleBaseURL(for: environment), expectedAccountId: sessionStore.session?.userId
         )
         return response.appAccountToken
     }
@@ -435,8 +438,23 @@ final class APIClient: BackendServicing, SessionInvalidationObserving {
                 signedTransactionInfo: signedTransactionInfo,
                 allowTransfer: allowTransfer
             ),
-            requestBaseURL: try appleBaseURL(for: environment)
+            requestBaseURL: try appleBaseURL(for: environment), expectedAccountId: sessionStore.session?.userId
         )
+    }
+
+    func startAppleRecovery(transaction: String, state: String, challenge: String, environment: AppleAPIEnvironment) async throws -> AppleRecoveryStart {
+        try await send(.post, path: "/api/subscription/apple/recovery",
+            body: AppleRecoveryRequestBody(signedTransactionInfo: transaction, state: state, codeChallenge: challenge),
+            requestBaseURL: try appleBaseURL(for: environment), expectedAccountId: sessionStore.session?.userId)
+    }
+    func redeemAppleRecovery(id: UUID, verifier: String, environment: AppleAPIEnvironment) async throws -> AppleRecoveryStatus {
+        try await send(.post, path: "/api/subscription/apple/recovery/\(id.uuidString)/redeem",
+            body: AppleRecoveryRedeemBody(codeVerifier: verifier),
+            requestBaseURL: try appleBaseURL(for: environment), expectedAccountId: sessionStore.session?.userId)
+    }
+    func cancelAppleRecovery(id: UUID, environment: AppleAPIEnvironment) async throws {
+        let _: AppleRecoveryStatus = try await send(.post, path: "/api/subscription/apple/recovery/\(id.uuidString)/cancel",
+            body: EmptyBody(), requestBaseURL: try appleBaseURL(for: environment), expectedAccountId: sessionStore.session?.userId)
     }
 
     private func appleBaseURL(for environment: AppleAPIEnvironment) throws -> URL {
@@ -864,4 +882,11 @@ private extension ISO8601DateFormatter {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
+}
+
+// Lightweight test backends may explicitly override these recovery operations.
+extension BackendServicing {
+    func startAppleRecovery(transaction: String, state: String, challenge: String, environment: AppleAPIEnvironment) async throws -> AppleRecoveryStart { throw AppleRecoveryError.unavailable }
+    func redeemAppleRecovery(id: UUID, verifier: String, environment: AppleAPIEnvironment) async throws -> AppleRecoveryStatus { throw AppleRecoveryError.unavailable }
+    func cancelAppleRecovery(id: UUID, environment: AppleAPIEnvironment) async throws {}
 }

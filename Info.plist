@@ -20,6 +20,7 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleURLTypes</key>
 	<array>
+		<dict><key>CFBundleURLSchemes</key><array><string>libreguard-ios-recovery</string></array></dict>
 		<dict>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
