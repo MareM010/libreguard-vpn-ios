@@ -1723,6 +1723,8 @@ private struct SettingsView: View {
     @State private var showProtocolSelection = false
     @State private var showDNSSettings = false
     @State private var showSignOutConfirmation = false
+    @State private var showDeleteAccountConfirmation = false
+    @State private var showAccountDeletionOpenError = false
     @State private var showOpenSourceLicenses = false
 
     let onUpgrade: () -> Void
@@ -1880,6 +1882,28 @@ private struct SettingsView: View {
                         }
                     }
 
+                    Button(role: .destructive) { showDeleteAccountConfirmation = true } label: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Label("Delete Account", systemImage: "trash")
+                                Spacer()
+                                Image(systemName: "arrow.up.right")
+                            }
+                            Text("Permanently delete your account and personal data on the web")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .foregroundStyle(Theme.destructive)
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Theme.destructive.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
+                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.destructive.opacity(0.45)))
+                    }
+                    .buttonStyle(.plain)
+                    .rippleEffect(tint: Theme.destructive, shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .accessibilityIdentifier("settings-delete-account-button")
+                    .gridCellColumns(usesExpandedLayout ? 2 : 1)
+
                     Button { showSignOutConfirmation = true } label: {
                         HStack {
                             Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
@@ -1942,9 +1966,34 @@ private struct SettingsView: View {
         } message: {
             Text("You will need to sign in again to use LibreGuard.")
         }
+        .confirmationDialog(
+            "Delete your LibreGuard account?",
+            isPresented: $showDeleteAccountConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Continue to Account Deletion", role: .destructive, action: openAccountDeletionPage)
+            Button("Manage Apple Subscriptions") {
+                openURL(URL(string: "https://apps.apple.com/account/subscriptions")!)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Continue to LibreGuard’s website to permanently delete your account and personal data. You may need to sign in again.\n\nDeleting your account does not cancel Apple billing. If you subscribed through Apple, cancel your LibreGuard subscription before continuing.")
+        }
+        .alert("Couldn’t Open Account Deletion", isPresented: $showAccountDeletionOpenError) {
+            Button("Try Again", action: openAccountDeletionPage)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Please try again to open the account deletion page in your browser.")
+        }
         .task {
             await app.refreshDNSPreference(showErrors: false)
             if app.twoFactorStatus == nil { await app.refreshAccountData(showErrors: false) }
+        }
+    }
+
+    private func openAccountDeletionPage() {
+        openURL(URL(string: "https://management.libreguard.net/Identity/Account/Manage/DeletePersonalData")!) { accepted in
+            showAccountDeletionOpenError = !accepted
         }
     }
 
